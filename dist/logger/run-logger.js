@@ -1,22 +1,83 @@
+import Database from "better-sqlite3";
+import { mkdirSync } from "fs";
+import { dirname, join } from "path";
+const DEFAULT_DB_PATH = join(process.cwd(), ".obsidi-claw", "runs.db");
 /**
- * RunLogger — records events that occur during an orchestrator run.
+ * RunLogger — SQLite-backed event store for orchestrator runs.
  *
- * Phase 3 (this file): console.log stub so the orchestrator has something
- * to call. No persistence.
+ * Schema:
+ *   runs  — one row per prompt round-trip (run_id PK)
+ *   trace — one row per RunEvent (run_id FK, many per run)
  *
- * TODO: Phase 4 — replace with SQLite backend.
- *   Schema sketch:
- *     runs(run_id TEXT PK, started_at INTEGER, ended_at INTEGER, stage TEXT, error TEXT)
- *     events(id INTEGER PK, run_id TEXT FK, type TEXT, timestamp INTEGER, payload TEXT)
+ * Session-level events (session_start / session_end) have no run_id;
+ * they are written to trace with run_id = NULL.
  *
- * TODO: Phase 4 — add getRunHistory(runId?: string): Promise<RunEvent[]>
- * TODO: Phase 7 — add getRuns(): Promise<RunSummary[]> for comparison engine
+ * TODO: Phase 7 — add getRuns() / getTrace() query methods for insight engine
  */
 export class RunLogger {
+    db;
+    constructor(dbPath = DEFAULT_DB_PATH) {
+        mkdirSync(dirname(dbPath), { recursive: true });
+        this.db = new Database(dbPath);
+        this.db.pragma("journal_mode = WAL");
+        this._initSchema();
+    }
+    _initSchema() {
+        this.db.exec(`
+      CREATE TABLE IF NOT EXISTS runs (
+        run_id     TEXT    PRIMARY KEY,
+        session_id TEXT    NOT NULL,
+        status     TEXT    NOT NULL DEFAULT 'running',
+        start_time INTEGER NOT NULL,
+        end_time   INTEGER
+      );
+
+      CREATE TABLE IF NOT EXISTS trace (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id     TEXT,
+        session_id TEXT    NOT NULL,
+        type       TEXT    NOT NULL,
+        timestamp  INTEGER NOT NULL,
+        payload    TEXT    NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS trace_run_id ON trace(run_id);
+    `);
+    }
     logEvent(event) {
-        // TODO: Phase 4 — write to SQLite instead
-        const ts = new Date(event.timestamp).toISOString();
-        console.log(`[${ts}] [${event.type}]`, JSON.stringify(event));
+        const sessionId = event.sessionId;
+        const runId = "runId" in event ? event.runId : null;
+        if (event.type === "prompt_received") {
+            this._insertRun(event.runId, sessionId, event.timestamp);
+        }
+        if (event.type === "prompt_complete") {
+            this._finalizeRun(event.runId, "done", event.timestamp);
+        }
+        else if (event.type === "prompt_error") {
+            this._finalizeRun(event.runId, "error", event.timestamp);
+        }
+        this._insertTrace(runId, sessionId, event.type, event.timestamp, event);
+    }
+    close() {
+        this.db.close();
+    }
+    // ── Private helpers ────────────────────────────────────────────────────────
+    _insertRun(runId, sessionId, startTime) {
+        this.db
+            .prepare(`INSERT OR IGNORE INTO runs (run_id, session_id, status, start_time)
+         VALUES (?, ?, 'running', ?)`)
+            .run(runId, sessionId, startTime);
+    }
+    _finalizeRun(runId, status, endTime) {
+        this.db
+            .prepare(`UPDATE runs SET status = ?, end_time = ? WHERE run_id = ?`)
+            .run(status, endTime, runId);
+    }
+    _insertTrace(runId, sessionId, type, timestamp, event) {
+        this.db
+            .prepare(`INSERT INTO trace (run_id, session_id, type, timestamp, payload)
+         VALUES (?, ?, ?, ?, ?)`)
+            .run(runId, sessionId, type, timestamp, JSON.stringify(event));
     }
 }
 //# sourceMappingURL=run-logger.js.map

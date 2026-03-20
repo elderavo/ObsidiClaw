@@ -1,149 +1,173 @@
 /**
- * ContextEngine — the RAG heart of ObsidiClaw.
+ * ContextEngine — the retrieval heart of ObsidiClaw.
  *
  * Responsibilities:
- * 1. On initialize(): configure Ollama embeddings, build VectorStoreIndex from md_db
- * 2. On build(prompt): retrieve top-K relevant notes, classify tool vs concept nodes,
- *    format a context package ready for injection into the pi session
+ * 1. initialize(): configure Ollama embeddings, open/sync SQLite graph,
+ *    build VectorStoreIndex from graph notes
+ * 2. build(prompt): hybrid retrieval (vector seeds + graph expansion),
+ *    package results into a ContextPackage for pi session injection
  *
  * The orchestrator calls this in the `context_inject` lifecycle stage, before
  * creating the pi agent session. The returned ContextPackage is injected into
  * the session via agentsFilesOverride, becoming part of the agent's system context.
  *
- * TODO: Phase 5 — graph traversal: follow [[wikilinks]] in retrieved notes to
- *   pull in linked nodes (breadth-first up to depth 2)
- * TODO: Phase 6 — tool execution: orchestrator runs suggestedTools, and their
- *   outputs are appended to formattedContext before agent sees it
+ * TODO: Phase 6 — tool execution: orchestrator runs suggestedTools and their
+ *   outputs are appended to formattedContext before the agent sees it
  */
-import { Settings, MetadataMode } from "llamaindex";
+import { mkdirSync } from "fs";
+import { dirname, join } from "path";
+import { Settings } from "llamaindex";
 import { OllamaEmbedding } from "@llamaindex/ollama";
-import { buildIndex } from "./indexer.js";
+import { syncMdDbToGraph, buildVectorIndexFromGraph } from "./indexer.js";
+import { hybridRetrieve } from "./retrieval/hybrid.js";
+import { SqliteGraphStore } from "./store/sqlite_graph.js";
 const DEFAULT_OLLAMA_HOST = process.env["OLLAMA_HOST"] ?? "10.0.132.100";
 const DEFAULT_EMBED_MODEL = process.env["OLLAMA_EMBED_MODEL"] ?? "nomic-embed-text:v1.5";
 const DEFAULT_TOP_K = 5;
 export class ContextEngine {
-    index = null;
+    vectorIndex = null;
+    graphStore = null;
     config;
     constructor(config) {
+        const mdDbPath = config.mdDbPath;
+        const defaultDbPath = join(dirname(mdDbPath), ".obsidi-claw", "graph.db");
         this.config = {
-            mdDbPath: config.mdDbPath,
+            mdDbPath,
+            dbPath: config.dbPath ?? defaultDbPath,
             ollamaHost: config.ollamaHost ?? DEFAULT_OLLAMA_HOST,
             embeddingModel: config.embeddingModel ?? DEFAULT_EMBED_MODEL,
             topK: config.topK ?? DEFAULT_TOP_K,
         };
     }
     /**
-     * Must be called before build(). Configures the embedding model and
-     * builds the VectorStoreIndex from md_db.
+     * Must be called before build(). Idempotent — safe to call multiple times.
      *
-     * Idempotent — safe to call multiple times (only indexes once).
+     * 1. Configures LlamaIndex embedding model (Ollama)
+     * 2. Opens the SQLite graph store (creates .obsidi-claw/ dir if needed)
+     * 3. Syncs md_db markdown files into the graph (two-pass: notes, then edges)
+     * 4. Builds in-memory VectorStoreIndex from graph notes
      */
     async initialize() {
-        if (this.index)
+        if (this.vectorIndex)
             return;
-        // Configure LlamaIndex to use Ollama for embeddings
+        // Ensure .obsidi-claw/ directory exists
+        mkdirSync(dirname(this.config.dbPath), { recursive: true });
+        // Configure LlamaIndex embeddings
         Settings.embedModel = new OllamaEmbedding({
             model: this.config.embeddingModel,
             config: { host: this.config.ollamaHost },
         });
-        console.log(`[context_engine] Indexing ${this.config.mdDbPath} ` +
-            `with embedding model "${this.config.embeddingModel}" ` +
-            `@ ${this.config.ollamaHost}`);
-        this.index = await buildIndex(this.config.mdDbPath);
-        console.log("[context_engine] Index ready");
+        console.log(`[context_engine] Initializing — mdDb: ${this.config.mdDbPath}, ` +
+            `db: ${this.config.dbPath}, ` +
+            `embed: ${this.config.embeddingModel} @ ${this.config.ollamaHost}`);
+        // Open graph store
+        this.graphStore = new SqliteGraphStore(this.config.dbPath);
+        // Sync md_db → graph (parse + upsert notes, then resolve wikilinks)
+        await syncMdDbToGraph(this.config.mdDbPath, this.graphStore);
+        // Build vector index from graph notes
+        this.vectorIndex = await buildVectorIndexFromGraph(this.graphStore);
+        console.log("[context_engine] Ready");
     }
     /**
      * Build a ContextPackage for the given prompt.
-     * Retrieves top-K relevant notes from md_db via vector similarity.
+     * Runs hybrid retrieval: vector seeds + graph-expanded neighbors.
      *
      * Throws if initialize() has not been called.
      */
     async build(prompt) {
-        if (!this.index) {
+        if (!this.vectorIndex || !this.graphStore) {
             throw new Error("ContextEngine not initialized. Call initialize() first.");
         }
         const t0 = Date.now();
-        const retriever = this.index.asRetriever({ similarityTopK: this.config.topK });
-        const rawResults = await retriever.retrieve(prompt);
-        const retrievedNotes = rawResults
-            .filter((r) => r.node.metadata["file_path"] !== undefined)
-            .map((r) => {
-            const path = String(r.node.metadata["file_path"] ?? "");
-            const type = inferNoteType(path);
-            const toolId = type === "tool" ? path.replace(/^tools\//, "").replace(/\.md$/, "") : undefined;
-            return {
-                path,
-                content: r.node.getContent(MetadataMode.NONE),
-                score: r.score ?? 0,
-                type,
-                toolId,
-            };
-        })
-            .sort((a, b) => b.score - a.score);
-        const suggestedTools = retrievedNotes
+        const { seedNotes, expandedNotes } = await hybridRetrieve(prompt, this.vectorIndex, this.graphStore, this.config.topK);
+        const allNotes = [...seedNotes, ...expandedNotes].sort((a, b) => b.score - a.score);
+        const suggestedTools = allNotes
             .filter((n) => n.type === "tool" && n.toolId !== undefined)
             .map((n) => n.toolId);
-        const formattedContext = formatContext(prompt, retrievedNotes);
+        const formattedContext = formatContext(seedNotes, expandedNotes);
         const retrievalMs = Date.now() - t0;
         return {
             query: prompt,
-            retrievedNotes,
+            retrievedNotes: allNotes,
             suggestedTools,
             formattedContext,
             retrievalMs,
             builtAt: Date.now(),
+            seedNoteIds: seedNotes.map((n) => n.noteId),
+            expandedNoteIds: expandedNotes.map((n) => n.noteId),
         };
     }
+    /**
+     * Close the underlying SQLite database.
+     * Call when the context engine is no longer needed.
+     */
+    close() {
+        this.graphStore?.close();
+        this.graphStore = null;
+        this.vectorIndex = null;
+    }
 }
 // ---------------------------------------------------------------------------
-// Helpers
+// Context formatting
 // ---------------------------------------------------------------------------
-function inferNoteType(relativePath) {
-    if (relativePath.startsWith("tools/"))
-        return "tool";
-    if (relativePath.startsWith("concepts/"))
-        return "concept";
-    return "index";
-}
 /**
- * Format the retrieved notes into a markdown block suitable for injection
- * into the pi agent's context via agentsFilesOverride.
+ * Format retrieved notes into a markdown block for injection into the pi
+ * agent's context via agentsFilesOverride.
  *
- * The agent sees this as additional system-level context before the user prompt.
- *
- * TODO: Phase 5 — refine format based on what the agent responds best to
- * TODO: Phase 6 — append tool execution outputs here
+ * Structure:
+ *   ## Seed Notes        — direct vector matches (depth 0)
+ *   ## Linked Notes      — graph-expanded neighbors (depth >= 1)
+ *   ## Suggested Tools   — tool nodes from either tier
  */
-function formatContext(query, notes) {
-    if (notes.length === 0) {
+function formatContext(seedNotes, expandedNotes) {
+    const allNotes = [...seedNotes, ...expandedNotes];
+    if (allNotes.length === 0) {
         return "<!-- ObsidiClaw: no relevant knowledge base context found for this query -->";
     }
-    const conceptNotes = notes.filter((n) => n.type === "concept" || n.type === "index");
-    const toolNotes = notes.filter((n) => n.type === "tool");
     const lines = [
         "<!-- ObsidiClaw Knowledge Base Context -->",
-        "<!-- Retrieved via RAG from md_db based on your query -->",
         "",
         "# Knowledge Base Context",
         "",
     ];
-    if (conceptNotes.length > 0) {
-        lines.push("## Relevant Notes");
-        for (const note of conceptNotes) {
-            lines.push(`\n### ${note.path} (score: ${note.score.toFixed(3)})`);
-            lines.push(note.content.trim());
-        }
+    // Seed notes (non-tool)
+    const seedConcepts = seedNotes.filter((n) => n.type !== "tool");
+    if (seedConcepts.length > 0) {
+        lines.push("## Seed Notes");
+        lines.push("_Directly relevant notes retrieved by semantic similarity._");
         lines.push("");
+        for (const note of seedConcepts) {
+            lines.push(`### ${note.path} (score: ${note.score.toFixed(3)})`);
+            lines.push(note.content.trim());
+            lines.push("");
+        }
     }
+    // Graph-expanded notes (non-tool)
+    const expandedConcepts = expandedNotes.filter((n) => n.type !== "tool");
+    if (expandedConcepts.length > 0) {
+        lines.push("## Linked Supporting Notes");
+        lines.push("_Notes linked to seed notes via [[wikilinks]]._");
+        lines.push("");
+        for (const note of expandedConcepts) {
+            const linkedFromPart = note.linkedFrom && note.linkedFrom.length > 0
+                ? ` | Linked from: ${note.linkedFrom.join(", ")}`
+                : "";
+            lines.push(`### ${note.path} (score: ${note.score.toFixed(3)}${linkedFromPart})`);
+            lines.push(note.content.trim());
+            lines.push("");
+        }
+    }
+    // Tool nodes (both tiers)
+    const toolNotes = allNotes.filter((n) => n.type === "tool");
     if (toolNotes.length > 0) {
         lines.push("## Suggested Tools");
-        lines.push("The following tools from the knowledge base may be relevant to this query.");
-        lines.push("Tool outputs will be available in a future phase.");
-        for (const note of toolNotes) {
-            lines.push(`\n### Tool: ${note.toolId} (${note.path})`);
-            lines.push(note.content.trim());
-        }
+        lines.push("_Tool nodes from the knowledge base. Tool outputs will be injected in Phase 6._");
         lines.push("");
+        for (const note of toolNotes) {
+            lines.push(`### Tool: ${note.toolId} (${note.path})`);
+            lines.push(note.content.trim());
+            lines.push("");
+        }
     }
     lines.push("<!-- End ObsidiClaw Context -->");
     return lines.join("\n");

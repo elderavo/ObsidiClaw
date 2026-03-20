@@ -1,24 +1,36 @@
 /**
- * Indexer — loads md_db markdown files and builds a LlamaIndex VectorStoreIndex.
+ * Indexer — syncs md_db to the SQLite graph store and builds a LlamaIndex
+ * VectorStoreIndex from the stored notes.
  *
- * Design notes:
- * - Reads all .md files from md_db/ recursively using Node.js fs
- * - Creates a LlamaIndex Document per file, with path metadata
- * - Builds an in-memory VectorStoreIndex (no disk persistence yet)
+ * Two-pass sync (required for foreign-key safe edge insertion):
+ *   Pass 1 — parse + upsert all notes into the notes table
+ *   Pass 2 — resolve [[wikilinks]] and insert edges
  *
- * TODO: Phase 5 — persist index to disk to avoid re-indexing every startup
- * TODO: Phase 5 — watch md_db for changes and incrementally update index
- * TODO: Phase 8 — re-index after insight_engine writes new notes to md_db
+ * buildVectorIndexFromGraph reads notes directly from SQLite so the vector
+ * index is always consistent with the graph.
+ *
+ * TODO: Phase 5 — persist index to disk to avoid re-embedding every startup
+ * TODO: Phase 5 — watch md_db for changes and incrementally update
+ * TODO: Phase 8 — re-index after insight_engine writes new notes
  */
-import { Document, VectorStoreIndex } from "llamaindex";
+import { VectorStoreIndex } from "llamaindex";
+import type { SqliteGraphStore } from "./store/sqlite_graph.js";
 /**
- * Load all markdown files from mdDbPath and return LlamaIndex Documents.
- * Each document's metadata includes the relative path from mdDbPath.
+ * Parse all .md files from mdDbPath and sync them into the graph store.
+ *
+ * Pass 1: upsert every note (notes table must be complete before edges).
+ * Pass 2: resolve [[wikilinks]] and replace edges for each note.
+ *
+ * Unresolved links (notes not in the db) are silently dropped —
+ * SqliteGraphStore.replaceEdges filters them out.
  */
-export declare function loadMdDbDocuments(mdDbPath: string): Promise<Document[]>;
+export declare function syncMdDbToGraph(mdDbPath: string, graphStore: SqliteGraphStore): Promise<void>;
 /**
- * Build a VectorStoreIndex from md_db documents.
+ * Build a LlamaIndex VectorStoreIndex from notes already in the graph store.
  * Requires Settings.embedModel to be configured before calling.
+ *
+ * Uses the stored body (frontmatter stripped) as document text.
+ * Metadata includes file_path (= noteId) and note_type for downstream filtering.
  */
-export declare function buildIndex(mdDbPath: string): Promise<VectorStoreIndex>;
+export declare function buildVectorIndexFromGraph(graphStore: SqliteGraphStore): Promise<VectorStoreIndex>;
 //# sourceMappingURL=indexer.d.ts.map

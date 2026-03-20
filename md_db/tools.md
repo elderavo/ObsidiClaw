@@ -5,8 +5,6 @@ created:
 updated:
 ---
 
-
-
 tools/network
 [[network]]
 tools/bash_core

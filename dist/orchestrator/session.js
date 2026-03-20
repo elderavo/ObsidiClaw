@@ -2,25 +2,22 @@
  * OrchestratorSession — long-lived wrapper around a single pi agent session.
  *
  * Lifecycle per session:
- *   construction → [first prompt] → context_inject → pi_session_created
+ *   construction → [first prompt] → pi_session_created
  *               → [all prompts]   → agent_prompt_sent → agent_done
  *
- * The pi agent session is created LAZILY on the first prompt so that the
- * ContextPackage (from RAG) is available to inject via agentsFilesOverride
- * before the pi session is initialized.
- *
- * On successive prompts within the same session:
- *   - The existing pi session is reused.
- *   - Context engine does NOT run again.
- *   - The agent retains its full conversation history.
+ * Context injection is handled by the ObsidiClaw ExtensionFactory wired into
+ * the DefaultResourceLoader. The extension intercepts before_agent_start on
+ * every turn, runs RAG, and injects formattedContext into the system prompt —
+ * no manual inject logic here.
  *
  * Logging:
  *   Every interface boundary emits a RunEvent to the RunLogger:
- *     prompt_received → context_inject_start → context_built → context_inject_end
- *     → pi_session_created → agent_prompt_sent → [agent_turn_start/end, tool_call/result]
+ *     prompt_received → pi_session_created (first prompt only)
+ *     → agent_prompt_sent → [agent_turn_start/end, tool_call/result]
  *     → agent_done → prompt_complete
  */
 import { createAgentSession, DefaultResourceLoader, SessionManager, } from "@mariozechner/pi-coding-agent";
+import { createObsidiClawExtension } from "../extension/factory.js";
 // ---------------------------------------------------------------------------
 // Provider constants — TODO: Phase 1 move to shared/config.ts
 // ---------------------------------------------------------------------------
@@ -53,13 +50,9 @@ export class OrchestratorSession {
     /**
      * Send a prompt to the pi agent.
      *
-     * First call:
-     *   1. Runs the context engine (if configured) to build a ContextPackage
-     *   2. Creates the pi agent session with context injected into system context
-     *   3. Sends the original prompt to the agent
-     *
-     * Subsequent calls:
-     *   - Sends directly to the existing pi session (no context engine re-run)
+     * First call: creates the pi session (extension handles context injection).
+     * Subsequent calls: reuses existing session; agent retains full conversation history.
+     * Context injection runs on every turn via the before_agent_start extension hook.
      */
     async prompt(text) {
         const runId = crypto.randomUUID();
@@ -67,25 +60,9 @@ export class OrchestratorSession {
         const startTime = Date.now();
         this.emit({ type: "prompt_received", sessionId: this.sessionId, runId, timestamp: Date.now(), text });
         try {
-            // ── First prompt: build context + create pi session ──────────────────
+            // ── First prompt: create pi session ───────────────────────────────────
             if (!this.piSessionReady) {
-                let contextPackage;
-                if (this.contextEngine) {
-                    this.emit({ type: "context_inject_start", sessionId: this.sessionId, runId, timestamp: Date.now() });
-                    contextPackage = await this.contextEngine.build(text);
-                    this.emit({
-                        type: "context_built",
-                        sessionId: this.sessionId,
-                        runId,
-                        timestamp: Date.now(),
-                        noteCount: contextPackage.retrievedNotes.length,
-                        toolCount: contextPackage.suggestedTools.length,
-                        retrievalMs: contextPackage.retrievalMs,
-                    });
-                    // TODO: Phase 6 — run suggestedTools here, append outputs to contextPackage
-                    this.emit({ type: "context_inject_end", sessionId: this.sessionId, runId, timestamp: Date.now() });
-                }
-                this.piSession = await this.createPiSession(contextPackage);
+                this.piSession = await this.createPiSession();
                 this.piSessionReady = true;
                 // Subscribe ONCE — handler references this.currentRunId which is updated
                 // before each prompt(), so events are always attributed to the right run.
@@ -95,13 +72,13 @@ export class OrchestratorSession {
                     sessionId: this.sessionId,
                     runId,
                     timestamp: Date.now(),
-                    contextInjected: contextPackage !== undefined,
+                    contextInjected: this.contextEngine !== undefined,
                 });
             }
             // ── Send prompt to agent ──────────────────────────────────────────────
+            // The ObsidiClaw extension intercepts before_agent_start, runs RAG, and
+            // injects context into the system prompt before the agent loop starts.
             this.emit({ type: "agent_prompt_sent", sessionId: this.sessionId, runId, timestamp: Date.now() });
-            // piSession is guaranteed non-null here: set in the block above (first prompt)
-            // or was already set on a previous prompt.
             await this.piSession.prompt(text);
             await this.piSession.agent.waitForIdle();
             this.emit({
@@ -190,19 +167,18 @@ export class OrchestratorSession {
         }
     }
     /**
-     * Creates a pi agent session configured for Ollama.
-     * If a ContextPackage is provided, its formattedContext is injected as an
-     * AGENTS.md-equivalent via agentsFilesOverride — the agent sees it as
-     * system-level context before the first user prompt.
+     * Creates a pi agent session configured for Ollama, with the ObsidiClaw
+     * context-injection extension wired in.
      *
-     * This is called ONCE per OrchestratorSession (lazy, on first prompt).
+     * Called ONCE per OrchestratorSession (lazy, on first prompt).
      *
      * TODO: Phase 1 — pull Ollama config from shared/config.ts
      */
-    async createPiSession(contextPackage) {
+    async createPiSession() {
         const model = this.config.model ?? OLLAMA_MODEL;
         const loader = new DefaultResourceLoader({
             extensionFactories: [
+                // Register Ollama as the LLM provider
                 (pi) => {
                     pi.registerProvider("ollama", {
                         baseUrl: OLLAMA_BASE_URL,
@@ -225,22 +201,12 @@ export class OrchestratorSession {
                         ],
                     });
                 },
+                // ObsidiClaw context injection — runs RAG on every turn via before_agent_start.
+                // Passes the already-initialized engine so the extension reuses it.
+                ...(this.contextEngine
+                    ? [createObsidiClawExtension({ contextEngine: this.contextEngine })]
+                    : []),
             ],
-            // Inject RAG context as system-level context (equivalent to AGENTS.md).
-            // The agent sees this before every turn for the lifetime of the session.
-            ...(contextPackage
-                ? {
-                    agentsFilesOverride: (current) => ({
-                        agentsFiles: [
-                            ...current.agentsFiles,
-                            {
-                                path: "obsidi-claw://md_db-context",
-                                content: contextPackage.formattedContext,
-                            },
-                        ],
-                    }),
-                }
-                : {}),
             ...(this.config.systemPrompt
                 ? { systemPromptOverride: () => this.config.systemPrompt }
                 : {}),

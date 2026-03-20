@@ -1,7 +1,7 @@
 /**
- * Context engine type definitions.
+ * Context engine public types.
  *
- * TODO: Phase 1 — migrate to shared/types.ts once interfaces stabilize.
+ * TODO: Phase 1 — migrate to shared/types.ts once stable.
  */
 export {};
 //# sourceMappingURL=types.js.map

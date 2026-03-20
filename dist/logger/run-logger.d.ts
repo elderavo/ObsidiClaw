@@ -1,19 +1,24 @@
 import type { RunEvent } from "../orchestrator/types.js";
 /**
- * RunLogger — records events that occur during an orchestrator run.
+ * RunLogger — SQLite-backed event store for orchestrator runs.
  *
- * Phase 3 (this file): console.log stub so the orchestrator has something
- * to call. No persistence.
+ * Schema:
+ *   runs  — one row per prompt round-trip (run_id PK)
+ *   trace — one row per RunEvent (run_id FK, many per run)
  *
- * TODO: Phase 4 — replace with SQLite backend.
- *   Schema sketch:
- *     runs(run_id TEXT PK, started_at INTEGER, ended_at INTEGER, stage TEXT, error TEXT)
- *     events(id INTEGER PK, run_id TEXT FK, type TEXT, timestamp INTEGER, payload TEXT)
+ * Session-level events (session_start / session_end) have no run_id;
+ * they are written to trace with run_id = NULL.
  *
- * TODO: Phase 4 — add getRunHistory(runId?: string): Promise<RunEvent[]>
- * TODO: Phase 7 — add getRuns(): Promise<RunSummary[]> for comparison engine
+ * TODO: Phase 7 — add getRuns() / getTrace() query methods for insight engine
  */
 export declare class RunLogger {
+    private readonly db;
+    constructor(dbPath?: string);
+    private _initSchema;
     logEvent(event: RunEvent): void;
+    close(): void;
+    private _insertRun;
+    private _finalizeRun;
+    private _insertTrace;
 }
 //# sourceMappingURL=run-logger.d.ts.map

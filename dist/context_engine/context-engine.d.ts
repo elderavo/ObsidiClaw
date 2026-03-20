@@ -1,38 +1,45 @@
 /**
- * ContextEngine — the RAG heart of ObsidiClaw.
+ * ContextEngine — the retrieval heart of ObsidiClaw.
  *
  * Responsibilities:
- * 1. On initialize(): configure Ollama embeddings, build VectorStoreIndex from md_db
- * 2. On build(prompt): retrieve top-K relevant notes, classify tool vs concept nodes,
- *    format a context package ready for injection into the pi session
+ * 1. initialize(): configure Ollama embeddings, open/sync SQLite graph,
+ *    build VectorStoreIndex from graph notes
+ * 2. build(prompt): hybrid retrieval (vector seeds + graph expansion),
+ *    package results into a ContextPackage for pi session injection
  *
  * The orchestrator calls this in the `context_inject` lifecycle stage, before
  * creating the pi agent session. The returned ContextPackage is injected into
  * the session via agentsFilesOverride, becoming part of the agent's system context.
  *
- * TODO: Phase 5 — graph traversal: follow [[wikilinks]] in retrieved notes to
- *   pull in linked nodes (breadth-first up to depth 2)
- * TODO: Phase 6 — tool execution: orchestrator runs suggestedTools, and their
- *   outputs are appended to formattedContext before agent sees it
+ * TODO: Phase 6 — tool execution: orchestrator runs suggestedTools and their
+ *   outputs are appended to formattedContext before the agent sees it
  */
 import type { ContextEngineConfig, ContextPackage } from "./types.js";
 export declare class ContextEngine {
-    private index;
+    private vectorIndex;
+    private graphStore;
     private readonly config;
     constructor(config: ContextEngineConfig);
     /**
-     * Must be called before build(). Configures the embedding model and
-     * builds the VectorStoreIndex from md_db.
+     * Must be called before build(). Idempotent — safe to call multiple times.
      *
-     * Idempotent — safe to call multiple times (only indexes once).
+     * 1. Configures LlamaIndex embedding model (Ollama)
+     * 2. Opens the SQLite graph store (creates .obsidi-claw/ dir if needed)
+     * 3. Syncs md_db markdown files into the graph (two-pass: notes, then edges)
+     * 4. Builds in-memory VectorStoreIndex from graph notes
      */
     initialize(): Promise<void>;
     /**
      * Build a ContextPackage for the given prompt.
-     * Retrieves top-K relevant notes from md_db via vector similarity.
+     * Runs hybrid retrieval: vector seeds + graph-expanded neighbors.
      *
      * Throws if initialize() has not been called.
      */
     build(prompt: string): Promise<ContextPackage>;
+    /**
+     * Close the underlying SQLite database.
+     * Call when the context engine is no longer needed.
+     */
+    close(): void;
 }
 //# sourceMappingURL=context-engine.d.ts.map

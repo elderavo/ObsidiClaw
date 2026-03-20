@@ -46,6 +46,7 @@ const rl = createInterface({
     prompt: "you> ",
     terminal: true,
 });
+let activePrompt = null;
 rl.prompt();
 rl.on("line", async (line) => {
     const text = line.trim();
@@ -55,18 +56,17 @@ rl.on("line", async (line) => {
     }
     rl.pause();
     process.stdout.write("\nagent> ");
-    try {
-        await session.prompt(text);
-        process.stdout.write("\n");
-    }
-    catch (err) {
-        console.error("\n[error]", err instanceof Error ? err.message : String(err));
-    }
-    rl.resume();
-    rl.prompt();
+    activePrompt = session.prompt(text).then(() => { process.stdout.write("\n"); }, (err) => { console.error("\n[error]", err instanceof Error ? err.message : String(err)); }).finally(() => {
+        activePrompt = null;
+        rl.resume();
+        rl.prompt();
+    });
 });
-rl.on("close", () => {
+rl.on("close", async () => {
+    if (activePrompt)
+        await activePrompt;
     session.dispose();
+    logger.close();
     console.log("\n[obsidi-claw] Session ended.");
     process.exit(0);
 });
