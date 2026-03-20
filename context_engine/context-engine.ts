@@ -131,6 +131,16 @@ export class ContextEngine {
   }
 
   /**
+   * Return the stripped body of a specific note by relative path.
+   * Returns null if the note is not in the graph or the engine is not initialized.
+   *
+   * The body is already frontmatter-stripped (stored without frontmatter by the parser).
+   */
+  getNoteContent(relativePath: string): string | null {
+    return this.graphStore?.getNoteByPath(relativePath)?.body ?? null;
+  }
+
+  /**
    * Close the underlying SQLite database.
    * Call when the context engine is no longer needed.
    */

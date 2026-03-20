@@ -136,33 +136,21 @@ export function createObsidiClawExtension(
       },
     });
 
-    // ── before_agent_start: warm context + standing tool reminder ─────────
+    // ── before_agent_start: inject preferences + standing tool reminder ────
+    // Only preferences.md is injected here. Pi uses retrieve_context for
+    // project-specific RAG on demand.
     pi.on("before_agent_start", async (event, ctx) => {
       try {
-        if (ctx.hasUI) ctx.ui.setWorkingMessage("ObsidiClaw: retrieving context…");
+        const prefsContent = engine.getNoteContent("preferences.md");
 
-        const pkg = await engine.build(event.prompt);
-
-        if (ctx.hasUI) ctx.ui.setWorkingMessage();
-
-        logger?.logSynthesis({
-          sessionId: ctx.sessionManager.getSessionId(),
-          timestamp: Date.now(),
-          promptSnippet: event.prompt.slice(0, 120),
-          seedCount: pkg.seedNoteIds?.length ?? 0,
-          expandedCount: pkg.expandedNoteIds?.length ?? 0,
-          toolCount: pkg.suggestedTools.length,
-          retrievalMs: pkg.retrievalMs,
-          rawChars: pkg.rawChars,
-          strippedChars: pkg.strippedChars,
-          estimatedTokens: pkg.estimatedTokens,
-        });
+        const contextBlock = prefsContent
+          ? `<!-- ObsidiClaw: Preferences -->\n\n${prefsContent}\n\n<!-- End ObsidiClaw Preferences -->`
+          : "";
 
         return {
           systemPrompt:
             event.systemPrompt +
-            "\n\n" +
-            pkg.formattedContext +
+            (contextBlock ? "\n\n" + contextBlock : "") +
             "\n\n" +
             TOOL_REMINDER,
         };

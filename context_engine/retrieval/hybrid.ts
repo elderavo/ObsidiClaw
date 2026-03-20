@@ -40,8 +40,7 @@ export async function hybridRetrieve(
   const retriever = vectorIndex.asRetriever({ similarityTopK: topK });
   const rawResults = await retriever.retrieve(query);
 
-  const seedNotes: RetrievedNote[] = [];
-  const seedScoreByNoteId = new Map<string, number>();
+  const allSeedNotes: RetrievedNote[] = [];
 
   for (const r of rawResults) {
     const path = String(r.node.metadata["file_path"] ?? "");
@@ -50,7 +49,7 @@ export async function hybridRetrieve(
     const score = r.score ?? 0;
     const stored = graphStore.getNoteByPath(path);
 
-    seedNotes.push({
+    allSeedNotes.push({
       noteId: path,
       path,
       content: r.node.getContent(MetadataMode.NONE),
@@ -60,8 +59,14 @@ export async function hybridRetrieve(
       retrievalSource: "vector",
       depth: 0,
     });
+  }
 
-    seedScoreByNoteId.set(path, score);
+  // Filter index-type notes — they are navigation/TOC files, not useful context
+  const seedNotes = allSeedNotes.filter((n) => n.type !== "index");
+
+  const seedScoreByNoteId = new Map<string, number>();
+  for (const n of seedNotes) {
+    seedScoreByNoteId.set(n.noteId, n.score);
   }
 
   // ── Step 2: graph expansion ───────────────────────────────────────────────
@@ -100,7 +105,10 @@ export async function hybridRetrieve(
     });
   }
 
-  return { seedNotes, expandedNotes };
+  return {
+    seedNotes,
+    expandedNotes: expandedNotes.filter((n) => n.type !== "index"),
+  };
 }
 
 // ---------------------------------------------------------------------------
