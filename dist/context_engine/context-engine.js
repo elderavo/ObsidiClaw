@@ -21,6 +21,7 @@ import { OllamaEmbedding } from "@llamaindex/ollama";
 import { syncMdDbToGraph, buildVectorIndexFromGraph } from "./indexer.js";
 import { hybridRetrieve } from "./retrieval/hybrid.js";
 import { SqliteGraphStore } from "./store/sqlite_graph.js";
+import { stripFrontmatter, estimateTokens } from "./frontmatter.js";
 const DEFAULT_OLLAMA_HOST = process.env["OLLAMA_HOST"] ?? "10.0.132.100";
 const DEFAULT_EMBED_MODEL = process.env["OLLAMA_EMBED_MODEL"] ?? "nomic-embed-text:v1.5";
 const DEFAULT_TOP_K = 5;
@@ -84,6 +85,7 @@ export class ContextEngine {
         const suggestedTools = allNotes
             .filter((n) => n.type === "tool" && n.toolId !== undefined)
             .map((n) => n.toolId);
+        const rawChars = allNotes.reduce((sum, n) => sum + n.content.length, 0);
         const formattedContext = formatContext(seedNotes, expandedNotes);
         const retrievalMs = Date.now() - t0;
         return {
@@ -95,6 +97,9 @@ export class ContextEngine {
             builtAt: Date.now(),
             seedNoteIds: seedNotes.map((n) => n.noteId),
             expandedNoteIds: expandedNotes.map((n) => n.noteId),
+            rawChars,
+            strippedChars: formattedContext.length,
+            estimatedTokens: estimateTokens(formattedContext),
         };
     }
     /**
@@ -138,7 +143,7 @@ function formatContext(seedNotes, expandedNotes) {
         lines.push("");
         for (const note of seedConcepts) {
             lines.push(`### ${note.path} (score: ${note.score.toFixed(3)})`);
-            lines.push(note.content.trim());
+            lines.push(stripFrontmatter(note.content));
             lines.push("");
         }
     }
@@ -153,7 +158,7 @@ function formatContext(seedNotes, expandedNotes) {
                 ? ` | Linked from: ${note.linkedFrom.join(", ")}`
                 : "";
             lines.push(`### ${note.path} (score: ${note.score.toFixed(3)}${linkedFromPart})`);
-            lines.push(note.content.trim());
+            lines.push(stripFrontmatter(note.content));
             lines.push("");
         }
     }
@@ -165,7 +170,7 @@ function formatContext(seedNotes, expandedNotes) {
         lines.push("");
         for (const note of toolNotes) {
             lines.push(`### Tool: ${note.toolId} (${note.path})`);
-            lines.push(note.content.trim());
+            lines.push(stripFrontmatter(note.content));
             lines.push("");
         }
     }

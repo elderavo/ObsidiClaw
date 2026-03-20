@@ -1,28 +1,31 @@
 /**
- * ObsidiClaw ExtensionFactory — plugs context injection into Pi via the
- * before_agent_start hook.
+ * ObsidiClaw ExtensionFactory — context injection + retrieve_context tool.
  *
- * Usage (programmatic — custom runner):
- *   Pass an already-initialized ContextEngine so the extension reuses it:
- *     createObsidiClawExtension({ contextEngine: myEngine })
+ * Two hooks per session:
  *
- * Usage (Pi native TUI — .pi/extensions/obsidi-claw.ts):
- *   Pass only mdDbPath; the extension owns init/close:
- *     createObsidiClawExtension({ mdDbPath: "/path/to/md_db" })
+ * 1. before_agent_start (every turn):
+ *    - Runs RAG on the user's prompt → pre-injects initial context into system prompt
+ *    - Appends a standing instruction reminding Pi to prefer retrieve_context
+ *      over its own knowledge for anything project-specific
  *
- * Flow per turn:
- *   before_agent_start fires
- *     → contextEngine.build(prompt)
- *     → return { systemPrompt: original + "\n\n" + formattedContext }
- *     → Pi continues with enriched system prompt
+ * 2. retrieve_context tool (Pi-driven, any number of times per turn):
+ *    - Pi calls this when it wants to look something up more specifically
+ *    - Runs engine.build(query) with Pi's own query string
+ *    - Returns formatted context as a tool result (visible in conversation)
+ *
+ * Usage (custom runner — engine already initialized):
+ *   createObsidiClawExtension({ contextEngine: myEngine, logger: myLogger })
+ *
+ * Usage (Pi native TUI — .pi/extensions/):
+ *   createObsidiClawExtension({ mdDbPath: "/path/to/md_db" })
  */
 import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
 import { ContextEngine } from "../context_engine/index.js";
+import { RunLogger } from "../logger/index.js";
 export interface ObsidiClawExtensionConfig {
     /**
      * Already-initialized ContextEngine to reuse (e.g. from a custom runner).
-     * When provided, the extension will NOT call initialize() or close() on it —
-     * the caller owns the lifecycle.
+     * Caller owns lifecycle — the extension will not call initialize() or close().
      */
     contextEngine?: ContextEngine;
     /**
@@ -31,6 +34,12 @@ export interface ObsidiClawExtensionConfig {
      * Defaults to process.cwd()/md_db.
      */
     mdDbPath?: string;
+    /**
+     * RunLogger for synthesis metrics.
+     * Caller owns close() when provided.
+     * When omitted and the extension owns the engine, it creates its own logger.
+     */
+    logger?: RunLogger;
 }
 export declare function createObsidiClawExtension(config?: ObsidiClawExtensionConfig): ExtensionFactory;
 //# sourceMappingURL=factory.d.ts.map

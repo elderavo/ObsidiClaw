@@ -202,9 +202,9 @@ export class OrchestratorSession {
                     });
                 },
                 // ObsidiClaw context injection — runs RAG on every turn via before_agent_start.
-                // Passes the already-initialized engine so the extension reuses it.
+                // Passes the already-initialized engine and logger so the extension reuses them.
                 ...(this.contextEngine
-                    ? [createObsidiClawExtension({ contextEngine: this.contextEngine })]
+                    ? [createObsidiClawExtension({ contextEngine: this.contextEngine, logger: this.logger })]
                     : []),
             ],
             ...(this.config.systemPrompt

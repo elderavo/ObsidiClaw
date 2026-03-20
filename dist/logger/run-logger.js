@@ -6,8 +6,9 @@ const DEFAULT_DB_PATH = join(process.cwd(), ".obsidi-claw", "runs.db");
  * RunLogger — SQLite-backed event store for orchestrator runs.
  *
  * Schema:
- *   runs  — one row per prompt round-trip (run_id PK)
- *   trace — one row per RunEvent (run_id FK, many per run)
+ *   runs               — one row per prompt round-trip (run_id PK)
+ *   trace              — one row per RunEvent (run_id FK, many per run)
+ *   synthesis_metrics  — one row per context build (session_id FK)
  *
  * Session-level events (session_start / session_end) have no run_id;
  * they are written to trace with run_id = NULL.
@@ -41,7 +42,22 @@ export class RunLogger {
         payload    TEXT    NOT NULL
       );
 
-      CREATE INDEX IF NOT EXISTS trace_run_id ON trace(run_id);
+      CREATE TABLE IF NOT EXISTS synthesis_metrics (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id       TEXT    NOT NULL,
+        timestamp        INTEGER NOT NULL,
+        prompt_snippet   TEXT    NOT NULL,
+        seed_count       INTEGER NOT NULL,
+        expanded_count   INTEGER NOT NULL,
+        tool_count       INTEGER NOT NULL,
+        retrieval_ms     INTEGER NOT NULL,
+        raw_chars        INTEGER NOT NULL,
+        stripped_chars   INTEGER NOT NULL,
+        estimated_tokens INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS trace_run_id        ON trace(run_id);
+      CREATE INDEX IF NOT EXISTS synthesis_session   ON synthesis_metrics(session_id);
     `);
     }
     logEvent(event) {
@@ -57,6 +73,14 @@ export class RunLogger {
             this._finalizeRun(event.runId, "error", event.timestamp);
         }
         this._insertTrace(runId, sessionId, event.type, event.timestamp, event);
+    }
+    logSynthesis(m) {
+        this.db
+            .prepare(`INSERT INTO synthesis_metrics
+           (session_id, timestamp, prompt_snippet, seed_count, expanded_count,
+            tool_count, retrieval_ms, raw_chars, stripped_chars, estimated_tokens)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+            .run(m.sessionId, m.timestamp, m.promptSnippet, m.seedCount, m.expandedCount, m.toolCount, m.retrievalMs, m.rawChars, m.strippedChars, m.estimatedTokens);
     }
     close() {
         this.db.close();

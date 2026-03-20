@@ -50,6 +50,12 @@ export interface ContextPackage {
     seedNoteIds?: string[];
     /** NoteIds of graph-expanded notes (depth >= 1). */
     expandedNoteIds?: string[];
+    /** Total raw character count across all retrieved note bodies (before stripping). */
+    rawChars: number;
+    /** Character count of formattedContext (after frontmatter stripping). */
+    strippedChars: number;
+    /** Rough token estimate of formattedContext (chars ÷ 4). */
+    estimatedTokens: number;
 }
 export interface ContextEngineConfig {
     /**
