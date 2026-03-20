@@ -1,2 +1,3 @@
 export { Orchestrator } from "./orchestrator.js";
-export type { RunId, LifecycleStage, RunConfig, RunResult, RunEvent } from "./types.js";
+export { OrchestratorSession } from "./session.js";
+export type { SessionId, RunId, RunStage, SessionConfig, RunConfig, RunResult, RunEvent } from "./types.js";

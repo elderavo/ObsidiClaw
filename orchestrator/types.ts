@@ -1,18 +1,20 @@
 /**
- * Orchestrator-local type definitions.
+ * Orchestrator type definitions.
  *
- * These are INLINE stubs for Phase 3. In Phase 1, the canonical versions of
- * these types will be defined in shared/types.ts and shared/events.ts, and
- * this file will re-export from there.
- *
- * TODO: Phase 1 — migrate all types below to shared/ and re-export here.
+ * TODO: Phase 1 — migrate to shared/types.ts and shared/events.ts once stable.
  */
 
 // ---------------------------------------------------------------------------
-// Core identifiers
+// Identifiers
 // ---------------------------------------------------------------------------
 
-/** Unique identifier for a single agent run. UUIDv4. */
+/** Unique ID for a single pi agent session. UUIDv4. */
+export type SessionId = string;
+
+/**
+ * Unique ID for a single prompt/response round-trip within a session.
+ * A session has one or more runs (one per prompt).
+ */
 export type RunId = string;
 
 // ---------------------------------------------------------------------------
@@ -20,80 +22,95 @@ export type RunId = string;
 // ---------------------------------------------------------------------------
 
 /**
- * Ordered stages of a single orchestrator run.
+ * Lifecycle stages within a single prompt round-trip.
  *
- * init           → bootstrapping: generate run_id, validate config
- * context_inject → TODO Phase 5: call context_engine, build ContextPackage
- * run            → active pi agent session
- * post_process   → TODO Phase 7: comparison engine
- *                  TODO Phase 8: insight generation + md_db write-back
- * done           → run completed successfully
- * error          → run failed; see RunResult.error
+ * prompt_received  → prompt arrived at orchestrator
+ * context_inject   → context engine running (first prompt only)
+ * pi_ready         → pi session created and ready
+ * agent_running    → prompt sent to agent, waiting for response
+ * done             → round-trip complete
+ * error            → round-trip failed
  */
-export type LifecycleStage =
-  | "init"
+export type RunStage =
+  | "prompt_received"
   | "context_inject"
-  | "run"
-  | "post_process"
+  | "pi_ready"
+  | "agent_running"
   | "done"
   | "error";
 
 // ---------------------------------------------------------------------------
-// Run config
+// Session config
 // ---------------------------------------------------------------------------
 
-export interface RunConfig {
-  /** The user prompt to send to the pi agent. */
-  prompt: string;
-
-  /** Optional system prompt override. If omitted, the pi agent uses its default. */
+export interface SessionConfig {
+  /** System prompt override for the pi agent. */
   systemPrompt?: string;
 
-  /**
-   * Ollama model ID to use. Defaults to OLLAMA_MODEL env var or "llama3".
-   * TODO: Phase 1 — pull from shared/config.ts OllamaConfig.
-   */
+  /** Ollama model override. Defaults to OLLAMA_MODEL env / "llama3". */
   model?: string;
 
   /**
-   * TODO: Phase 5 — add ContextPackage from context_engine here.
-   * contextPackage?: ContextPackage;
+   * Called with streaming text delta from the agent.
+   * Use this to print agent output in real time.
    */
+  onOutput?: (delta: string) => void;
 }
 
 // ---------------------------------------------------------------------------
-// Run result
+// Run config (single-shot compat)
+// ---------------------------------------------------------------------------
+
+export interface RunConfig extends SessionConfig {
+  prompt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Run result (single-shot compat)
 // ---------------------------------------------------------------------------
 
 export interface RunResult {
+  sessionId: SessionId;
   runId: RunId;
-
-  /** Final stage reached. "done" on success, "error" on failure. */
-  stage: LifecycleStage;
-
+  stage: RunStage;
   durationMs: number;
-
-  /**
-   * Full message history from the pi session.
-   * TODO: Phase 1 — type as AgentMessage[] from @mariozechner/pi-coding-agent.
-   */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   messages: any[];
-
-  /** Present only when stage === "error". */
   error?: string;
 }
 
 // ---------------------------------------------------------------------------
-// Run events (for logger)
-// TODO: Phase 1 — migrate to shared/events.ts as a proper discriminated union
+// Events — emitted at every interface boundary, consumed by RunLogger
+//
+// Convention:
+//   - Session-level events: { sessionId, timestamp }
+//   - Prompt-level events: { sessionId, runId, timestamp }
+//
+// TODO: Phase 1 — migrate to shared/events.ts as named interfaces + union
 // ---------------------------------------------------------------------------
 
 export type RunEvent =
-  | { type: "run_start";      runId: RunId; timestamp: number; config: RunConfig }
-  | { type: "stage_change";   runId: RunId; timestamp: number; from: LifecycleStage; to: LifecycleStage }
-  | { type: "context_built";  runId: RunId; timestamp: number; noteCount: number; toolCount: number; retrievalMs: number }
-  | { type: "tool_call";      runId: RunId; timestamp: number; toolName: string }
-  | { type: "tool_result";    runId: RunId; timestamp: number; toolName: string; isError: boolean }
-  | { type: "run_end";        runId: RunId; timestamp: number; durationMs: number }
-  | { type: "run_error";      runId: RunId; timestamp: number; error: string };
+  // ── Session lifecycle ────────────────────────────────────────────────────
+  | { type: "session_start";       sessionId: SessionId; timestamp: number }
+  | { type: "session_end";         sessionId: SessionId; timestamp: number }
+
+  // ── Prompt lifecycle (one per prompt, reused across session) ─────────────
+  | { type: "prompt_received";     sessionId: SessionId; runId: RunId; timestamp: number; text: string }
+  | { type: "prompt_complete";     sessionId: SessionId; runId: RunId; timestamp: number; durationMs: number }
+  | { type: "prompt_error";        sessionId: SessionId; runId: RunId; timestamp: number; error: string }
+
+  // ── Context injection (first prompt only) ────────────────────────────────
+  | { type: "context_inject_start"; sessionId: SessionId; runId: RunId; timestamp: number }
+  | { type: "context_built";        sessionId: SessionId; runId: RunId; timestamp: number; noteCount: number; toolCount: number; retrievalMs: number }
+  | { type: "context_inject_end";   sessionId: SessionId; runId: RunId; timestamp: number }
+
+  // ── Pi session creation (first prompt only) ──────────────────────────────
+  | { type: "pi_session_created";  sessionId: SessionId; runId: RunId; timestamp: number; contextInjected: boolean }
+
+  // ── Agent interaction ────────────────────────────────────────────────────
+  | { type: "agent_prompt_sent";   sessionId: SessionId; runId: RunId; timestamp: number }
+  | { type: "agent_turn_start";    sessionId: SessionId; runId: RunId; timestamp: number }
+  | { type: "agent_turn_end";      sessionId: SessionId; runId: RunId; timestamp: number }
+  | { type: "agent_done";          sessionId: SessionId; runId: RunId; timestamp: number; messageCount: number }
+  | { type: "tool_call";           sessionId: SessionId; runId: RunId; timestamp: number; toolName: string }
+  | { type: "tool_result";         sessionId: SessionId; runId: RunId; timestamp: number; toolName: string; isError: boolean };
