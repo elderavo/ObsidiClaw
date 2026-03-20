@@ -20,6 +20,7 @@
 import { join } from "path";
 import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
 import { ContextEngine } from "../context_engine/index.js";
+import { RunLogger } from "../logger/index.js";
 
 export interface ObsidiClawExtensionConfig {
   /**
@@ -35,6 +36,14 @@ export interface ObsidiClawExtensionConfig {
    * Defaults to process.cwd()/md_db.
    */
   mdDbPath?: string;
+
+  /**
+   * RunLogger instance for synthesis metrics.
+   * When provided (custom runner), the caller owns close().
+   * When not provided and ownsEngine is true (Pi TUI), the extension
+   * creates and closes its own logger.
+   */
+  logger?: RunLogger;
 }
 
 export function createObsidiClawExtension(
@@ -55,6 +64,10 @@ export function createObsidiClawExtension(
       ownsEngine = true;
     }
 
+    // Logger: use provided one, or create our own if we own the engine.
+    const logger: RunLogger | undefined = config.logger ?? (ownsEngine ? new RunLogger() : undefined);
+    const ownsLogger = !config.logger && ownsEngine;
+
     // ── session_start: initialize engine if we own it ─────────────────────
     pi.on("session_start", async () => {
       if (ownsEngine) {
@@ -71,6 +84,20 @@ export function createObsidiClawExtension(
 
         if (ctx.hasUI) ctx.ui.setWorkingMessage();
 
+        // Record synthesis metrics to SQLite
+        logger?.logSynthesis({
+          sessionId: ctx.sessionManager.getSessionId(),
+          timestamp: Date.now(),
+          promptSnippet: event.prompt.slice(0, 120),
+          seedCount: pkg.seedNoteIds?.length ?? 0,
+          expandedCount: pkg.expandedNoteIds?.length ?? 0,
+          toolCount: pkg.suggestedTools.length,
+          retrievalMs: pkg.retrievalMs,
+          rawChars: pkg.rawChars,
+          strippedChars: pkg.strippedChars,
+          estimatedTokens: pkg.estimatedTokens,
+        });
+
         return {
           systemPrompt: event.systemPrompt + "\n\n" + pkg.formattedContext,
         };
@@ -81,11 +108,10 @@ export function createObsidiClawExtension(
       }
     });
 
-    // ── session_shutdown: release resources if we own the engine ──────────
+    // ── session_shutdown: release resources if we own them ────────────────
     pi.on("session_shutdown", () => {
-      if (ownsEngine) {
-        engine.close();
-      }
+      if (ownsEngine) engine.close();
+      if (ownsLogger) logger?.close();
     });
   };
 }
