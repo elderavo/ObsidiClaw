@@ -13,7 +13,6 @@ this is the entry point for the knowledge graph. It's made of linked markdown fi
 The directory structure is flat, but the linking creates a graph structure.
 
 'concepts' is NOT for fact storage. If you want to store an ephemeral fact like a network configuration, write a tool to retrieve the current value of that fact instead of hardcoding the fact. 'concepts' is intended to store insight. 
-
  
 
 ## tools
