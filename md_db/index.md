@@ -1,10 +1,10 @@
 ---
-id: 1
-time_created: 
-last_edited:
-tags:
-etc:
+id:
+type: index
+created:
+updated:
 ---
+
 
 # Index
 
@@ -16,21 +16,7 @@ The directory structure is flat, but the linking creates a graph structure.
  
 
 ## tools
-tools/network
-[[network]]
-tools/bash_core
-[[bash_core]]
-tools/web_search
-[[web_search]]
-tools/ask_user
-[[ask_user]]
+[[tools]]
 
 ## concepts
-concepts/failure_modes
-[[failure_modes]]
-concepts/best_practices
-[[best_practices]]
-concepts/preferences
-[[preferences]]
-concepts/heuristics
-[[heuristics]]
+[[concepts]]

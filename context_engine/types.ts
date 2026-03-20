@@ -1,69 +1,89 @@
 /**
- * Context engine type definitions.
+ * Context engine public types.
  *
- * TODO: Phase 1 — migrate to shared/types.ts once interfaces stabilize.
+ * TODO: Phase 1 — migrate to shared/types.ts once stable.
  */
 
 // ---------------------------------------------------------------------------
-// Retrieved node from the knowledge graph
+// Note types
 // ---------------------------------------------------------------------------
 
 export type NoteType = "tool" | "concept" | "index";
 
+// ---------------------------------------------------------------------------
+// RetrievedNote — a note that has entered the result set
+// ---------------------------------------------------------------------------
+
 export interface RetrievedNote {
-  /** Relative path within md_db (e.g. "tools/network.md") */
+  /** Graph identity key (== relative path). */
+  noteId: string;
+
+  /** Relative path within md_db (e.g. "tools/network.md"). */
   path: string;
 
-  /** Raw markdown content */
+  /** Raw markdown body text. */
   content: string;
 
-  /** Similarity score from vector retrieval (0–1) */
+  /** Retrieval score (0–1). Seed notes: vector similarity. Graph notes: derived score. */
   score: number;
 
-  /** Inferred from path: tools/ → "tool", concepts/ → "concept", else "index" */
   type: NoteType;
 
-  /**
-   * Tool ID for tool nodes (filename without extension).
-   * e.g. "tools/network.md" → "network"
-   * undefined for concept/index nodes.
-   */
+  /** Stem of path for tool notes (e.g. "network"). */
   toolId?: string;
+
+  /** How this note entered the result set. */
+  retrievalSource: "vector" | "graph" | "hybrid";
+
+  /**
+   * NoteIds of notes that linked to this one.
+   * Only set for graph-retrieved notes.
+   */
+  linkedFrom?: string[];
+
+  /**
+   * Graph traversal depth.
+   * 0 = direct vector match (seed).
+   * 1 = one hop from a seed, etc.
+   */
+  depth?: number;
 }
 
 // ---------------------------------------------------------------------------
-// Context package — what context_engine returns to the orchestrator
+// ContextPackage — what context_engine returns to the orchestrator
 // ---------------------------------------------------------------------------
 
 export interface ContextPackage {
-  /** Original prompt used for retrieval */
+  /** Original prompt used for retrieval. */
   query: string;
 
-  /** Retrieved notes, sorted by score descending */
+  /** All retrieved notes, sorted by score descending. */
   retrievedNotes: RetrievedNote[];
 
   /**
-   * Tool IDs detected in retrieved tool nodes.
-   * These are candidates for tool execution before the agent run.
-   * TODO: Phase 6 — orchestrator runs these tools and injects their outputs.
+   * Tool IDs from retrieved tool nodes.
+   * TODO: Phase 6 — orchestrator runs these tools; outputs appended to context.
    */
   suggestedTools: string[];
 
-  /**
-   * Formatted context string ready for injection into the pi session.
-   * This becomes part of the system prompt (via agentsFilesOverride).
-   */
+  /** Formatted markdown ready for injection into the pi session via agentsFilesOverride. */
   formattedContext: string;
 
-  /** Retrieval wall-clock time in ms */
+  /** Wall-clock time for the full retrieval in ms. */
   retrievalMs: number;
 
-  /** Unix timestamp (ms) when the package was built */
+  /** Unix timestamp (ms) when the package was built. */
   builtAt: number;
+
+  /** NoteIds of vector seed notes (depth 0). */
+  seedNoteIds?: string[];
+
+  /** NoteIds of graph-expanded notes (depth >= 1). */
+  expandedNoteIds?: string[];
 }
 
 // ---------------------------------------------------------------------------
-// Config
+// ContextEngineConfig
 // ---------------------------------------------------------------------------
 
 export interface ContextEngineConfig {
@@ -74,23 +94,27 @@ export interface ContextEngineConfig {
   mdDbPath: string;
 
   /**
+   * Absolute path to the SQLite graph database.
+   * Defaults to: path.join(path.dirname(mdDbPath), '.obsidi-claw', 'graph.db')
+   * The .obsidi-claw/ directory is created automatically on initialize().
+   */
+  dbPath?: string;
+
+  /**
    * Ollama host (no path, no trailing slash).
-   * Used for OllamaEmbedding.
    * Default: "10.0.132.100"
-   * TODO: Phase 1 — pull from shared/config.ts OllamaConfig
    */
   ollamaHost?: string;
 
   /**
-   * Embedding model loaded in Ollama.
-   * Must be a text-embedding model (e.g. "nomic-embed-text", "mxbai-embed-large").
+   * Ollama embedding model.
+   * Must be a text-embedding model (e.g. "nomic-embed-text:v1.5").
    * Override with OLLAMA_EMBED_MODEL env var.
-   * Default: "nomic-embed-text"
    */
   embeddingModel?: string;
 
   /**
-   * Number of notes to retrieve per query.
+   * Number of vector seed notes to retrieve per query.
    * Default: 5
    */
   topK?: number;
