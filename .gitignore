@@ -1,2 +1,4 @@
 .*
+!.pi
+!.pi/**
 node_modules
