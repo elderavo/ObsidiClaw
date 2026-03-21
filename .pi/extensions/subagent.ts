@@ -7,33 +7,24 @@
  *   1. Main agent calls spawn_subagent(plan, context, success_criteria)
  *   2. Extension calls MCP prepare_subagent → ContextEngine builds SubagentPackage
  *      (hybrid RAG on the plan, bundles plan + context + criteria into system prompt)
- *   3. Extension creates a fresh in-process Pi session with the SubagentPackage
- *      injected as the system prompt, plus its own retrieve_context tool
+ *   3. Extension creates a child OrchestratorSession with the SubagentPackage
+ *      injected as systemPrompt and its own retrieve_context tool
  *   4. Subagent runs to completion; output is returned to the main agent
+ *   5. Child session + logger are disposed cleanly
  *
- * No subprocess spawning — everything runs in-process via createAgentSession.
+ * The child OrchestratorSession produces full SQLite run/trace logging for the
+ * subagent turn — identical to the parent orchestrator's logging.
  */
 
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import {
-  createAgentSession,
-  DefaultResourceLoader,
-  SessionManager,
-} from "@mariozechner/pi-coding-agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { join } from "path";
 import { ContextEngine } from "../../context_engine/index.js";
 import { createContextEngineMcpServer } from "../../context_engine/index.js";
-import { createObsidiClawExtension } from "../../extension/factory.js";
-
-// ---------------------------------------------------------------------------
-// Provider constants — mirrors orchestrator/session.ts
-// ---------------------------------------------------------------------------
-
-const OLLAMA_BASE_URL = process.env["OLLAMA_BASE_URL"] ?? "http://10.0.132.100/v1";
-const OLLAMA_MODEL    = process.env["OLLAMA_MODEL"]    ?? "llama3";
+import { RunLogger } from "../../logger/run-logger.js";
+import { OrchestratorSession } from "../../orchestrator/session.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -64,6 +55,9 @@ export default function subagentExtension(pi: ExtensionAPI) {
   let mcpClient: Client | undefined;
 
   // ── session_start: create standalone engine + MCP client ─────────────────
+  // This engine serves the prepare_subagent MCP call. The child
+  // OrchestratorSession reuses this same engine for the subagent's
+  // retrieve_context — no double-initialization needed.
   pi.on("session_start", async () => {
     const mdDbPath = join(process.cwd(), "md_db");
     engine = new ContextEngine({ mdDbPath });
@@ -120,9 +114,6 @@ export default function subagentExtension(pi: ExtensionAPI) {
       const startTime = Date.now();
 
       // ── Step 1: prepare_subagent via MCP ─────────────────────────────────
-      // ContextEngine runs hybrid RAG on the plan and bundles everything into
-      // a formattedSystemPrompt. The onSubagentPrepared callback fires here if
-      // the orchestrator wired one (logs the subagent_start RunEvent).
       onUpdate?.({
         content: [{ type: "text", text: "Retrieving context for subagent..." }],
         details: { status: "preparing" },
@@ -150,54 +141,25 @@ export default function subagentExtension(pi: ExtensionAPI) {
         details: { status: "spawning" },
       });
 
-      // ── Step 2: create in-process Pi subagent session ────────────────────
-      // The subagent gets:
-      //   - Ollama provider (same model as parent)
-      //   - createObsidiClawExtension (own standalone engine) for retrieve_context
-      //   - formattedSystemPrompt injected via systemPromptOverride
-      const mdDbPath = join(process.cwd(), "md_db");
-      const loader = new DefaultResourceLoader({
-        extensionFactories: [
-          (subPi) => {
-            subPi.registerProvider("ollama", {
-              baseUrl: OLLAMA_BASE_URL,
-              apiKey: "ollama",
-              api: "openai-completions",
-              models: [
-                {
-                  id: OLLAMA_MODEL,
-                  name: `Ollama / ${OLLAMA_MODEL}`,
-                  reasoning: false,
-                  input: ["text"],
-                  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                  contextWindow: 32768,
-                  maxTokens: 4096,
-                  compat: {
-                    supportsDeveloperRole: false,
-                    maxTokensField: "max_tokens",
-                  },
-                },
-              ],
-            });
-          },
-          createObsidiClawExtension({ mdDbPath }),
-        ],
-        systemPromptOverride: () => formattedSystemPrompt,
-      });
+      // ── Step 2: create child OrchestratorSession ──────────────────────────
+      // The child session gets its own RunLogger row in the same runs.db,
+      // producing full trace logging for the subagent turn. The shared engine
+      // is re-used (already initialized) — OrchestratorSession wires a fresh
+      // MCP server over it for the subagent's retrieve_context tool.
+      const dbPath = join(process.cwd(), ".obsidi-claw", "runs.db");
+      const childLogger = new RunLogger({ dbPath });
 
-      await loader.reload();
-
-      const { session } = await createAgentSession({
-        resourceLoader: loader,
-        sessionManager: SessionManager.inMemory(),
+      let outputBuffer = "";
+      const childSession = new OrchestratorSession(childLogger, engine, {
+        systemPrompt: formattedSystemPrompt,
+        onOutput: (delta) => { outputBuffer += delta; },
       });
 
       // ── Step 3: run the subagent with timeout + cancellation ─────────────
       const timeoutMs = (params.timeout_minutes ?? 5) * 60 * 1000;
 
       const runPromise = (async (): Promise<"done"> => {
-        await session.prompt(params.plan);
-        await session.agent.waitForIdle();
+        await childSession.prompt(params.plan);
         return "done";
       })();
 
@@ -212,11 +174,12 @@ export default function subagentExtension(pi: ExtensionAPI) {
       const outcome = await Promise.race([runPromise, timeoutPromise, cancelPromise]);
 
       // ── Step 4: extract output + dispose ─────────────────────────────────
-      const messages = session.messages as Array<{ role: string; content: unknown }>;
+      const messages = childSession.messages as Array<{ role: string; content: unknown }>;
       const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
-      const output = extractMessageText(lastAssistant?.content) || "(no output)";
+      const output = extractMessageText(lastAssistant?.content) || outputBuffer || "(no output)";
 
-      session.dispose();
+      childSession.dispose();
+      childLogger.close();
 
       const durationS = Math.round((Date.now() - startTime) / 1000);
 

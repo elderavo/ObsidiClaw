@@ -1,10 +1,16 @@
 /**
  * Link Graph Infrastructure - Public API
- * 
+ *
  * Pure infrastructure layer for parsing markdown wikilinks into a graph structure,
  * storing in database, and providing utilities for broken link detection and
  * loop prevention.
  */
+
+// Local imports for use within LinkGraphProcessor
+import { parseWikiLinks } from './parser.js';
+import { LinkGraph, type GraphStats } from './graph_builder.js';
+import { LinkGraphStorage, type StoredWikiLink } from './storage.js';
+import { LinkValidator, type ValidationReport, type LinkIntegrityIssue } from './validator.js';
 
 // Core parser functionality
 export {
@@ -50,12 +56,13 @@ export {
  * ```
  */
 export class LinkGraphProcessor {
-  private graph = new LinkGraph();
+  private graph: LinkGraph;
   private storage: LinkGraphStorage;
   private validator: LinkValidator;
   private existingFiles = new Set<string>();
   
   constructor(private db: any, private mdDbPath: string) {
+    this.graph = new LinkGraph();
     this.storage = new LinkGraphStorage(db);
     this.validator = new LinkValidator(this.storage, this.existingFiles);
   }

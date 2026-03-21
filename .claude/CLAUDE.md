@@ -158,7 +158,7 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **Phase 6 Complete**: Tool ecosystem fully implemented
   - Web search tool via Perplexity API (`tools/web_search.ts`) with axios integration
   - Pi extensions in `.pi/extensions/`: codebase-indexer, subagent spawning, web-search wrapper
-  - MCP server exposes `retrieve_context` and `get_preferences` tools 
+  - MCP server exposes `retrieve_context` and `get_preferences` tools
   - Extension factory uses InMemoryTransport pairs for same-process MCP communication
 - **Enhanced Context Engine**: Added `getGraphStore()`, `getVectorIndex()`, and `rebuildVectorIndex()` methods for extension ecosystem access
 - **Build System**: Clean TypeScript compilation, dist/ directory with all modules compiled
@@ -166,6 +166,13 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **Knowledge Base**: Expanded md_db with NEVERs, obsidiclaw self-knowledge, failure modes, heuristics
 - **Next Priority**: Phase 7 comparison engine — implement query methods on RunLogger for run comparison and insight derivation
 - Updated CLAUDE.md to reflect Phases 1-6 complete, architectural completeness achieved for core functionality
+
+**2026-03-21 — Session 8 (Pi TUI Logging + Subagent OrchestratorSession)**
+- **`session-logger.ts`** (new) — always-on Pi TUI extension writing full `RunEvent`s to shared `runs.db`. Maps the complete Pi event API: `before_agent_start(prompt)` → `prompt_received` + `agent_prompt_sent` (generates new `runId` per turn); `agent_start` → `agent_turn_start`; `turn_end` → `agent_turn_end`; `agent_end(messages)` → `agent_done` + `prompt_complete` (with `durationMs`); `tool_execution_start/end` → `tool_call`/`tool_result`. Optional JSONL debug file via `OBSIDI_CLAW_DEBUG=1`. Replaces `debug-logger.ts` (which only captured 3 events with no SQLite persistence).
+- **`subagent.ts`** (rewrite) — replaced `createAgentSession` + `DefaultResourceLoader` with `OrchestratorSession`. Child session reuses the `session_start` engine (already initialized), gets its own `RunLogger` per invocation writing to the same `runs.db`, and receives `formattedSystemPrompt` from `prepare_subagent` MCP. Subagent runs are now fully traced in SQLite identical to orchestrator runs. Engine not re-initialized; `childLogger.close()` called in teardown.
+- **`link_graph/index.ts`** (fix) — `LinkGraphProcessor` was referencing `LinkGraph`, `LinkGraphStorage`, `LinkValidator`, `parseWikiLinks` etc. from re-export-only statements (no local bindings). Added local import statements so the class can reference them. `tsc --noEmit` clean.
+- **Key design**: `pi` TUI and orchestrator paths now both produce full `RunEvent` traces to the same `runs.db` — unified observability across both entry points. Subagent runs appear as child sessions in the same database.
+- **Next**: Phase 7 — comparison engine (query `runs`/`trace` tables, diff run outcomes, feed to insight derivation)
 
 # End-of-Run Protocol
 Every agent session MUST close by doing all three:
