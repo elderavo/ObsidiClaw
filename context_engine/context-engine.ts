@@ -15,11 +15,11 @@
  *   outputs are appended to formattedContext before the agent sees it
  */
 
-import { mkdirSync } from "fs";
+import { mkdirSync, existsSync } from "fs";
 import { dirname, join } from "path";
-import { Settings, VectorStoreIndex } from "llamaindex";
+import { Settings, VectorStoreIndex, storageContextFromDefaults } from "llamaindex";
 import { OllamaEmbedding } from "@llamaindex/ollama";
-import { syncMdDbToGraph, buildVectorIndexFromGraph } from "./indexer.js";
+import { syncMdDbToGraph, buildVectorIndexFromGraph, computeMdDbHash } from "./indexer.js";
 import { hybridRetrieve } from "./retrieval/hybrid.js";
 import { SqliteGraphStore } from "./store/sqlite_graph.js";
 import { stripFrontmatter, estimateTokens } from "./frontmatter.js";
@@ -50,39 +50,49 @@ export class ContextEngine {
   /**
    * Must be called before build(). Idempotent — safe to call multiple times.
    *
-   * 1. Configures LlamaIndex embedding model (Ollama)
-   * 2. Opens the SQLite graph store (creates .obsidi-claw/ dir if needed)
-   * 3. Syncs md_db markdown files into the graph (two-pass: notes, then edges)
-   * 4. Builds in-memory VectorStoreIndex from graph notes
+   * Fast path (md_db unchanged since last run):
+   *   Loads the persisted vector index from disk — no file parsing, no Ollama calls.
+   *
+   * Slow path (first run, or md_db files added/modified/removed):
+   *   Syncs md_db → SQLite graph (two-pass: notes, then edges), re-embeds all
+   *   notes via Ollama, persists the vector index to .obsidi-claw/vector-index/,
+   *   and saves an mtime fingerprint so the next startup can use the fast path.
    */
   async initialize(): Promise<void> {
     if (this.vectorIndex) return;
 
-    // Ensure .obsidi-claw/ directory exists
     mkdirSync(dirname(this.config.dbPath), { recursive: true });
 
-    // Configure LlamaIndex embeddings
     Settings.embedModel = new OllamaEmbedding({
       model: this.config.embeddingModel,
       config: { host: this.config.ollamaHost },
     });
 
-    // console.log(
-    //   `[context_engine] Initializing — mdDb: ${this.config.mdDbPath}, ` +
-    //     `db: ${this.config.dbPath}, ` +
-    //     `embed: ${this.config.embeddingModel} @ ${this.config.ollamaHost}`,
-    // );
-
-    // Open graph store
     this.graphStore = new SqliteGraphStore(this.config.dbPath);
 
-    // Sync md_db → graph (parse + upsert notes, then resolve wikilinks)
+    const vectorDir  = join(dirname(this.config.dbPath), "vector-index");
+    const vectorFile = join(vectorDir, "vector_store.json");
+    const currentHash = await computeMdDbHash(this.config.mdDbPath);
+    const storedHash  = this.graphStore.getState("md_db_hash");
+
+    if (currentHash === storedHash && existsSync(vectorFile)) {
+      // ── Fast path: nothing changed ─────────────────────────────────────────
+      // Load the persisted vector index from disk. The SQLite graph is already
+      // current (it was written on the last slow-path run). No Ollama calls.
+      const storageContext = await storageContextFromDefaults({ persistDir: vectorDir });
+      this.vectorIndex = await VectorStoreIndex.init({ storageContext });
+      return;
+    }
+
+    // ── Slow path: md_db changed (or first run) ─────────────────────────────
+    // Sync markdown files → SQLite graph, re-embed via Ollama, persist to disk.
     await syncMdDbToGraph(this.config.mdDbPath, this.graphStore);
 
-    // Build vector index from graph notes
-    this.vectorIndex = await buildVectorIndexFromGraph(this.graphStore);
+    const storageContext = await storageContextFromDefaults({ persistDir: vectorDir });
+    this.vectorIndex = await buildVectorIndexFromGraph(this.graphStore, storageContext);
 
-    //console.log("[context_engine] Ready");
+    // Record the hash so the next startup can take the fast path.
+    this.graphStore.setState("md_db_hash", currentHash);
   }
 
   /**
@@ -208,16 +218,20 @@ export class ContextEngine {
     }
 
     try {
-      // Phase 1: Re-sync markdown files to graph store
       await syncMdDbToGraph(this.config.mdDbPath, this.graphStore);
-      
-      // Phase 2: Rebuild vector index from updated graph
-      this.vectorIndex = await buildVectorIndexFromGraph(this.graphStore);
-      
-      console.log('[context_engine] Full reindex completed');
-      
+
+      const vectorDir = join(dirname(this.config.dbPath), "vector-index");
+      const storageContext = await storageContextFromDefaults({ persistDir: vectorDir });
+      this.vectorIndex = await buildVectorIndexFromGraph(this.graphStore, storageContext);
+
+      // Update hash so next startup fast-paths correctly
+      const newHash = await computeMdDbHash(this.config.mdDbPath);
+      this.graphStore.setState("md_db_hash", newHash);
+
+      console.log("[context_engine] Full reindex completed");
+
     } catch (error) {
-      console.error('[context_engine] Full reindex failed:', error);
+      console.error("[context_engine] Full reindex failed:", error);
       throw error;
     }
   }

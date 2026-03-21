@@ -9,23 +9,24 @@
  * buildVectorIndexFromGraph reads notes directly from SQLite so the vector
  * index is always consistent with the graph.
  *
- * TODO: Phase 5 — persist index to disk to avoid re-embedding every startup
- * TODO: Phase 5 — watch md_db for changes and incrementally update
- * TODO: Phase 8 — re-index after insight_engine writes new notes
+ * computeMdDbHash produces an mtime fingerprint of all md_db files.
+ * ContextEngine uses this to skip re-sync and re-embedding when nothing
+ * has changed since the last run (see context-engine.ts initialize()).
  */
 
-import { readdir, readFile } from "fs/promises";
+import { readdir, readFile, stat } from "fs/promises";
 import { join, relative, extname } from "path";
+import { createHash } from "crypto";
 import { Document, VectorStoreIndex } from "llamaindex";
+import type { StorageContext } from "llamaindex";
 import { parseMarkdownFile } from "./ingest/parser.js";
 import type { SqliteGraphStore } from "./store/sqlite_graph.js";
-import { LinkGraphProcessor } from "./link_graph/index.js";
 
 // ---------------------------------------------------------------------------
-// File collection
+// File collection (shared by sync + hash)
 // ---------------------------------------------------------------------------
 
-async function collectMarkdownFiles(dir: string): Promise<string[]> {
+export async function collectMarkdownFiles(dir: string): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true });
   const paths: string[] = [];
 
@@ -42,6 +43,29 @@ async function collectMarkdownFiles(dir: string): Promise<string[]> {
 }
 
 // ---------------------------------------------------------------------------
+// Change detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute a fingerprint of all .md files in mdDbPath based on their
+ * modification times. Returns the same hash for the same set of files
+ * with unchanged mtimes; changes if any file is added, removed, or edited.
+ */
+export async function computeMdDbHash(mdDbPath: string): Promise<string> {
+  const filePaths = await collectMarkdownFiles(mdDbPath);
+
+  const entries = await Promise.all(
+    filePaths.map(async (p) => {
+      const s = await stat(p);
+      return `${p}:${s.mtimeMs}`;
+    }),
+  );
+
+  entries.sort(); // deterministic regardless of readdir order
+  return createHash("md5").update(entries.join("|")).digest("hex");
+}
+
+// ---------------------------------------------------------------------------
 // Two-pass graph sync
 // ---------------------------------------------------------------------------
 
@@ -50,7 +74,6 @@ async function collectMarkdownFiles(dir: string): Promise<string[]> {
  *
  * Pass 1: upsert every note (notes table must be complete before edges).
  * Pass 2: resolve [[wikilinks]] and replace edges for each note.
- * Pass 3: build enhanced link graph with cycle detection and validation.
  *
  * Unresolved links (notes not in the db) are silently dropped —
  * SqliteGraphStore.replaceEdges filters them out.
@@ -79,8 +102,6 @@ export async function syncMdDbToGraph(
     graphStore.upsertNote(note);
   }
 
-  //console.log(`[indexer] Upserted ${parsedNotes.length} notes into graph`);
-
   // Pass 2 — resolve wikilinks + insert edges
   for (const note of parsedNotes) {
     const resolvedIds: string[] = [];
@@ -92,36 +113,6 @@ export async function syncMdDbToGraph(
     }
     graphStore.replaceEdges(note.noteId, resolvedIds);
   }
-
-  const totalLinks = parsedNotes.reduce((sum, n) => sum + n.linksOut.length, 0);
-  //console.log(`[indexer] Resolved edges (${totalLinks} raw links → graph)`);
-
-  // Pass 3 — build enhanced link graph with cycle detection
-  await buildEnhancedLinkGraph(mdDbPath, graphStore);
-}
-
-/**
- * Build enhanced link graph with cycle detection and validation.
- * This runs as part of the standard indexing process.
- */
-async function buildEnhancedLinkGraph(
-  mdDbPath: string, 
-  graphStore: SqliteGraphStore
-): Promise<void> {
-  try {
-    // Access the internal DB from graphStore
-    const linkProcessor = new LinkGraphProcessor(graphStore.getDatabase(), mdDbPath);
-    
-    // Build the enhanced link graph (stores rich wikilink metadata + cycle detection)
-    // Validation (broken links, orphans) is intentionally deferred — it runs LCS-based
-    // fuzzy matching which is too slow for the startup path. Call linkProcessor.isHealthy()
-    // explicitly when you need a validation report (e.g. Phase 7 insight engine).
-    await linkProcessor.buildFromMarkdownFiles();
-    
-  } catch (error) {
-    console.error('[indexer] Enhanced link graph build failed:', error);
-    // Don't fail the entire indexing process for link graph issues
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -132,11 +123,15 @@ async function buildEnhancedLinkGraph(
  * Build a LlamaIndex VectorStoreIndex from notes already in the graph store.
  * Requires Settings.embedModel to be configured before calling.
  *
+ * Pass storageContext (created with persistDir) to auto-persist embeddings
+ * to disk so they can be reloaded without re-embedding on the next startup.
+ *
  * Uses the stored body (frontmatter stripped) as document text.
  * Metadata includes file_path (= noteId) and note_type for downstream filtering.
  */
 export async function buildVectorIndexFromGraph(
   graphStore: SqliteGraphStore,
+  storageContext?: StorageContext,
 ): Promise<VectorStoreIndex> {
   const notes = graphStore.listAllNotes();
 
@@ -160,6 +155,7 @@ export async function buildVectorIndexFromGraph(
             }),
         );
 
-  //console.log(`[indexer] Building vector index over ${docs.length} notes`);
-  return VectorStoreIndex.fromDocuments(docs);
+  return storageContext
+    ? VectorStoreIndex.fromDocuments(docs, { storageContext })
+    : VectorStoreIndex.fromDocuments(docs);
 }
