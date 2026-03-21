@@ -29,14 +29,24 @@ import type { SqliteGraphStore } from "./store/graph-store.js";
 // File collection (shared by sync + hash)
 // ---------------------------------------------------------------------------
 
-export async function collectMarkdownFiles(dir: string): Promise<string[]> {
+type CollectOptions = {
+  /** Directory basenames to skip (non-recursive into them). */
+  ignoredDirs?: string[];
+};
+
+export async function collectMarkdownFiles(
+  dir: string,
+  options?: CollectOptions,
+): Promise<string[]> {
+  const ignoredDirs = new Set(options?.ignoredDirs ?? [".obsidian"]);
   const entries = await readdir(dir, { withFileTypes: true });
   const paths: string[] = [];
 
   for (const entry of entries) {
     const fullPath = join(dir, entry.name);
     if (entry.isDirectory()) {
-      paths.push(...(await collectMarkdownFiles(fullPath)));
+      if (ignoredDirs.has(entry.name)) continue;
+      paths.push(...(await collectMarkdownFiles(fullPath, { ignoredDirs: [...ignoredDirs] })));
     } else if (entry.isFile() && extname(entry.name) === ".md") {
       paths.push(fullPath);
     }

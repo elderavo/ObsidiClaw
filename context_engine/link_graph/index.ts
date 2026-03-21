@@ -186,12 +186,14 @@ export class LinkGraphProcessor {
     const { readdir } = await import('fs/promises');
     const { join, extname } = await import('path');
     
+    const ignoredDirs = new Set<string>([".obsidian"]);
     const entries = await readdir(dir, { withFileTypes: true });
     const paths: string[] = [];
     
     for (const entry of entries) {
       const fullPath = join(dir, entry.name);
       if (entry.isDirectory()) {
+        if (ignoredDirs.has(entry.name)) continue;
         paths.push(...(await this.collectMarkdownFiles(fullPath)));
       } else if (entry.isFile() && extname(entry.name) === '.md') {
         paths.push(fullPath);
