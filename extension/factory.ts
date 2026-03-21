@@ -1,20 +1,20 @@
 /**
- * ObsidiClaw ExtensionFactory — context injection + retrieve_context tool.
+ * ObsidiClaw ExtensionFactory — MCP-backed context injection + retrieve_context tool.
  *
  * Two hooks per session:
  *
  * 1. before_agent_start (every turn):
- *    - Runs RAG on the user's prompt → pre-injects initial context into system prompt
- *    - Appends a standing instruction reminding Pi to prefer retrieve_context
- *      over its own knowledge for anything project-specific
+ *    - Calls MCP get_preferences → injects preferences.md into system prompt
+ *    - Appends a standing instruction reminding Pi to use retrieve_context
  *
  * 2. retrieve_context tool (Pi-driven, any number of times per turn):
  *    - Pi calls this when it wants to look something up more specifically
- *    - Runs engine.build(query) with Pi's own query string
- *    - Returns formatted context as a tool result (visible in conversation)
+ *    - Proxies through MCP retrieve_context → returns formattedContext as tool result
+ *    - Metrics flow via onContextBuilt callback → orchestrator RunEvent → RunLogger
+ *      (the extension itself is logger-free)
  *
- * Usage (custom runner — engine already initialized):
- *   createObsidiClawExtension({ contextEngine: myEngine, logger: myLogger })
+ * Usage (custom runner — MCP server already built):
+ *   createObsidiClawExtension({ mcpServer: myMcpServer })
  *
  * Usage (Pi native TUI — .pi/extensions/):
  *   createObsidiClawExtension({ mdDbPath: "/path/to/md_db" })
@@ -22,9 +22,26 @@
 
 import { join } from "path";
 import { Type } from "@sinclair/typebox";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
 import { ContextEngine } from "../context_engine/index.js";
-import { RunLogger } from "../logger/index.js";
+import { createContextEngineMcpServer } from "../context_engine/index.js";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the first text block from an MCP CallToolResult.
+ * callTool() returns { [x: string]: unknown; content: ContentBlock[] } but the
+ * index signature widens content to unknown in TypeScript, so we cast here.
+ */
+function extractText(result: unknown): string {
+  const blocks = (result as { content?: Array<{ type: string; text?: string }> }).content ?? [];
+  return blocks.find((c) => c.type === "text")?.text ?? "";
+}
 
 // ---------------------------------------------------------------------------
 // Config
@@ -32,24 +49,17 @@ import { RunLogger } from "../logger/index.js";
 
 export interface ObsidiClawExtensionConfig {
   /**
-   * Already-initialized ContextEngine to reuse (e.g. from a custom runner).
-   * Caller owns lifecycle — the extension will not call initialize() or close().
+   * Already-built MCP server wrapping a ContextEngine (e.g. from OrchestratorSession).
+   * Caller owns engine lifecycle. The extension connects/disconnects transport only.
    */
-  contextEngine?: ContextEngine;
+  mcpServer?: McpServer;
 
   /**
    * Path to the md_db directory.
-   * Only used when contextEngine is not provided.
+   * Only used when mcpServer is not provided (standalone / Pi TUI path).
    * Defaults to process.cwd()/md_db.
    */
   mdDbPath?: string;
-
-  /**
-   * RunLogger for synthesis metrics.
-   * Caller owns close() when provided.
-   * When omitted and the extension owns the engine, it creates its own logger.
-   */
-  logger?: RunLogger;
 }
 
 // ---------------------------------------------------------------------------
@@ -72,28 +82,32 @@ export function createObsidiClawExtension(
   config: ObsidiClawExtensionConfig = {},
 ): ExtensionFactory {
   return async (pi) => {
-    // Engine lifecycle
-    let engine: ContextEngine;
-    let ownsEngine: boolean;
+    // ── Engine + MCP server setup ────────────────────────────────────────────
+    // When no server is provided, build our own engine and server (standalone path).
+    let ownedEngine: ContextEngine | undefined;
+    let mcpServer: McpServer;
 
-    if (config.contextEngine) {
-      engine = config.contextEngine;
-      ownsEngine = false;
+    if (config.mcpServer) {
+      mcpServer = config.mcpServer;
     } else {
-      engine = new ContextEngine({ mdDbPath: config.mdDbPath ?? join(process.cwd(), "md_db") });
-      ownsEngine = true;
+      ownedEngine = new ContextEngine({
+        mdDbPath: config.mdDbPath ?? join(process.cwd(), "md_db"),
+      });
+      mcpServer = createContextEngineMcpServer(ownedEngine);
     }
 
-    // Logger lifecycle
-    const logger = config.logger ?? (ownsEngine ? new RunLogger() : undefined);
-    const ownsLogger = !config.logger && ownsEngine;
+    // Create InMemoryTransport pair and client (connected in session_start).
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "obsidi-claw-ext", version: "1.0.0" });
 
-    // ── session_start: initialize engine if we own it ─────────────────────
+    // ── session_start: initialize engine (if owned) + connect MCP pair ──────
     pi.on("session_start", async () => {
-      if (ownsEngine) await engine.initialize();
+      if (ownedEngine) await ownedEngine.initialize();
+      await mcpServer.connect(serverTransport);
+      await client.connect(clientTransport);
     });
 
-    // ── retrieve_context tool: Pi calls this when it decides it needs info ─
+    // ── retrieve_context tool: Pi calls this when it decides it needs info ──
     pi.registerTool({
       name: "retrieve_context",
       label: "Knowledge Base Retrieval",
@@ -108,40 +122,22 @@ export function createObsidiClawExtension(
           description: "What to search for in the knowledge base.",
         }),
       }),
-      execute: async (_toolCallId, { query }, _signal, _onUpdate, ctx) => {
-        const pkg = await engine.build(query);
-
-        logger?.logSynthesis({
-          sessionId: ctx.sessionManager.getSessionId(),
-          timestamp: Date.now(),
-          promptSnippet: query.slice(0, 120),
-          seedCount: pkg.seedNoteIds?.length ?? 0,
-          expandedCount: pkg.expandedNoteIds?.length ?? 0,
-          toolCount: pkg.suggestedTools.length,
-          retrievalMs: pkg.retrievalMs,
-          rawChars: pkg.rawChars,
-          strippedChars: pkg.strippedChars,
-          estimatedTokens: pkg.estimatedTokens,
-        });
-
+      execute: async (_toolCallId, { query }, _signal, _onUpdate, _ctx) => {
+        const result = await client.callTool({ name: "retrieve_context", arguments: { query } });
+        const text = extractText(result);
         return {
-          content: [{ type: "text" as const, text: pkg.formattedContext }],
-          details: {
-            query,
-            retrievalMs: pkg.retrievalMs,
-            noteCount: pkg.retrievedNotes.length,
-            estimatedTokens: pkg.estimatedTokens,
-          },
+          content: [{ type: "text" as const, text }],
+          details: { query },
         };
       },
     });
 
-    // ── before_agent_start: inject preferences + standing tool reminder ────
-    // Only preferences.md is injected here. Pi uses retrieve_context for
-    // project-specific RAG on demand.
+    // ── before_agent_start: inject preferences + standing tool reminder ─────
+    // Calls MCP get_preferences so the engine stays behind the MCP boundary.
     pi.on("before_agent_start", async (event, ctx) => {
       try {
-        const prefsContent = engine.getNoteContent("preferences.md");
+        const result = await client.callTool({ name: "get_preferences", arguments: {} });
+        const prefsContent = extractText(result);
 
         const contextBlock = prefsContent
           ? `<!-- ObsidiClaw: Preferences -->\n\n${prefsContent}\n\n<!-- End ObsidiClaw Preferences -->`
@@ -161,10 +157,11 @@ export function createObsidiClawExtension(
       }
     });
 
-    // ── session_shutdown ───────────────────────────────────────────────────
+    // ── session_shutdown ─────────────────────────────────────────────────────
     pi.on("session_shutdown", () => {
-      if (ownsEngine) engine.close();
-      if (ownsLogger) logger?.close();
+      void client.close();
+      void mcpServer.close();
+      if (ownedEngine) ownedEngine.close();
     });
   };
 }

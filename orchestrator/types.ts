@@ -107,6 +107,9 @@ export type RunEvent =
   // ── Pi session creation (first prompt only) ──────────────────────────────
   | { type: "pi_session_created";  sessionId: SessionId; runId: RunId; timestamp: number; contextInjected: boolean }
 
+  // ── Context retrieval (fired by MCP server via onContextBuilt callback) ──
+  | { type: "context_retrieved"; sessionId: SessionId; runId: RunId; timestamp: number; query: string; seedCount: number; expandedCount: number; toolCount: number; retrievalMs: number; rawChars: number; strippedChars: number; estimatedTokens: number }
+
   // ── Agent interaction ────────────────────────────────────────────────────
   | { type: "agent_prompt_sent";   sessionId: SessionId; runId: RunId; timestamp: number }
   | { type: "agent_turn_start";    sessionId: SessionId; runId: RunId; timestamp: number }

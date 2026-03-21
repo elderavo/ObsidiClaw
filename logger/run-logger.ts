@@ -5,26 +5,6 @@ import type { RunEvent } from "../orchestrator/types.js";
 
 const DEFAULT_DB_PATH = join(process.cwd(), ".obsidi-claw", "runs.db");
 
-// ---------------------------------------------------------------------------
-// SynthesisMetrics — recorded once per context build (via extension)
-// ---------------------------------------------------------------------------
-
-export interface SynthesisMetrics {
-  sessionId: string;
-  timestamp: number;
-  /** First 120 chars of the prompt (for inspection without storing full text). */
-  promptSnippet: string;
-  seedCount: number;
-  expandedCount: number;
-  toolCount: number;
-  retrievalMs: number;
-  /** Raw char count of all retrieved note bodies before stripping. */
-  rawChars: number;
-  /** Char count of the formatted context after frontmatter stripping. */
-  strippedChars: number;
-  /** Rough token estimate (strippedChars ÷ 4). */
-  estimatedTokens: number;
-}
 
 /**
  * RunLogger — SQLite-backed event store for orchestrator runs.
@@ -101,29 +81,29 @@ export class RunLogger {
       this._finalizeRun(event.runId, "error", event.timestamp);
     }
 
-    this._insertTrace(runId, sessionId, event.type, event.timestamp, event);
-  }
+    if (event.type === "context_retrieved") {
+      this.db
+        .prepare(
+          `INSERT INTO synthesis_metrics
+             (session_id, timestamp, prompt_snippet, seed_count, expanded_count,
+              tool_count, retrieval_ms, raw_chars, stripped_chars, estimated_tokens)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          sessionId,
+          event.timestamp,
+          event.query.slice(0, 120),
+          event.seedCount,
+          event.expandedCount,
+          event.toolCount,
+          event.retrievalMs,
+          event.rawChars,
+          event.strippedChars,
+          event.estimatedTokens,
+        );
+    }
 
-  logSynthesis(m: SynthesisMetrics): void {
-    this.db
-      .prepare(
-        `INSERT INTO synthesis_metrics
-           (session_id, timestamp, prompt_snippet, seed_count, expanded_count,
-            tool_count, retrieval_ms, raw_chars, stripped_chars, estimated_tokens)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        m.sessionId,
-        m.timestamp,
-        m.promptSnippet,
-        m.seedCount,
-        m.expandedCount,
-        m.toolCount,
-        m.retrievalMs,
-        m.rawChars,
-        m.strippedChars,
-        m.estimatedTokens,
-      );
+    this._insertTrace(runId, sessionId, event.type, event.timestamp, event);
   }
 
   close(): void {

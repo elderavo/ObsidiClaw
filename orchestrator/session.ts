@@ -26,6 +26,7 @@ import {
 
 import type { RunLogger } from "../logger/index.js";
 import type { ContextEngine } from "../context_engine/index.js";
+import { createContextEngineMcpServer } from "../context_engine/index.js";
 import { createObsidiClawExtension } from "../extension/factory.js";
 import type { RunEvent, RunId, RunStage, SessionConfig, SessionId } from "./types.js";
 
@@ -241,10 +242,29 @@ export class OrchestratorSession {
           });
         },
 
-        // ObsidiClaw context injection — runs RAG on every turn via before_agent_start.
-        // Passes the already-initialized engine and logger so the extension reuses them.
+        // ObsidiClaw context injection via MCP.
+        // The MCP server wraps the context engine; the onContextBuilt callback routes
+        // full ContextPackage metrics to the orchestrator event log (context_retrieved).
         ...(this.contextEngine
-          ? [createObsidiClawExtension({ contextEngine: this.contextEngine, logger: this.logger })]
+          ? [createObsidiClawExtension({
+              mcpServer: createContextEngineMcpServer(
+                this.contextEngine,
+                (pkg) => this.emit({
+                  type: "context_retrieved",
+                  sessionId: this.sessionId,
+                  runId: this.currentRunId,
+                  timestamp: Date.now(),
+                  query: pkg.query,
+                  seedCount: pkg.seedNoteIds?.length ?? 0,
+                  expandedCount: pkg.expandedNoteIds?.length ?? 0,
+                  toolCount: pkg.suggestedTools.length,
+                  retrievalMs: pkg.retrievalMs,
+                  rawChars: pkg.rawChars,
+                  strippedChars: pkg.strippedChars,
+                  estimatedTokens: pkg.estimatedTokens,
+                }),
+              ),
+            })]
           : []),
       ],
 
