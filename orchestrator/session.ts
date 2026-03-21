@@ -263,6 +263,17 @@ export class OrchestratorSession {
                   strippedChars: pkg.strippedChars,
                   estimatedTokens: pkg.estimatedTokens,
                 }),
+                (pkg) => this.emit({
+                  type: "subagent_start",
+                  sessionId: this.sessionId,
+                  runId: this.currentRunId,
+                  timestamp: Date.now(),
+                  prompt: pkg.input.prompt,
+                  plan: pkg.input.plan,
+                  seedCount: pkg.contextPackage.seedNoteIds?.length ?? 0,
+                  expandedCount: pkg.contextPackage.expandedNoteIds?.length ?? 0,
+                  estimatedTokens: pkg.contextPackage.estimatedTokens,
+                }),
               ),
             })]
           : []),
