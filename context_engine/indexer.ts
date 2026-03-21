@@ -112,20 +112,11 @@ async function buildEnhancedLinkGraph(
     // Access the internal DB from graphStore
     const linkProcessor = new LinkGraphProcessor(graphStore.getDatabase(), mdDbPath);
     
-    // Build the enhanced link graph
+    // Build the enhanced link graph (stores rich wikilink metadata + cycle detection)
+    // Validation (broken links, orphans) is intentionally deferred — it runs LCS-based
+    // fuzzy matching which is too slow for the startup path. Call linkProcessor.isHealthy()
+    // explicitly when you need a validation report (e.g. Phase 7 insight engine).
     await linkProcessor.buildFromMarkdownFiles();
-    
-    // Check for issues and warn if found
-    const isHealthy = await linkProcessor.isHealthy();
-    if (!isHealthy) {
-      const issues = await linkProcessor.getIntegrityIssues();
-      const errorCount = issues.filter(i => i.severity === 'error').length;
-      const warningCount = issues.filter(i => i.severity === 'warning').length;
-      
-      if (errorCount > 0) {
-        console.warn(`[indexer] Link graph: ${errorCount} errors, ${warningCount} warnings detected`);
-      }
-    }
     
   } catch (error) {
     console.error('[indexer] Enhanced link graph build failed:', error);
