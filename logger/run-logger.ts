@@ -21,7 +21,7 @@ export interface RunLoggerOptions {
  * Schema:
  *   runs               — one row per prompt round-trip (run_id PK)
  *   trace              — one row per RunEvent (run_id FK, many per run)
- *   synthesis_metrics  — one row per context build (session_id FK)
+ *   synthesis_metrics  — context build stats + retrieve_context errors (session_id/run_id FK)
  *
  * Session-level events (session_start / session_end) have no run_id;
  * they are written to trace with run_id = NULL.
@@ -76,6 +76,7 @@ export class RunLogger {
       CREATE TABLE IF NOT EXISTS synthesis_metrics (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
         session_id       TEXT    NOT NULL,
+        run_id           TEXT,
         timestamp        INTEGER NOT NULL,
         prompt_snippet   TEXT    NOT NULL,
         seed_count       INTEGER NOT NULL,
@@ -84,7 +85,10 @@ export class RunLogger {
         retrieval_ms     INTEGER NOT NULL,
         raw_chars        INTEGER NOT NULL,
         stripped_chars   INTEGER NOT NULL,
-        estimated_tokens INTEGER NOT NULL
+        estimated_tokens INTEGER NOT NULL,
+        is_error         INTEGER NOT NULL DEFAULT 0,
+        error_type       TEXT,
+        error_message    TEXT
       );
 
       CREATE INDEX IF NOT EXISTS trace_run_id        ON trace(run_id);
@@ -92,6 +96,11 @@ export class RunLogger {
     `);
 
     this._ensureRunSchema();
+    this._ensureSynthesisSchema();
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS synthesis_run_id    ON synthesis_metrics(run_id);
+    `);
   }
 
   private _ensureRunSchema(): void {
@@ -109,6 +118,24 @@ export class RunLogger {
     }
     if (!columnNames.has("review_feedback")) {
       this.db.exec("ALTER TABLE runs ADD COLUMN review_feedback TEXT");
+    }
+  }
+
+  private _ensureSynthesisSchema(): void {
+    const columns = this.db.prepare("PRAGMA table_info(synthesis_metrics)").all() as { name: string }[];
+    const columnNames = new Set(columns.map((col) => col.name));
+
+    if (!columnNames.has("run_id")) {
+      this.db.exec("ALTER TABLE synthesis_metrics ADD COLUMN run_id TEXT");
+    }
+    if (!columnNames.has("is_error")) {
+      this.db.exec("ALTER TABLE synthesis_metrics ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!columnNames.has("error_type")) {
+      this.db.exec("ALTER TABLE synthesis_metrics ADD COLUMN error_type TEXT");
+    }
+    if (!columnNames.has("error_message")) {
+      this.db.exec("ALTER TABLE synthesis_metrics ADD COLUMN error_message TEXT");
     }
   }
 
@@ -132,12 +159,13 @@ export class RunLogger {
       this.db
         .prepare(
           `INSERT INTO synthesis_metrics
-             (session_id, timestamp, prompt_snippet, seed_count, expanded_count,
-              tool_count, retrieval_ms, raw_chars, stripped_chars, estimated_tokens)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (session_id, run_id, timestamp, prompt_snippet, seed_count, expanded_count,
+              tool_count, retrieval_ms, raw_chars, stripped_chars, estimated_tokens, is_error, error_type, error_message)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL)`
         )
         .run(
           sessionId,
+          runId,
           event.timestamp,
           event.query.slice(0, 120),
           event.seedCount,
@@ -147,6 +175,32 @@ export class RunLogger {
           event.rawChars,
           event.strippedChars,
           event.estimatedTokens,
+        );
+    }
+
+    // Log retrieval failures (tool_result errors for retrieve_context) so gaps are visible in metrics.
+    if (event.type === "tool_result" && event.toolName === "retrieve_context" && event.isError) {
+      const errorPayload = (() => {
+        try {
+          return JSON.stringify(event.toolResult).slice(0, 240);
+        } catch {
+          return String(event.toolResult).slice(0, 240);
+        }
+      })();
+
+      this.db
+        .prepare(
+          `INSERT INTO synthesis_metrics
+             (session_id, run_id, timestamp, prompt_snippet, seed_count, expanded_count,
+              tool_count, retrieval_ms, raw_chars, stripped_chars, estimated_tokens, is_error, error_type, error_message)
+           VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 1, 'tool_error', ?)`
+        )
+        .run(
+          sessionId,
+          runId,
+          event.timestamp,
+          "retrieve_context error",
+          errorPayload,
         );
     }
 
@@ -215,7 +269,7 @@ export class RunLogger {
     this.db
       .prepare(
         `INSERT OR IGNORE INTO runs (run_id, session_id, status, start_time, is_subagent)
-         VALUES (?, ?, 'running', ?, ?)`,
+         VALUES (?, ?, 'running', ?, ?)`
       )
       .run(runId, sessionId, startTime, isSubagent ? 1 : 0);
   }
@@ -236,7 +290,7 @@ export class RunLogger {
     this.db
       .prepare(
         `INSERT INTO trace (run_id, session_id, type, timestamp, payload)
-         VALUES (?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?)`
       )
       .run(runId, sessionId, type, timestamp, JSON.stringify(event));
   }

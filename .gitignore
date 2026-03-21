@@ -4,6 +4,7 @@
 !.claude
 !.claude/**
 node_modules
+md_db/
 # Stale compiled JS in source dirs (outDir is dist/, not source)
 context_engine/**/*.js
 extension/**/*.js
