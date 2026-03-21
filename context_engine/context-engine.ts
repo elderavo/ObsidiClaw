@@ -347,7 +347,18 @@ export class ContextEngine {
     }
 
     const t0 = Date.now();
-    this.debug({ type: "ce_reindex_start", timestamp: t0 });
+
+    // Fast path: skip if md_db hasn't changed since last sync
+    const currentHash = await computeMdDbHash(this.config.mdDbPath);
+    const storedHash = this.graphStore.getState("md_db_hash");
+
+    if (currentHash === storedHash) {
+      this.debug({ type: "ce_reindex_start", timestamp: t0, path: "skipped" });
+      this.debug({ type: "ce_reindex_done", timestamp: Date.now(), durationMs: Date.now() - t0, noteCount: 0, skipped: true });
+      return;
+    }
+
+    this.debug({ type: "ce_reindex_start", timestamp: t0, path: "full" });
 
     try {
       await syncMdDbToGraph(this.config.mdDbPath, this.graphStore);
@@ -356,11 +367,10 @@ export class ContextEngine {
       const storageContext = await storageContextFromDefaults({ persistDir: vectorDir });
       this.vectorIndex = await buildVectorIndexFromGraph(this.graphStore, storageContext);
 
-      // Update hash so next startup fast-paths correctly
-      const newHash = await computeMdDbHash(this.config.mdDbPath);
-      this.graphStore.setState("md_db_hash", newHash);
+      // Update hash so next check fast-paths
+      this.graphStore.setState("md_db_hash", currentHash);
 
-      this.debug({ type: "ce_reindex_done", timestamp: Date.now(), durationMs: Date.now() - t0, noteCount: this.graphStore.listAllNotes().length });
+      this.debug({ type: "ce_reindex_done", timestamp: Date.now(), durationMs: Date.now() - t0, noteCount: this.graphStore.listAllNotes().length, skipped: false });
       console.log("[context_engine] Full reindex completed");
 
     } catch (error) {
