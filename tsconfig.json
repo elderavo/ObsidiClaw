@@ -20,7 +20,8 @@
     "extension/**/*.ts",
     "pi_agent/**/*.ts",
     "shared/**/*.ts",
-    "scripts/**/*.ts"
+    "scripts/**/*.ts",
+    "scheduler/**/*.ts"
   ],
   "exclude": ["node_modules", "dist"]
 }

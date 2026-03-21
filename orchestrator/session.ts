@@ -296,6 +296,9 @@ export class OrchestratorSession {
               rawChars: pkg.rawChars,
               strippedChars: pkg.strippedChars,
               estimatedTokens: pkg.estimatedTokens,
+              reviewMs: pkg.reviewResult?.reviewMs,
+              reviewFiltered: pkg.reviewResult?.filteredCount,
+              reviewSkipped: pkg.reviewResult?.skipped,
             }),
             (pkg) => this.emit({
               type: "subagent_start",

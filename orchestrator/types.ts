@@ -111,7 +111,7 @@ export type RunEvent =
   | { type: "pi_session_created";  sessionId: SessionId; runId: RunId; timestamp: number; contextInjected: boolean }
 
   // ── Context retrieval (fired by MCP server via onContextBuilt callback) ──
-  | { type: "context_retrieved"; sessionId: SessionId; runId: RunId; timestamp: number; query: string; seedCount: number; expandedCount: number; toolCount: number; retrievalMs: number; rawChars: number; strippedChars: number; estimatedTokens: number }
+  | { type: "context_retrieved"; sessionId: SessionId; runId: RunId; timestamp: number; query: string; seedCount: number; expandedCount: number; toolCount: number; retrievalMs: number; rawChars: number; strippedChars: number; estimatedTokens: number; reviewMs?: number; reviewFiltered?: number; reviewSkipped?: boolean }
 
   // ── Subagent preparation (fired by MCP server via onSubagentPrepared callback) ──
   | { type: "subagent_start"; sessionId: SessionId; runId: RunId; timestamp: number; prompt: string; plan: string; seedCount: number; expandedCount: number; estimatedTokens: number }
@@ -122,4 +122,9 @@ export type RunEvent =
   | { type: "agent_turn_end";      sessionId: SessionId; runId: RunId; timestamp: number }
   | { type: "agent_done";          sessionId: SessionId; runId: RunId; timestamp: number; messageCount: number }
   | { type: "tool_call";           sessionId: SessionId; runId: RunId; timestamp: number; toolName: string; toolCallId?: string; toolArgs?: unknown }
-  | { type: "tool_result";         sessionId: SessionId; runId: RunId; timestamp: number; toolName: string; toolCallId?: string; isError: boolean; toolResult?: unknown };
+  | { type: "tool_result";         sessionId: SessionId; runId: RunId; timestamp: number; toolName: string; toolCallId?: string; isError: boolean; toolResult?: unknown }
+
+  // ── Scheduled job lifecycle ────────────────────────────────────────────
+  | { type: "job_start";           sessionId: SessionId; timestamp: number; jobName: string; runId: string }
+  | { type: "job_complete";        sessionId: SessionId; timestamp: number; jobName: string; runId: string; durationMs: number }
+  | { type: "job_error";           sessionId: SessionId; timestamp: number; jobName: string; runId: string; error: string };

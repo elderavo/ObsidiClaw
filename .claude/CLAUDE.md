@@ -29,6 +29,11 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 | `tools/` | Live tools for real-time fact retrieval (web search via Perplexity API) |
 | `.pi/extensions/` | Pi TUI extensions: codebase indexing, subagent spawning, web search |
 | `shared/` | Types, config, event schema, MD templates |
+| `shared/os/` | OS compatibility layer: process spawning, filesystem, scheduling backend interface |
+| `shared/agents/` | First-class subagent entity: SubagentRunner, personality loader, personality files |
+| `shared/agents/personalities/` | Subagent personality markdown files (outside md_db, not indexed) |
+| `context_engine/review/` | Context review gate: evaluates retrieved context for relevance before MCP delivery |
+| `scheduler/` | In-process job scheduler with setInterval, built-in reindex + health-check jobs |
 | `insight_engine/` | Compares runs, derives lessons, writes new/updated notes back to md_db (Phase 7–8) |
 
 # Key Design Decisions
@@ -41,6 +46,11 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **Startup injection**: `before_agent_start` calls MCP `get_preferences` and injects `preferences.md` only — no RAG on startup. Pi uses `retrieve_context` for on-demand project knowledge.
 - **Index notes filtered**: `note_type === "index"` notes (TOC/nav files) are excluded from hybrid retrieval results and do not act as graph expansion origins.
 - **LlamaIndex owns embeddings only**: wikilink graph lives in SQLite (`better-sqlite3`); LlamaIndex handles vector seeds.
+- **Subagents are first-class entities**: `SubagentRunner` in `shared/agents/` can be spawned from Pi tools, scheduler, or standalone scripts — no parent Pi session required.
+- **Personalities**: Stored in `shared/agents/personalities/` (outside `md_db/`) with frontmatter provider config. Injected into system prompt before task section.
+- **OS compat layer**: All new code uses `shared/os/` abstractions for process spawning, filesystem, signal handling. No `process.platform` or Windows-specific code.
+- **Context review gate**: Optional quality gate in `ContextEngine.build()` — direct Ollama API call using personality's configured model, triggered by low confidence scores.
+- **Scheduler**: In-process `setInterval`-based. `PersistentScheduleBackend` interface stubbed for future OS-native scheduling (cron/launchd/Task Scheduler).
 
 # Build Order (8 Phases)
 - [x] **Phase 1** — Project skeleton + shared contracts (types, config, event schema, context package schema)
@@ -173,6 +183,17 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **`link_graph/index.ts`** (fix) — `LinkGraphProcessor` was referencing `LinkGraph`, `LinkGraphStorage`, `LinkValidator`, `parseWikiLinks` etc. from re-export-only statements (no local bindings). Added local import statements so the class can reference them. `tsc --noEmit` clean.
 - **Key design**: `pi` TUI and orchestrator paths now both produce full `RunEvent` traces to the same `runs.db` — unified observability across both entry points. Subagent runs appear as child sessions in the same database.
 - **Next**: Phase 7 — comparison engine (query `runs`/`trace` tables, diff run outcomes, feed to insight derivation)
+
+**2026-03-21 — Session 9 (Cron Jobs, Subagent Personalities, Context Review Gate)**
+- **OS compat layer** (`shared/os/`) — `process.ts` (spawn, signals, exit), `fs.ts` (ensureDir, readText, writeText, etc.), `scheduling.ts` (PersistentScheduleBackend interface stub). All new code routes through these; existing code left for follow-up migration.
+- **Subagent as first-class entity** — `SubagentRunner` in `shared/agents/subagent-runner.ts` encapsulates full lifecycle: load personality → build system prompt (with or without RAG) → create child OrchestratorSession → run with timeout/abort → extract output. Can be called from Pi tools, scheduler, or standalone scripts without a parent session.
+- **Personality system** — `shared/agents/personality-loader.ts` reads `.md` files from `shared/agents/personalities/` (outside md_db, not indexed by context engine). Frontmatter includes `provider.model` and `provider.baseUrl` for LLM config per personality. Three built-in: deep-researcher, code-reviewer, context-gardener.
+- **Subagent extension refactor** — `.pi/extensions/subagent.ts` rewritten as thin wrapper around `SubagentRunner`. Added `personality` parameter to `spawn_subagent` and `spawn_subagent_detached`. Removed ~100 lines of duplicated session/MCP/logger management. `scripts/run_detached_subagent.ts` also simplified to use SubagentRunner.
+- **Context review gate** — `context_engine/review/context-reviewer.ts` with `ContextReviewer` class. Direct Ollama `/api/chat` call using personality's model. Confidence-threshold trigger (skips review when avg retrieval score >= threshold). Wired into `ContextEngine.build()` as optional post-retrieval filter. Review metrics flow through `context_retrieved` RunEvent.
+- **Cron scheduler** — `scheduler/scheduler.ts` with `JobScheduler` class using setInterval. `register()`, `start()`, `stop()`, `runNow()`, `setEnabled()`. Built-in jobs: `reindex-md-db` (30min), `health-check` (15min). Job events (`job_start`/`job_complete`/`job_error`) added to RunEvent union. Wired into `orchestrator/run.ts` with graceful shutdown.
+- **Type changes**: `SubagentInput.personality` field, `SubagentPackage.personalityConfig`, `ContextEngineConfig.personalitiesDir` + `.review`, `ContextPackage.reviewResult`, `prepare_subagent` MCP tool gets `personality` param.
+- `tsc --noEmit` clean. Zero platform-specific code (`process.platform`, `win32`, etc.) in any new module.
+- **Next**: Phase 7 — comparison engine. Also: migrate existing OS calls to compat layer, implement `PersistentScheduleBackend` for at least one platform.
 
 # End-of-Run Protocol
 Every agent session MUST close by doing all three:

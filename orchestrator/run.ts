@@ -28,6 +28,7 @@ import { Orchestrator } from "./orchestrator.js";
 import { RunLogger } from "../logger/index.js";
 import { ContextEngine } from "../context_engine/index.js";
 import { resolvePaths } from "../shared/config.js";
+import { JobScheduler, createReindexJob, createHealthCheckJob } from "../scheduler/index.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const paths = resolvePaths(resolve(__dirname, ".."));
@@ -42,6 +43,12 @@ await contextEngine.initialize();
 const debugEnabled = ["1", "true"].includes((process.env["OBSIDI_CLAW_DEBUG"] ?? "").toLowerCase());
 const logger = new RunLogger({ dbPath: paths.dbPath, ...(debugEnabled ? { debugDir: resolve(paths.rootDir, ".obsidi-claw/debug") } : {}) });
 const orchestrator = new Orchestrator(logger, contextEngine);
+
+// ── Scheduler ─────────────────────────────────────────────────────────────
+const scheduler = new JobScheduler(logger);
+scheduler.register(createReindexJob(contextEngine));
+scheduler.register(createHealthCheckJob(contextEngine));
+void scheduler.start();
 
 // ── Start session ─────────────────────────────────────────────────────────
 
@@ -96,6 +103,7 @@ async function gracefulShutdown() {
   rl.pause();
   if (activePrompt) await activePrompt;
   try {
+    await scheduler.stop();
     await session.finalize();
   } catch (err) {
     console.error("\n[session_finalize_error]", err instanceof Error ? err.message : String(err));
