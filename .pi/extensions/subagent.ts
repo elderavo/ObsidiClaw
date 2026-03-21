@@ -54,11 +54,12 @@ export default function subagentExtension(pi: ExtensionAPI) {
   let engine: ContextEngine | undefined;
   let mcpClient: Client | undefined;
 
-  // ── session_start: create standalone engine + MCP client ─────────────────
-  // This engine serves the prepare_subagent MCP call. The child
-  // OrchestratorSession reuses this same engine for the subagent's
-  // retrieve_context — no double-initialization needed.
-  pi.on("session_start", async () => {
+  // ── Lazy init: engine + MCP client created on first spawn_subagent call ──
+  // Avoids a second ContextEngine init at session start (obsidi-claw.ts
+  // already inits one for the main session's retrieve_context).
+  async function ensureInitialized(): Promise<void> {
+    if (engine && mcpClient) return;
+
     const mdDbPath = join(process.cwd(), "md_db");
     engine = new ContextEngine({ mdDbPath });
     await engine.initialize();
@@ -69,7 +70,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
     await server.connect(serverTransport);
     await mcpClient.connect(clientTransport);
-  });
+  }
 
   // ── spawn_subagent tool ───────────────────────────────────────────────────
   pi.registerTool({
@@ -105,11 +106,8 @@ export default function subagentExtension(pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params, signal, onUpdate, _ctx) {
-      if (!mcpClient || !engine) {
-        return {
-          content: [{ type: "text" as const, text: "Subagent extension not initialized — call during an active session." }],
-        };
-      }
+      // Lazy init — first call pays the cost, subsequent calls are instant
+      await ensureInitialized();
 
       const startTime = Date.now();
 
@@ -119,7 +117,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
         details: { status: "preparing" },
       });
 
-      const prepResult = await mcpClient.callTool({
+      const prepResult = await mcpClient!.callTool({
         name: "prepare_subagent",
         arguments: {
           prompt: params.context.trim() || params.plan,

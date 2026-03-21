@@ -9,17 +9,17 @@
  * Optional JSONL: Set OBSIDI_CLAW_DEBUG=1 to also write a per-session JSONL
  *   file to .obsidi-claw/debug/ for easy inspection.
  *
- * Replaces debug-logger.ts (which only captured 3 events with no SQLite
- * persistence). This extension uses the full Pi extension event API.
+ * RunId lifecycle:
+ *   A new runId is generated on the FIRST before_agent_start after session
+ *   start or after the previous agent_end. This ensures one run per user
+ *   prompt, not one per agent loop iteration (before_agent_start fires on
+ *   every turn, including tool-call restarts within a single prompt).
  *
- * Event mapping:
- *   before_agent_start (prompt) → prompt_received + agent_prompt_sent
- *   agent_start                 → agent_turn_start
- *   turn_end                    → agent_turn_end
- *   agent_end (messages)        → agent_done + prompt_complete
- *   tool_execution_start        → tool_call
- *   tool_execution_end          → tool_result
- *   session_shutdown            → session_end  (+ logger.close)
+ * Prompt text:
+ *   The Pi extension API does not expose the user's prompt text in any hook.
+ *   before_agent_start receives the system prompt, not the user message.
+ *   We log text: "(pi-tui)" as a sentinel so pi runs are distinguishable
+ *   from orchestrator runs (which do capture prompt text).
  */
 
 import { join } from "path";
@@ -39,48 +39,53 @@ export default function sessionLoggerExtension(pi: ExtensionAPI) {
 
   const logger = new RunLogger({ dbPath, debugDir });
 
-  // Stable session ID for this pi TUI session
   const sessionId = randomUUID();
 
-  // Current prompt's run ID and start time — updated in before_agent_start
+  // ── RunId state machine ─────────────────────────────────────────────────
+  // needsNewRun starts true (session just opened). Set back to true after
+  // each agent_end. before_agent_start checks it: if true, mint a new runId
+  // (this is the first turn of a new user prompt); if false, this is a
+  // continuation turn within the same prompt (tool-call restart).
   let currentRunId = "";
   let runStartTime = 0;
+  let needsNewRun = true;
 
-  // ── Session start ──────────────────────────────────────────────────────────
+  // ── Session start ──────────────────────────────────────────────────────
 
   pi.on("session_start", () => {
     logger.logEvent({ type: "session_start", sessionId, timestamp: Date.now() });
   });
 
-  // ── Per-prompt boundary: before_agent_start fires once per user prompt ─────
-  // This is the earliest hook — generate a fresh runId here so all subsequent
-  // events in this turn are attributed to the same run.
+  // ── Per-turn hook: before_agent_start ──────────────────────────────────
+  // Fires on every agent loop iteration. Only generate a new runId on the
+  // first iteration of a new user prompt.
 
-  pi.on("before_agent_start", async (event) => {
-    currentRunId = randomUUID();
-    runStartTime = Date.now();
+  pi.on("before_agent_start", async () => {
+    if (needsNewRun) {
+      currentRunId = randomUUID();
+      runStartTime = Date.now();
+      needsNewRun = false;
 
-    const text = (event as unknown as { prompt?: string })?.prompt ?? "";
+      logger.logEvent({
+        type: "prompt_received",
+        sessionId,
+        runId: currentRunId,
+        timestamp: Date.now(),
+        text: "(pi-tui)",
+      });
 
-    logger.logEvent({
-      type: "prompt_received",
-      sessionId,
-      runId: currentRunId,
-      timestamp: Date.now(),
-      text,
-    });
-
-    logger.logEvent({
-      type: "agent_prompt_sent",
-      sessionId,
-      runId: currentRunId,
-      timestamp: Date.now(),
-    });
+      logger.logEvent({
+        type: "agent_prompt_sent",
+        sessionId,
+        runId: currentRunId,
+        timestamp: Date.now(),
+      });
+    }
 
     // Return undefined — do not modify system prompt
   });
 
-  // ── Agent loop events ──────────────────────────────────────────────────────
+  // ── Agent loop events ──────────────────────────────────────────────────
 
   pi.on("agent_start", () => {
     logger.logEvent({
@@ -119,9 +124,12 @@ export default function sessionLoggerExtension(pi: ExtensionAPI) {
       timestamp: Date.now(),
       durationMs: Date.now() - runStartTime,
     });
+
+    // Next before_agent_start should start a new run
+    needsNewRun = true;
   });
 
-  // ── Tool events ────────────────────────────────────────────────────────────
+  // ── Tool events ────────────────────────────────────────────────────────
 
   pi.on("tool_execution_start", (event) => {
     const toolName = String(
@@ -149,7 +157,7 @@ export default function sessionLoggerExtension(pi: ExtensionAPI) {
     });
   });
 
-  // ── Session end ────────────────────────────────────────────────────────────
+  // ── Session end ────────────────────────────────────────────────────────
 
   pi.on("session_shutdown", () => {
     logger.logEvent({ type: "session_end", sessionId, timestamp: Date.now() });

@@ -15,3 +15,5 @@ concepts/preferences
 [[preferences]]
 concepts/heuristics
 [[heuristics]]
+concepts/subagent_context_packaging
+[[subagent_context_packaging]]

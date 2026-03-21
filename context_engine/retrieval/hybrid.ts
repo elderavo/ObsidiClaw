@@ -15,6 +15,8 @@ import type { SqliteGraphStore, StoredNote } from "../store/sqlite_graph.js";
 import type { NoteType, RetrievedNote } from "../types.js";
 
 const GRAPH_SCORE_DECAY = 0.7;
+const TAG_BOOST_PER_MATCH = 0.1;
+const MAX_TAG_BOOST = 0.3;
 
 export interface HybridResult {
   seedNotes: RetrievedNote[];
@@ -46,8 +48,10 @@ export async function hybridRetrieve(
     const path = String(r.node.metadata["file_path"] ?? "");
     if (!path) continue;
 
-    const score = r.score ?? 0;
+    const baseScore = r.score ?? 0;
     const stored = graphStore.getNoteByPath(path);
+    const tags = extractTags(stored?.frontmatter_json);
+    const score = applyTagBoost(baseScore, tags, query);
 
     allSeedNotes.push({
       noteId: path,
@@ -56,6 +60,7 @@ export async function hybridRetrieve(
       score,
       type: (stored?.note_type ?? inferNoteType(path)) as NoteType,
       toolId: stored?.tool_id ?? undefined,
+      tags,
       retrievalSource: "vector",
       depth: 0,
     });
@@ -90,7 +95,9 @@ export async function hybridRetrieve(
     if (!stored) continue;
 
     const parentScore = seedScoreByNoteId.get(neighbor.linkedFrom) ?? 0;
-    const score = parentScore * GRAPH_SCORE_DECAY;
+    const baseScore = parentScore * GRAPH_SCORE_DECAY;
+    const tags = extractTags(stored.frontmatter_json);
+    const score = applyTagBoost(baseScore, tags, query);
 
     expandedNotes.push({
       noteId: neighbor.noteId,
@@ -99,6 +106,7 @@ export async function hybridRetrieve(
       score,
       type: stored.note_type as NoteType,
       toolId: stored.tool_id ?? undefined,
+      tags,
       retrievalSource: "graph",
       depth: neighbor.depth,
       linkedFrom: [neighbor.linkedFrom],
@@ -119,4 +127,72 @@ function inferNoteType(relativePath: string): NoteType {
   if (relativePath.startsWith("tools/")) return "tool";
   if (relativePath.startsWith("concepts/")) return "concept";
   return "index";
+}
+
+function applyTagBoost(score: number, tags: string[], query: string): number {
+  if (score <= 0 || tags.length === 0) return score;
+  const boost = computeTagBoost(tags, query);
+  return score * (1 + boost);
+}
+
+function computeTagBoost(tags: string[], query: string): number {
+  const normalizedQuery = normalizeToken(query);
+  const queryTokens = new Set(normalizeTokens(query));
+
+  let matches = 0;
+  for (const tag of tags) {
+    const normalizedTag = normalizeToken(tag);
+    if (!normalizedTag) continue;
+
+    if (queryTokens.has(normalizedTag) || normalizedQuery.includes(normalizedTag)) {
+      matches++;
+    }
+  }
+
+  if (matches === 0) return 0;
+  return Math.min(MAX_TAG_BOOST, TAG_BOOST_PER_MATCH * matches);
+}
+
+function extractTags(frontmatterJson?: string | null): string[] {
+  if (!frontmatterJson) return [];
+
+  try {
+    const parsed = JSON.parse(frontmatterJson) as Record<string, unknown>;
+    const rawTags = parsed["tags"];
+
+    if (Array.isArray(rawTags)) {
+      return normalizeTagList(rawTags.map((tag) => String(tag)));
+    }
+
+    if (typeof rawTags === "string") {
+      const parts = rawTags.split(",").map((tag) => tag.trim()).filter(Boolean);
+      return normalizeTagList(parts);
+    }
+  } catch {
+    return [];
+  }
+
+  return [];
+}
+
+function normalizeTagList(tags: string[]): string[] {
+  const normalized = tags
+    .map((tag) => normalizeToken(tag))
+    .filter(Boolean);
+  return [...new Set(normalized)];
+}
+
+function normalizeToken(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function normalizeTokens(value: string): string[] {
+  return value
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .map((token) => token.trim())
+    .filter(Boolean);
 }

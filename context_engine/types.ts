@@ -32,6 +32,9 @@ export interface RetrievedNote {
   /** Stem of path for tool notes (e.g. "network"). */
   toolId?: string;
 
+  /** Normalized tags from frontmatter (if available). */
+  tags?: string[];
+
   /** How this note entered the result set. */
   retrievalSource: "vector" | "graph" | "hybrid";
 

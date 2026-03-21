@@ -87,16 +87,60 @@ function splitFrontmatter(
 function parseFrontmatterLines(lines: string[]): Record<string, unknown> {
   const result: Record<string, unknown> = {};
 
-  for (const line of lines) {
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i] ?? "";
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    if (!trimmed || trimmed.startsWith("#")) {
+      i++;
+      continue;
+    }
 
     const colonIdx = trimmed.indexOf(":");
-    if (colonIdx <= 0) continue;
+    if (colonIdx <= 0) {
+      i++;
+      continue;
+    }
 
     const key = trimmed.slice(0, colonIdx).trim();
     const rawValue = trimmed.slice(colonIdx + 1).trim();
-    result[key] = rawValue || null;
+
+    if (!rawValue) {
+      const listValues: string[] = [];
+      let j = i + 1;
+
+      while (j < lines.length) {
+        const nextLine = lines[j] ?? "";
+        const nextTrimmed = nextLine.trim();
+
+        if (!nextTrimmed) break;
+        if (nextTrimmed.startsWith("#")) {
+          j++;
+          continue;
+        }
+
+        const match = nextTrimmed.match(/^-\s+(.+)$/);
+        if (!match) break;
+
+        const value = match[1]?.trim();
+        if (value) listValues.push(value);
+        j++;
+      }
+
+      if (listValues.length > 0) {
+        result[key] = listValues;
+        i = j;
+        continue;
+      }
+
+      result[key] = null;
+      i++;
+      continue;
+    }
+
+    result[key] = rawValue;
+    i++;
   }
 
   return result;
