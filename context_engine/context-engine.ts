@@ -10,12 +10,9 @@
  * The orchestrator calls this in the `context_inject` lifecycle stage, before
  * creating the pi agent session. The returned ContextPackage is injected into
  * the session via agentsFilesOverride, becoming part of the agent's system context.
- *
- * TODO: Phase 6 — tool execution: orchestrator runs suggestedTools and their
- *   outputs are appended to formattedContext before the agent sees it
  */
 
-import { mkdirSync, existsSync } from "fs";
+import { ensureDir, fileExists } from "../shared/os/fs.js";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { Settings, VectorStoreIndex, storageContextFromDefaults } from "llamaindex";
@@ -104,7 +101,7 @@ export class ContextEngine {
   async initialize(): Promise<void> {
     if (this.vectorIndex) return;
 
-    mkdirSync(dirname(this.config.dbPath), { recursive: true });
+    ensureDir(dirname(this.config.dbPath));
 
     Settings.embedModel = new OllamaEmbedding({
       model: this.config.embeddingModel,
@@ -118,7 +115,7 @@ export class ContextEngine {
     const currentHash = await computeMdDbHash(this.config.mdDbPath);
     const storedHash  = this.graphStore.getState("md_db_hash");
 
-    if (currentHash === storedHash && existsSync(vectorFile)) {
+    if (currentHash === storedHash && fileExists(vectorFile)) {
       // ── Fast path: nothing changed ─────────────────────────────────────────
       // Load the persisted vector index from disk. The SQLite graph is already
       // current (it was written on the last slow-path run). No Ollama calls.
@@ -160,35 +157,34 @@ export class ContextEngine {
 
     let allNotes = [...seedNotes, ...expandedNotes].sort((a, b) => b.score - a.score);
 
-    // ── Optional context review gate ──────────────────────────────────────
-    let reviewResult: ContextPackage["reviewResult"] | undefined;
-
-    if (this.reviewer) {
-      const review = await this.reviewer.review(prompt, allNotes);
-      reviewResult = {
-        filteredCount: review.filteredNoteIds.length,
-        reviewMs: review.reviewMs,
-        skipped: review.skipped,
-        skipReason: review.skipReason,
-      };
-
-      if (!review.skipped && review.filteredNoteIds.length > 0) {
-        const filtered = new Set(review.filteredNoteIds);
-        allNotes = allNotes.filter((n) => !filtered.has(n.noteId));
-      }
-    }
-
-    // ── Format and return ─────────────────────────────────────────────────
+    // ── Format raw context ──────────────────────────────────────────────
     const suggestedTools = allNotes
       .filter((n) => n.type === "tool" && n.toolId !== undefined)
       .map((n) => n.toolId!);
 
     const rawChars = allNotes.reduce((sum, n) => sum + n.content.length, 0);
 
-    // Re-split into seeds and expanded for formatting (post-filter)
     const filteredSeeds = allNotes.filter((n) => n.depth === 0 || n.retrievalSource === "vector");
     const filteredExpanded = allNotes.filter((n) => (n.depth ?? 0) > 0 && n.retrievalSource !== "vector");
-    const formattedContext = formatContext(filteredSeeds, filteredExpanded);
+    const rawFormattedContext = formatContext(filteredSeeds, filteredExpanded);
+
+    // ── Optional context review / synthesis ───────────────────────────────
+    let formattedContext = rawFormattedContext;
+    let reviewResult: ContextPackage["reviewResult"] | undefined;
+
+    if (this.reviewer) {
+      const review = await this.reviewer.review(prompt, allNotes, rawFormattedContext);
+      reviewResult = {
+        reviewMs: review.reviewMs,
+        skipped: review.skipped,
+        skipReason: review.skipReason,
+      };
+
+      if (!review.skipped && review.synthesizedContext) {
+        formattedContext = review.synthesizedContext;
+      }
+    }
+
     const retrievalMs = Date.now() - t0;
 
     return {
@@ -485,7 +481,7 @@ function formatContext(seedNotes: RetrievedNote[], expandedNotes: RetrievedNote[
   if (toolNotes.length > 0) {
     lines.push("## Suggested Tools");
     lines.push(
-      "_Tool nodes from the knowledge base. Tool outputs will be injected in Phase 6._",
+      "_Tool nodes from the knowledge base._",
     );
     lines.push("");
     for (const note of toolNotes) {

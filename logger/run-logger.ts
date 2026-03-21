@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
-import { mkdirSync, appendFileSync } from "fs";
 import { dirname, join } from "path";
+import { ensureDir, appendText } from "../shared/os/fs.js";
 import type { RunEvent } from "../orchestrator/types.js";
 
 
@@ -28,8 +28,6 @@ export interface RunLoggerOptions {
  *
  * Debug mode (debugDir set): appends every event as JSONL to
  * {debugDir}/{sessionId}.jsonl for easy inspection.
- *
- * TODO: Phase 7 — add getRuns() / getTrace() query methods for insight engine
  */
 export class RunLogger {
   private readonly db: Database.Database;
@@ -43,13 +41,13 @@ export class RunLogger {
     const dbPath = opts.dbPath;
     this.debugDir = opts.debugDir;
 
-    mkdirSync(dirname(dbPath), { recursive: true });
+    ensureDir(dirname(dbPath));
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
     this._initSchema();
 
     if (this.debugDir) {
-      mkdirSync(this.debugDir, { recursive: true });
+      ensureDir(this.debugDir);
     }
   }
 
@@ -303,9 +301,9 @@ export class RunLogger {
     if (!this.debugSessions.has(sessionId)) {
       this.debugSessions.add(sessionId);
       const header = `# session: ${sessionId}  started: ${new Date().toISOString()}\n`;
-      appendFileSync(filePath, header, "utf8");
+      appendText(filePath, header);
     }
 
-    appendFileSync(filePath, JSON.stringify(event) + "\n", "utf8");
+    appendText(filePath, JSON.stringify(event) + "\n");
   }
 }

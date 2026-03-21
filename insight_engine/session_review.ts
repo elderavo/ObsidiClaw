@@ -1,6 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { ContextEngine } from "../context_engine/index.js";
+import { resolvePaths } from "../shared/config.js";
+import { extractMessageText } from "../shared/text-utils.js";
+import { ensureDir, fileExists, readText, writeText } from "../shared/os/fs.js";
 
 export type ReviewTrigger = "session_end" | "pre_compaction";
 
@@ -76,7 +78,7 @@ export async function runSessionReview(opts: SessionReviewOptions): Promise<void
     const proposal = parseProposal(raw, opts.trigger);
     if (!proposal) return;
 
-    await applyProposal({ proposal, timestamp, rootDir: opts.rootDir ?? process.cwd() });
+    await applyProposal({ proposal, timestamp, rootDir: opts.rootDir ?? resolvePaths().rootDir });
   } finally {
     runner.dispose();
   }
@@ -144,19 +146,8 @@ function formatTranscript(messages: unknown[]): string {
 }
 
 function stringifyContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((c) => {
-        if (typeof c === "string") return c;
-        if (c && typeof c === "object" && "text" in (c as any)) return String((c as any).text);
-        return JSON.stringify(c);
-      })
-      .join("\n");
-  }
-  if (content && typeof content === "object" && "text" in content) {
-    return String((content as any).text);
-  }
+  const text = extractMessageText(content);
+  if (text) return text;
   return JSON.stringify(content ?? "");
 }
 
@@ -208,9 +199,9 @@ async function applyProposal(opts: { proposal: ReviewProposal; timestamp: number
 
 function appendPreferencesInbox(opts: { updates: NonNullable<ReviewProposal["preferences_updates"]>; trigger: ReviewTrigger; timestamp: number; rootDir: string }) {
   const inboxPath = join(opts.rootDir, "md_db", "preferences_inbox.md");
-  mkdirSync(dirname(inboxPath), { recursive: true });
+  ensureDir(dirname(inboxPath));
 
-  const header = existsSync(inboxPath) ? "" : `---\ntype: concept\n---\n\n# Preferences Inbox\n\nPending proposals auto-derived from sessions. Review and merge manually.\n\n`;
+  const header = fileExists(inboxPath) ? "" : `---\ntype: concept\n---\n\n# Preferences Inbox\n\nPending proposals auto-derived from sessions. Review and merge manually.\n\n`;
 
   const lines: string[] = [];
   lines.push(`\n## Proposal (${new Date(opts.timestamp).toISOString()}) — trigger: ${opts.trigger}`);
@@ -223,7 +214,7 @@ function appendPreferencesInbox(opts: { updates: NonNullable<ReviewProposal["pre
   }
 
   const blob = header + lines.join("\n") + "\n";
-  writeFileSync(inboxPath, (existsSync(inboxPath) ? readFileSync(inboxPath, "utf8") : "") + blob, "utf8");
+  writeText(inboxPath, (fileExists(inboxPath) ? readText(inboxPath) : "") + blob);
 }
 
 function writeNewNote(opts: { note: NonNullable<ReviewProposal["new_notes"]>[number]; trigger: ReviewTrigger; timestamp: number; rootDir: string }) {
@@ -233,7 +224,7 @@ function writeNewNote(opts: { note: NonNullable<ReviewProposal["new_notes"]>[num
   const relPath = opts.note.path?.trim() || join("concepts", "auto", `${slug}.md`).replace(/\\/g, "/");
   const absPath = join(root, relPath);
 
-  mkdirSync(dirname(absPath), { recursive: true });
+  ensureDir(dirname(absPath));
 
   const bodyProvided = opts.note.body?.trim();
   const tags = opts.note.tags?.length ? opts.note.tags : ["auto-derived", "insight"];
@@ -255,7 +246,7 @@ function writeNewNote(opts: { note: NonNullable<ReviewProposal["new_notes"]>[num
 
   const content = fm + (bodyProvided || "(no content provided)") + reason + "\n";
 
-  writeFileSync(absPath, content, "utf8");
+  writeText(absPath, content);
 }
 
 function slugify(value: string): string {

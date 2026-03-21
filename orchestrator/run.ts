@@ -28,6 +28,7 @@ import { Orchestrator } from "./orchestrator.js";
 import { RunLogger } from "../logger/index.js";
 import { ContextEngine } from "../context_engine/index.js";
 import { resolvePaths } from "../shared/config.js";
+import { exitProcess, onSignal } from "../shared/os/process.js";
 import { JobScheduler, createReindexJob, createHealthCheckJob } from "../scheduler/index.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -109,13 +110,13 @@ async function gracefulShutdown() {
     console.error("\n[session_finalize_error]", err instanceof Error ? err.message : String(err));
   } finally {
     logger.close();
-    process.exit(0);
+    exitProcess(0);
   }
 }
 
 rl.on("close", () => { void gracefulShutdown(); });
 
-process.on("SIGINT", () => {
+onSignal("SIGINT", () => {
   process.stdout.write("\n[obsidi-claw] Caught SIGINT, shutting down...\n");
   rl.close();
 });

@@ -24,6 +24,7 @@ import { OrchestratorSession } from "../../orchestrator/session.js";
 import { loadPersonality } from "./personality-loader.js";
 import { spawnProcess, getExecPath } from "../os/process.js";
 import { ensureDir, writeText } from "../os/fs.js";
+import { extractMessageText } from "../text-utils.js";
 import type { ContextEngine } from "../../context_engine/context-engine.js";
 import type { PersonalityConfig, SubagentSpec, SubagentResult } from "./types.js";
 
@@ -249,13 +250,3 @@ function formatSystemPromptNoRAG(
   return sections.join("\n");
 }
 
-function extractMessageText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return (content as Array<{ type?: string; text?: string }>)
-      .filter((c) => typeof c?.text === "string")
-      .map((c) => c.text!)
-      .join("\n");
-  }
-  return "";
-}

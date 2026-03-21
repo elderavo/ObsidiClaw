@@ -1,7 +1,5 @@
 /**
  * Context engine public types.
- *
- * TODO: Phase 1 — migrate to shared/types.ts once stable.
  */
 
 // ---------------------------------------------------------------------------
@@ -63,10 +61,7 @@ export interface ContextPackage {
   /** All retrieved notes, sorted by score descending. */
   retrievedNotes: RetrievedNote[];
 
-  /**
-   * Tool IDs from retrieved tool nodes.
-   * TODO: Phase 6 — orchestrator runs these tools; outputs appended to context.
-   */
+  /** Tool IDs from retrieved tool nodes. */
   suggestedTools: string[];
 
   /** Formatted markdown ready for injection into the pi session via agentsFilesOverride. */
@@ -93,9 +88,8 @@ export interface ContextPackage {
   /** Rough token estimate of formattedContext (chars ÷ 4). */
   estimatedTokens: number;
 
-  /** Review result, if context review was performed. */
+  /** Review/synthesis result, if context review was performed. */
   reviewResult?: {
-    filteredCount: number;
     reviewMs: number;
     skipped: boolean;
     skipReason?: string;
@@ -182,7 +176,6 @@ export interface PruneConfig {
 export interface ContextEngineConfig {
   /**
    * Absolute path to the md_db directory.
-   * TODO: Phase 1 — pull from shared/config.ts
    */
   mdDbPath: string;
 

@@ -25,6 +25,7 @@ import { createContextEngineMcpServer } from "../context_engine/index.js";
 import { createObsidiClawExtension } from "../extension/factory.js";
 import { createPiAgentSession } from "../shared/pi-session-factory.js";
 import { resolvePaths } from "../shared/config.js";
+import { extractMessageText } from "../shared/text-utils.js";
 import { runSessionReview, type ReviewTrigger } from "../insight_engine/session_review.js";
 import type { RunEvent, RunId, RunStage, SessionConfig, SessionId } from "./types.js";
 
@@ -245,7 +246,7 @@ export class OrchestratorSession {
       messages: this.messages ?? [],
       compactionMeta,
       contextEngine: this.contextEngine,
-      rootDir: process.cwd(),
+      rootDir: resolvePaths().rootDir,
       createChildSession: async (systemPrompt: string) => {
         const childLogger = new RunLogger({ dbPath: resolvePaths().dbPath });
         const childSession = new OrchestratorSession(childLogger, this.contextEngine, {
@@ -258,7 +259,7 @@ export class OrchestratorSession {
             await childSession.prompt(userMessage);
             const msgs = (childSession.messages ?? []) as Array<{ role?: string; content?: unknown }>;
             const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
-            return extractTextFromContent(lastAssistant?.content) ?? "";
+            return extractMessageText(lastAssistant?.content) || "";
           },
           dispose: () => {
             childSession.dispose();
@@ -274,8 +275,6 @@ export class OrchestratorSession {
    * context-injection extension wired in.
    *
    * Called ONCE per OrchestratorSession (lazy, on first prompt).
-   *
-   * TODO: Phase 1 — pull Ollama config from shared/config.ts
    */
   private async createPiSession() {
     // Build extension factories for context injection (when engine is available)
@@ -297,7 +296,6 @@ export class OrchestratorSession {
               strippedChars: pkg.strippedChars,
               estimatedTokens: pkg.estimatedTokens,
               reviewMs: pkg.reviewResult?.reviewMs,
-              reviewFiltered: pkg.reviewResult?.filteredCount,
               reviewSkipped: pkg.reviewResult?.skipped,
             }),
             (pkg) => this.emit({
@@ -323,20 +321,3 @@ export class OrchestratorSession {
   }
 }
 
-function extractTextFromContent(content: unknown): string | null {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    const parts = content
-      .map((c) => {
-        if (typeof c === "string") return c;
-        if (c && typeof c === "object" && "text" in (c as any)) return String((c as any).text);
-        return null;
-      })
-      .filter(Boolean) as string[];
-    return parts.join("\n") || null;
-  }
-  if (content && typeof content === "object" && "text" in content) {
-    return String((content as any).text);
-  }
-  return null;
-}

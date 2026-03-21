@@ -21,8 +21,6 @@
  */
 
 import { randomUUID } from "crypto";
-import { spawn } from "child_process";
-import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { Type } from "@sinclair/typebox";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -32,20 +30,9 @@ import { type ExtensionFactory } from "@mariozechner/pi-coding-agent";
 import { ContextEngine } from "../context_engine/index.js";
 import { createContextEngineMcpServer } from "../context_engine/index.js";
 import { resolvePaths } from "../shared/config.js";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Extract the first text block from an MCP CallToolResult.
- * callTool() returns { [x: string]: unknown; content: ContentBlock[] } but the
- * index signature widens content to unknown in TypeScript, so we cast here.
- */
-function extractText(result: unknown): string {
-  const blocks = (result as { content?: Array<{ type: string; text?: string }> }).content ?? [];
-  return blocks.find((c) => c.type === "text")?.text ?? "";
-}
+import { extractMcpText } from "../shared/text-utils.js";
+import { ensureDir, writeText } from "../shared/os/fs.js";
+import { spawnProcess, getExecPath } from "../shared/os/process.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -125,7 +112,7 @@ export function createObsidiClawExtension(
     // ── session_start: initialize engine (if owned) + connect MCP pair ──────
     pi.on("session_start", async () => {
       // Ensure .obsidi-claw/ directory exists for detached workers (review, subagent)
-      mkdirSync(join(paths.rootDir, ".obsidi-claw"), { recursive: true });
+      ensureDir(join(paths.rootDir, ".obsidi-claw"));
       if (ownedEngine) await ownedEngine.initialize();
       await mcpServer.connect(serverTransport);
       await client.connect(clientTransport);
@@ -148,7 +135,7 @@ export function createObsidiClawExtension(
       }),
       execute: async (_toolCallId, { query }, _signal, _onUpdate, _ctx) => {
         const result = await client.callTool({ name: "retrieve_context", arguments: { query } });
-        const text = extractText(result);
+        const text = extractMcpText(result);
         return {
           content: [{ type: "text" as const, text }],
           details: { query },
@@ -161,7 +148,7 @@ export function createObsidiClawExtension(
     pi.on("before_agent_start", async (event, ctx) => {
       try {
         const result = await client.callTool({ name: "get_preferences", arguments: {} });
-        const prefsContent = extractText(result);
+        const prefsContent = extractMcpText(result);
 
         const contextBlock = prefsContent
           ? `<!-- ObsidiClaw: Preferences -->\n\n${prefsContent}\n\n<!-- End ObsidiClaw Preferences -->`
@@ -200,7 +187,7 @@ export function createObsidiClawExtension(
           const logPath = join(workDir, `${jobId}.log`);
           const scriptPath = join(paths.rootDir, "dist", "scripts", "run_detached_subagent.js");
 
-          mkdirSync(workDir, { recursive: true });
+          ensureDir(workDir);
 
           const spec = {
             type: "review",
@@ -216,9 +203,9 @@ export function createObsidiClawExtension(
             createdAt: Date.now(),
           };
 
-          writeFileSync(specPath, JSON.stringify(spec, null, 2), "utf8");
+          writeText(specPath, JSON.stringify(spec, null, 2));
 
-          const child = spawn(process.execPath, [scriptPath, specPath], {
+          const child = spawnProcess(getExecPath(), [scriptPath, specPath], {
             detached: true,
             stdio: "ignore",
           });

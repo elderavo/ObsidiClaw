@@ -12,6 +12,7 @@ import { dirname, resolve, join } from "path";
 
 import { ContextEngine } from "../context_engine/index.js";
 import { SubagentRunner } from "../shared/agents/subagent-runner.js";
+import { exitProcess } from "../shared/os/process.js";
 import { resolvePaths } from "../shared/config.js";
 import { readText, writeText, ensureDir, appendText } from "../shared/os/fs.js";
 
@@ -40,7 +41,7 @@ async function main() {
   const specPath = process.argv[2];
   if (!specPath) {
     console.error("Usage: run_detached_subagent.js <specPath>");
-    process.exit(1);
+    exitProcess(1);
   }
 
   const spec: DetachedSubagentSpec = JSON.parse(readText(specPath));
@@ -130,6 +131,6 @@ const currentFile = fileURLToPath(import.meta.url);
 if (process.argv[1] === currentFile || process.argv[1] === currentFile.replace(/\.ts$/, ".js")) {
   main().catch((err) => {
     console.error(err);
-    process.exit(1);
+    exitProcess(1);
   });
 }
