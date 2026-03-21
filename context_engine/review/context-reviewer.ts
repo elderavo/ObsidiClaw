@@ -1,14 +1,16 @@
 /**
- * Context Reviewer — quality gate between retrieval and MCP delivery.
+ * Context Reviewer — synthesis step between retrieval and MCP delivery.
  *
- * When enabled, takes the raw formatted context + query and asks the
- * configured personality's LLM to synthesize a focused, query-specific
- * context document. The LLM outputs natural language (markdown), not
- * structured JSON — no fragile parsing required.
+ * Takes the raw formatted context + query and asks the configured
+ * personality's LLM to synthesize a focused, query-specific context
+ * document. The LLM outputs natural language (markdown), not structured
+ * JSON — no fragile parsing required.
+ *
+ * Always-on by default. Falls back to raw context on LLM/network errors.
+ * Set `enabled: false` to explicitly disable.
  *
  * Configurable:
- *   - enabled: off by default
- *   - confidenceThreshold: review only triggers when avg score is below this
+ *   - enabled: on by default
  *   - personality: which personality profile to use for the review LLM
  *   - maxLatencyMs: timeout for the review call
  */
@@ -24,15 +26,8 @@ import type { RetrievedNote } from "../types.js";
 // ---------------------------------------------------------------------------
 
 export interface ContextReviewConfig {
-  /** Whether review is enabled. Default: false. */
+  /** Whether review is enabled. Default: true (always-on). */
   enabled: boolean;
-
-  /**
-   * Average retrieval score below which review triggers.
-   * If avg score >= threshold, review is skipped (high confidence).
-   * Default: 0.5
-   */
-  confidenceThreshold: number;
 
   /** Personality name to use for the review. Default: "context-gardener". */
   personality: string;
@@ -55,7 +50,7 @@ export interface ReviewResult {
   skipped: boolean;
 
   /** Reason for skipping, if skipped. */
-  skipReason?: "disabled" | "high_confidence" | "timeout" | "error" | "no_notes";
+  skipReason?: "disabled" | "timeout" | "error" | "no_notes";
 }
 
 // ---------------------------------------------------------------------------
@@ -63,8 +58,7 @@ export interface ReviewResult {
 // ---------------------------------------------------------------------------
 
 const DEFAULTS: ContextReviewConfig = {
-  enabled: false,
-  confidenceThreshold: 0.5,
+  enabled: true,
   personality: "context-gardener",
   maxLatencyMs: 15_000,
   personalitiesDir: "",
@@ -85,7 +79,7 @@ export class ContextReviewer {
    * Review retrieved context and produce a synthesized, query-focused version.
    *
    * @param query              The user's original query.
-   * @param notes              Retrieved notes (used for avg-score confidence check).
+   * @param notes              Retrieved notes (used for no-notes skip check).
    * @param rawFormattedContext Pre-formatted context from formatContext() — sent to the LLM as input.
    * @returns ReviewResult with synthesizedContext (the LLM's output) or null if skipped/failed.
    */
@@ -100,17 +94,6 @@ export class ContextReviewer {
     // Skip if no notes
     if (notes.length === 0) {
       return { synthesizedContext: null, reviewMs: 0, skipped: true, skipReason: "no_notes" };
-    }
-
-    // Skip if high confidence (avg score above threshold)
-    const avgScore = notes.reduce((sum, n) => sum + n.score, 0) / notes.length;
-    if (avgScore >= this.config.confidenceThreshold) {
-      return {
-        synthesizedContext: null,
-        reviewMs: Date.now() - t0,
-        skipped: true,
-        skipReason: "high_confidence",
-      };
     }
 
     // Load personality for system prompt and model config

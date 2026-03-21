@@ -82,13 +82,13 @@ export class ContextEngine {
       ...(config.pruneConfig ?? {}),
     };
 
-    // Initialize context reviewer if enabled
-    this.reviewer = config.review?.enabled
-      ? new ContextReviewer({
-          ...config.review,
+    // Initialize context reviewer — always-on unless explicitly disabled
+    this.reviewer = config.review?.enabled === false
+      ? null
+      : new ContextReviewer({
+          ...(config.review ?? {}),
           personalitiesDir: this.config.personalitiesDir,
-        })
-      : null;
+        });
   }
 
   /**

@@ -212,12 +212,12 @@ export interface ContextEngineConfig {
   personalitiesDir?: string;
 
   /**
-   * Context review configuration. Disabled by default.
-   * When enabled, retrieved context is evaluated for relevance before delivery.
+   * Context review configuration. Always-on by default.
+   * Set `enabled: false` to explicitly disable.
+   * Falls back to raw context on LLM/network errors.
    */
   review?: {
     enabled?: boolean;
-    confidenceThreshold?: number;
     personality?: string;
     maxLatencyMs?: number;
   };
