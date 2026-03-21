@@ -11,7 +11,8 @@
       "Bash(npx tsx:*)",
       "Bash(cd:*)",
       "Bash(find . -not -path './node_modules/*' -not -path './dist/*' -name '*.js' -delete)",
-      "Bash(grep -r \"mcp\\\\|Mcp\\\\|MCP\" /c/Users/Alex/Desktop/Projects/Coding/ObsidiClaw/node_modules/@mariozechner/pi-coding-agent/dist --include=*.d.ts)"
+      "Bash(grep -r \"mcp\\\\|Mcp\\\\|MCP\" /c/Users/Alex/Desktop/Projects/Coding/ObsidiClaw/node_modules/@mariozechner/pi-coding-agent/dist --include=*.d.ts)",
+      "Bash(find C:UsersAlexDesktopProjectsCodingObsidiClawnode_modules@mariozechnerpi-coding-agent -name *.ts -not -path */node_modules/*)"
     ]
   }
 }

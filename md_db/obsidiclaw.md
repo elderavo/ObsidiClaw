@@ -51,3 +51,42 @@ Self-knowledge about the ObsidiClaw project I'm currently operating within. This
 ## Status Tracking
 
 Current session status tracked in `.claude/CLAUDE.md` - always check phase progress and update session notes before ending work.
+
+
+
+
+----
+
+  ---
+  What happens when you run pi                                                                                                                                                   
+  pi (CLI binary from @mariozechner/pi-coding-agent)                                                                                                                                 └── DefaultResourceLoader.reload()
+          ├── packageManager.resolve()  ← scans .pi/extensions/ automatically
+          │     ├── .pi/extensions/codebase-indexer.ts  ✅ loads
+          │     ├── .pi/extensions/debug-logger.ts      ✅ loads
+          │     ├── .pi/extensions/subagent.ts           ✅ loads
+          │     └── .pi/extensions/web-search.ts         ✅ loads
+          └── extensionFactories: []   ← nothing, you passed none
+                └── (empty)
+
+  What runs from YOUR code: only the four .pi/extensions/ files. Nothing else.
+
+  What does NOT run: extension/factory.ts (the one that wires retrieve_context and before_agent_start context injection). The orchestrator (orchestrator/session.ts, RunLogger)
+  is completely absent.
+
+  ---
+  What happens when you run npx tsx orchestrator/run.ts
+
+  orchestrator/run.ts
+    └── OrchestratorSession.createPiSession()
+          └── DefaultResourceLoader({ extensionFactories: [...] }).reload()
+                ├── packageManager.resolve()  ← SAME auto-scan of .pi/extensions/
+                │     ├── .pi/extensions/codebase-indexer.ts  ✅ loads
+                │     ├── .pi/extensions/debug-logger.ts      ✅ loads
+                │     ├── .pi/extensions/subagent.ts           ✅ loads
+                │     └── .pi/extensions/web-search.ts         ✅ loads
+                └── extensionFactories (explicit, from orchestrator)
+                      ├── ollamaProvider                       ✅ loads
+                      └── createObsidiClawExtension(...)       ✅ loads  ← this is the missing piece
+
+  DefaultResourceLoader ALWAYS auto-discovers .pi/extensions/ unless you pass noExtensions: true. So both paths load the same four files. The orchestrator adds
+  createObsidiClawExtension on top.

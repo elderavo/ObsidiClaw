@@ -55,7 +55,8 @@ const SUPPORTED_EXTENSIONS: Record<string, string> = {
 
 // Directories and files to exclude
 const EXCLUDE_PATTERNS = [
-  '.git', 
+  'node_modules',
+  '.git',
   '.svn',
   '.hg',
   'dist',

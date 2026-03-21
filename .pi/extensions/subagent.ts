@@ -1,229 +1,249 @@
 /**
- * Subagent Extension Framework
- * 
- * Enables the main LLM to spawn specialized subagents for focused tasks.
- * Each subagent call gets its own run in the logging system.
+ * Subagent Extension
+ *
+ * Enables the main Pi agent to spawn a focused in-process subagent.
+ *
+ * Workflow:
+ *   1. Main agent calls spawn_subagent(plan, context, success_criteria)
+ *   2. Extension calls MCP prepare_subagent → ContextEngine builds SubagentPackage
+ *      (hybrid RAG on the plan, bundles plan + context + criteria into system prompt)
+ *   3. Extension creates a fresh in-process Pi session with the SubagentPackage
+ *      injected as the system prompt, plus its own retrieve_context tool
+ *   4. Subagent runs to completion; output is returned to the main agent
+ *
+ * No subprocess spawning — everything runs in-process via createAgentSession.
  */
 
 import { Type } from "@sinclair/typebox";
-import { StringEnum } from "@mariozechner/pi-ai";
-import { spawn } from "node:child_process";
-import { writeFile, unlink, mkdir } from "node:fs/promises";
-import { join } from "node:path";
-import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import {
+  createAgentSession,
+  DefaultResourceLoader,
+  SessionManager,
+} from "@mariozechner/pi-coding-agent";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { join } from "path";
+import { ContextEngine } from "../../context_engine/index.js";
+import { createContextEngineMcpServer } from "../../context_engine/index.js";
+import { createObsidiClawExtension } from "../../extension/factory.js";
 
-export default function (pi: ExtensionAPI) {
-  const activeSubagents = new Set<{ process: any; tempFiles: string[] }>();
+// ---------------------------------------------------------------------------
+// Provider constants — mirrors orchestrator/session.ts
+// ---------------------------------------------------------------------------
 
+const OLLAMA_BASE_URL = process.env["OLLAMA_BASE_URL"] ?? "http://10.0.132.100/v1";
+const OLLAMA_MODEL    = process.env["OLLAMA_MODEL"]    ?? "llama3";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function extractText(result: unknown): string {
+  const blocks = (result as { content?: Array<{ type: string; text?: string }> }).content ?? [];
+  return blocks.find((c) => c.type === "text")?.text ?? "";
+}
+
+function extractMessageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return (content as Array<{ type?: string; text?: string }>)
+      .filter((c) => typeof c?.text === "string")
+      .map((c) => c.text!)
+      .join("\n");
+  }
+  return "";
+}
+
+// ---------------------------------------------------------------------------
+// Extension
+// ---------------------------------------------------------------------------
+
+export default function subagentExtension(pi: ExtensionAPI) {
+  let engine: ContextEngine | undefined;
+  let mcpClient: Client | undefined;
+
+  // ── session_start: create standalone engine + MCP client ─────────────────
+  pi.on("session_start", async () => {
+    const mdDbPath = join(process.cwd(), "md_db");
+    engine = new ContextEngine({ mdDbPath });
+    await engine.initialize();
+
+    const server = createContextEngineMcpServer(engine);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    mcpClient = new Client({ name: "subagent-ext", version: "1.0.0" });
+
+    await server.connect(serverTransport);
+    await mcpClient.connect(clientTransport);
+  });
+
+  // ── spawn_subagent tool ───────────────────────────────────────────────────
   pi.registerTool({
     name: "spawn_subagent",
-    label: "Spawn Subagent", 
-    description: "Launch a specialized Pi subagent for a focused task with specific plan, context, and success criteria",
-    promptSnippet: "spawn_subagent(plan, context, success_criteria) — launch specialized subagent",
+    label: "Spawn Subagent",
+    description:
+      "Launch a focused in-process Pi subagent. Before calling, create a detailed " +
+      "implementation spec using the subagent spec template. The subagent gets full " +
+      "retrieve_context access and a system prompt built from the plan + retrieved knowledge.",
+    promptSnippet: "spawn_subagent(plan, context, success_criteria) — launch focused subagent",
+    promptGuidelines: [
+      "Write a detailed plan before calling — the plan drives knowledge retrieval",
+      "success_criteria should be unambiguous and measurable",
+      "Use context to pass any facts the subagent needs that aren't in the knowledge base",
+    ],
     parameters: Type.Object({
       plan: Type.String({
-        description: "Detailed plan of what the subagent should accomplish"
+        description: "Detailed implementation plan for the subagent to execute",
       }),
       context: Type.String({
-        description: "Relevant context and background information for the subagent"  
+        description: "Additional background facts from the main agent (complements retrieved knowledge)",
       }),
       success_criteria: Type.String({
-        description: "Clear criteria for determining if the task was completed successfully"
+        description: "Clear, measurable criteria for determining task completion",
       }),
-      timeout_minutes: Type.Optional(Type.Number({
-        description: "Maximum runtime in minutes (default: 5)",
-        minimum: 1,
-        maximum: 30
-      }))
+      timeout_minutes: Type.Optional(
+        Type.Number({
+          description: "Max runtime in minutes (default: 5, max: 30)",
+          minimum: 1,
+          maximum: 30,
+        }),
+      ),
     }),
 
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, onUpdate, _ctx) {
+      if (!mcpClient || !engine) {
+        return {
+          content: [{ type: "text" as const, text: "Subagent extension not initialized — call during an active session." }],
+        };
+      }
+
       const startTime = Date.now();
-      const subagentId = randomUUID();
-      
-      onUpdate?.({ 
-        content: [{ type: "text", text: `🤖 Launching subagent: ${params.plan.slice(0, 80)}...` }],
-        details: { subagentId, status: "launching" }
+
+      // ── Step 1: prepare_subagent via MCP ─────────────────────────────────
+      // ContextEngine runs hybrid RAG on the plan and bundles everything into
+      // a formattedSystemPrompt. The onSubagentPrepared callback fires here if
+      // the orchestrator wired one (logs the subagent_start RunEvent).
+      onUpdate?.({
+        content: [{ type: "text", text: "Retrieving context for subagent..." }],
+        details: { status: "preparing" },
       });
 
-      try {
-        const result = await spawnSubagent(params, {
-          signal,
-          onUpdate: (status, message) => {
-            onUpdate?.({
-              content: [{ type: "text", text: `🤖 ${status}: ${message}` }],
-              details: { subagentId, status }
+      const prepResult = await mcpClient.callTool({
+        name: "prepare_subagent",
+        arguments: {
+          prompt: params.context.trim() || params.plan,
+          plan: params.plan,
+          success_criteria: params.success_criteria,
+        },
+      });
+
+      const formattedSystemPrompt = extractText(prepResult);
+
+      if (!formattedSystemPrompt) {
+        return {
+          content: [{ type: "text" as const, text: "prepare_subagent returned no content — cannot spawn subagent." }],
+        };
+      }
+
+      onUpdate?.({
+        content: [{ type: "text", text: "Context packaged. Spawning subagent..." }],
+        details: { status: "spawning" },
+      });
+
+      // ── Step 2: create in-process Pi subagent session ────────────────────
+      // The subagent gets:
+      //   - Ollama provider (same model as parent)
+      //   - createObsidiClawExtension (own standalone engine) for retrieve_context
+      //   - formattedSystemPrompt injected via systemPromptOverride
+      const mdDbPath = join(process.cwd(), "md_db");
+      const loader = new DefaultResourceLoader({
+        extensionFactories: [
+          (subPi) => {
+            subPi.registerProvider("ollama", {
+              baseUrl: OLLAMA_BASE_URL,
+              apiKey: "ollama",
+              api: "openai-completions",
+              models: [
+                {
+                  id: OLLAMA_MODEL,
+                  name: `Ollama / ${OLLAMA_MODEL}`,
+                  reasoning: false,
+                  input: ["text"],
+                  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                  contextWindow: 32768,
+                  maxTokens: 4096,
+                  compat: {
+                    supportsDeveloperRole: false,
+                    maxTokensField: "max_tokens",
+                  },
+                },
+              ],
             });
-          }
-        });
+          },
+          createObsidiClawExtension({ mdDbPath }),
+        ],
+        systemPromptOverride: () => formattedSystemPrompt,
+      });
 
-        const duration = Date.now() - startTime;
-        
+      await loader.reload();
+
+      const { session } = await createAgentSession({
+        resourceLoader: loader,
+        sessionManager: SessionManager.inMemory(),
+      });
+
+      // ── Step 3: run the subagent with timeout + cancellation ─────────────
+      const timeoutMs = (params.timeout_minutes ?? 5) * 60 * 1000;
+
+      const runPromise = (async (): Promise<"done"> => {
+        await session.prompt(params.plan);
+        await session.agent.waitForIdle();
+        return "done";
+      })();
+
+      const timeoutPromise = new Promise<"timeout">((resolve) => {
+        setTimeout(() => resolve("timeout"), timeoutMs);
+      });
+
+      const cancelPromise = new Promise<"cancelled">((resolve) => {
+        signal?.addEventListener("abort", () => resolve("cancelled"));
+      });
+
+      const outcome = await Promise.race([runPromise, timeoutPromise, cancelPromise]);
+
+      // ── Step 4: extract output + dispose ─────────────────────────────────
+      const messages = session.messages as Array<{ role: string; content: unknown }>;
+      const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+      const output = extractMessageText(lastAssistant?.content) || "(no output)";
+
+      session.dispose();
+
+      const durationS = Math.round((Date.now() - startTime) / 1000);
+
+      if (outcome === "cancelled") {
         return {
-          content: [{
-            type: "text",
-            text: result.success 
-              ? `✅ **Subagent completed** (${Math.round(duration/1000)}s)\n\n${result.output}`
-              : `❌ **Subagent failed** (${Math.round(duration/1000)}s)\n\n**Error:** ${result.error}\n\n**Output:** ${result.output}`
-          }],
-          details: { subagent_result: result, duration_ms: duration }
+          content: [{ type: "text" as const, text: `Subagent cancelled after ${durationS}s.\n\n${output}` }],
+          details: { outcome: "cancelled", duration_ms: Date.now() - startTime },
         };
+      }
 
-      } catch (error) {
-        const duration = Date.now() - startTime;
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        
+      if (outcome === "timeout") {
         return {
-          content: [{
-            type: "text", 
-            text: `💥 **Subagent failed** (${Math.round(duration/1000)}s): ${errorMessage}`
-          }],
-          details: { error: errorMessage, duration_ms: duration }
+          content: [{ type: "text" as const, text: `Subagent timed out after ${params.timeout_minutes ?? 5}m.\n\n${output}` }],
+          details: { outcome: "timeout", duration_ms: Date.now() - startTime },
         };
       }
-    }
-  });
-
-  // Cleanup on shutdown
-  pi.on("session_shutdown", async () => {
-    for (const subagent of activeSubagents) {
-      try {
-        subagent.process.kill('SIGTERM');
-        for (const file of subagent.tempFiles) {
-          await unlink(file).catch(() => {});
-        }
-      } catch (error) {
-        // Ignore cleanup errors
-      }
-    }
-    activeSubagents.clear();
-  });
-
-  async function spawnSubagent(
-    params: { plan: string; context: string; success_criteria: string; timeout_minutes?: number },
-    options: {
-      signal?: AbortSignal;
-      onUpdate?: (status: string, message: string) => void;
-    }
-  ) {
-    const { signal, onUpdate } = options;
-    const tempFiles: string[] = [];
-    const subagentId = randomUUID();
-    
-    try {
-      // Create session directory
-      const sessionDir = join(process.cwd(), '.claude', 'subagent-sessions', subagentId);
-      await mkdir(sessionDir, { recursive: true });
-
-      // Create prompt file
-      const promptFile = join(sessionDir, 'prompt.txt');
-      tempFiles.push(promptFile);
-      
-      const prompt = createSubagentPrompt(params);
-      await writeFile(promptFile, prompt, 'utf8');
-      
-      onUpdate?.("initializing", "Created subagent prompt");
-
-      // Spawn Pi process
-      const piProcess = spawn('npx', ['pi', '-p'], {
-        cwd: process.cwd(),
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env }
-      });
-
-      // Track for cleanup
-      const subagentInfo = { process: piProcess, tempFiles };
-      activeSubagents.add(subagentInfo);
-
-      let stdout = '';
-      let stderr = '';
-      
-      piProcess.stdout?.on('data', (data) => {
-        stdout += data.toString();
-      });
-      
-      piProcess.stderr?.on('data', (data) => {
-        stderr += data.toString();
-      });
-
-      // Handle cancellation
-      if (signal) {
-        signal.addEventListener('abort', () => {
-          piProcess.kill('SIGTERM');
-        });
-      }
-
-      onUpdate?.("running", `Started subagent (PID: ${piProcess.pid})`);
-
-      // Send prompt
-      piProcess.stdin?.write(prompt);
-      piProcess.stdin?.end();
-
-      // Wait for completion with timeout
-      const timeoutMs = (params.timeout_minutes || 5) * 60 * 1000;
-      const timeoutId = setTimeout(() => {
-        piProcess.kill('SIGTERM');
-      }, timeoutMs);
-
-      const exitCode = await new Promise<number | null>((resolve) => {
-        piProcess.on('close', (code) => {
-          clearTimeout(timeoutId);
-          resolve(code);
-        });
-      });
-
-      // Cleanup
-      activeSubagents.delete(subagentInfo);
-      for (const file of tempFiles) {
-        await unlink(file).catch(() => {});
-      }
-
-      const success = exitCode === 0;
-      onUpdate?.("completed", success ? "Success" : `Failed (exit ${exitCode})`);
 
       return {
-        success,
-        output: stdout.trim() || "(no output)",
-        error: success ? undefined : (stderr || `Process exited with code ${exitCode}`),
-        exit_code: exitCode
+        content: [{ type: "text" as const, text: `**Subagent completed** (${durationS}s)\n\n${output}` }],
+        details: { outcome: "done", duration_ms: Date.now() - startTime },
       };
+    },
+  });
 
-    } catch (error) {
-      // Cleanup on error
-      for (const file of tempFiles) {
-        await unlink(file).catch(() => {});
-      }
-      
-      throw error;
-    }
-  }
-
-  function createSubagentPrompt(params: { plan: string; context: string; success_criteria: string }): string {
-    return `# Subagent Task
-
-You are a specialized AI assistant focused on completing a specific task.
-
-## Your Mission
-
-**PLAN**: ${params.plan}
-
-**CONTEXT**: ${params.context}
-
-**SUCCESS CRITERIA**: ${params.success_criteria}
-
-## Instructions
-
-1. Focus exclusively on the plan above
-2. Use the provided context to inform your approach
-3. Work systematically towards the success criteria
-4. Use available tools as needed (read, write, edit, bash)
-5. Be efficient - you have limited time
-6. Provide a clear summary when complete
-
-Your task is complete when: ${params.success_criteria}
-
-Begin working now.
-`;
-  }
+  // ── session_shutdown: clean up ────────────────────────────────────────────
+  pi.on("session_shutdown", async () => {
+    await mcpClient?.close();
+    engine?.close();
+  });
 }

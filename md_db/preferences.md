@@ -28,16 +28,18 @@ When troubleshooting any system issue, I should: traverse the relevant codebase,
 
 5. **Deep Troubleshooting**: For troubleshooting requests: **Always traverse the codebase, make a hypothesis, and suggest a fix.** Don't just identify the problem - understand the system deeply and propose concrete solutions.
 
-6. **Brevity**: Don't blow through tokens. If asked to do something, be concise. If asked to explain, you can be a little more verbose. 
+6. **Brevity**: Don't blow through tokens. If asked to do something, be concise. If asked to explain, you can be a little more verbose.
+
+7. **Code Implementation**: **Only write code when explicitly asked to implement something.** When asked about architecture, design, or planning - provide analysis and plans without automatically implementing. Wait for explicit implementation requests.
 
 ## General Principles
 
-6. **Everything in Its Place**: Separate general operational knowledge from project-specific knowledge. Use context retrieval to access domain-specific information rather than hardcoding it into startup preferences.
+8. **Everything in Its Place**: Separate general operational knowledge from project-specific knowledge. Use context retrieval to access domain-specific information rather than hardcoding it into startup preferences.
 
-7. **Systematic Thinking**: Approach complex systems by understanding interfaces, data flow, and architectural boundaries before diving into implementation details.
+9. **Systematic Thinking**: Approach complex systems by understanding interfaces, data flow, and architectural boundaries before diving into implementation details.
 
-8. **Documentation Hygiene**: When working on projects with documentation systems, always update status and leave clear session notes for continuity.
+10. **Documentation Hygiene**: When working on projects with documentation systems, always update status and leave clear session notes for continuity.
 
-9. **Context First**: Before making assumptions about a system, use available tools to gather current context and understanding.
+11. **Context First**: Before making assumptions about a system, use available tools to gather current context and understanding.
 
-10. **Tool-Building Mindset**: When facing repetitive tasks or system gaps, consider building tools to solve them systematically rather than working around them. 
+12. **Tool-Building Mindset**: When facing repetitive tasks or system gaps, consider building tools to solve them systematically rather than working around them. 

@@ -19,6 +19,7 @@ import { join, relative, extname } from "path";
 import { Document, VectorStoreIndex } from "llamaindex";
 import { parseMarkdownFile } from "./ingest/parser.js";
 import type { SqliteGraphStore } from "./store/sqlite_graph.js";
+import { LinkGraphProcessor } from "./link_graph/index.js";
 
 // ---------------------------------------------------------------------------
 // File collection
@@ -49,6 +50,7 @@ async function collectMarkdownFiles(dir: string): Promise<string[]> {
  *
  * Pass 1: upsert every note (notes table must be complete before edges).
  * Pass 2: resolve [[wikilinks]] and replace edges for each note.
+ * Pass 3: build enhanced link graph with cycle detection and validation.
  *
  * Unresolved links (notes not in the db) are silently dropped —
  * SqliteGraphStore.replaceEdges filters them out.
@@ -93,6 +95,42 @@ export async function syncMdDbToGraph(
 
   const totalLinks = parsedNotes.reduce((sum, n) => sum + n.linksOut.length, 0);
   //console.log(`[indexer] Resolved edges (${totalLinks} raw links → graph)`);
+
+  // Pass 3 — build enhanced link graph with cycle detection
+  await buildEnhancedLinkGraph(mdDbPath, graphStore);
+}
+
+/**
+ * Build enhanced link graph with cycle detection and validation.
+ * This runs as part of the standard indexing process.
+ */
+async function buildEnhancedLinkGraph(
+  mdDbPath: string, 
+  graphStore: SqliteGraphStore
+): Promise<void> {
+  try {
+    // Access the internal DB from graphStore
+    const linkProcessor = new LinkGraphProcessor(graphStore.getDatabase(), mdDbPath);
+    
+    // Build the enhanced link graph
+    await linkProcessor.buildFromMarkdownFiles();
+    
+    // Check for issues and warn if found
+    const isHealthy = await linkProcessor.isHealthy();
+    if (!isHealthy) {
+      const issues = await linkProcessor.getIntegrityIssues();
+      const errorCount = issues.filter(i => i.severity === 'error').length;
+      const warningCount = issues.filter(i => i.severity === 'warning').length;
+      
+      if (errorCount > 0) {
+        console.warn(`[indexer] Link graph: ${errorCount} errors, ${warningCount} warnings detected`);
+      }
+    }
+    
+  } catch (error) {
+    console.error('[indexer] Enhanced link graph build failed:', error);
+    // Don't fail the entire indexing process for link graph issues
+  }
 }
 
 // ---------------------------------------------------------------------------

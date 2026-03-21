@@ -1,10 +1,20 @@
 import Database from "better-sqlite3";
-import { mkdirSync } from "fs";
+import { mkdirSync, appendFileSync } from "fs";
 import { dirname, join } from "path";
 import type { RunEvent } from "../orchestrator/types.js";
 
 const DEFAULT_DB_PATH = join(process.cwd(), ".obsidi-claw", "runs.db");
 
+
+export interface RunLoggerOptions {
+  dbPath?: string;
+  /**
+   * When set, every RunEvent is also appended as a JSON line to
+   * {debugDir}/{sessionId}.jsonl. One file per session, created on first event.
+   * Set via OBSIDI_CLAW_DEBUG=1 in run.ts.
+   */
+  debugDir?: string;
+}
 
 /**
  * RunLogger — SQLite-backed event store for orchestrator runs.
@@ -17,16 +27,31 @@ const DEFAULT_DB_PATH = join(process.cwd(), ".obsidi-claw", "runs.db");
  * Session-level events (session_start / session_end) have no run_id;
  * they are written to trace with run_id = NULL.
  *
+ * Debug mode (debugDir set): appends every event as JSONL to
+ * {debugDir}/{sessionId}.jsonl for easy inspection.
+ *
  * TODO: Phase 7 — add getRuns() / getTrace() query methods for insight engine
  */
 export class RunLogger {
   private readonly db: Database.Database;
+  private readonly debugDir: string | undefined;
+  /** Track which session files have been created so we only mkdirSync once. */
+  private readonly debugSessions = new Set<string>();
 
-  constructor(dbPath: string = DEFAULT_DB_PATH) {
+  constructor(options: RunLoggerOptions | string = {}) {
+    // Support legacy positional string arg for backwards compat
+    const opts: RunLoggerOptions = typeof options === "string" ? { dbPath: options } : options;
+    const dbPath = opts.dbPath ?? DEFAULT_DB_PATH;
+    this.debugDir = opts.debugDir;
+
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
     this._initSchema();
+
+    if (this.debugDir) {
+      mkdirSync(this.debugDir, { recursive: true });
+    }
   }
 
   private _initSchema(): void {
@@ -68,6 +93,8 @@ export class RunLogger {
   }
 
   logEvent(event: RunEvent): void {
+    if (this.debugDir) this._debugAppend(event);
+
     const sessionId = event.sessionId;
     const runId = "runId" in event ? event.runId : null;
 
@@ -140,5 +167,19 @@ export class RunLogger {
          VALUES (?, ?, ?, ?, ?)`,
       )
       .run(runId, sessionId, type, timestamp, JSON.stringify(event));
+  }
+
+  private _debugAppend(event: RunEvent): void {
+    const sessionId = event.sessionId;
+    const filePath = join(this.debugDir!, `${sessionId}.jsonl`);
+
+    // Write a header comment on first event for this session
+    if (!this.debugSessions.has(sessionId)) {
+      this.debugSessions.add(sessionId);
+      const header = `# session: ${sessionId}  started: ${new Date().toISOString()}\n`;
+      appendFileSync(filePath, header, "utf8");
+    }
+
+    appendFileSync(filePath, JSON.stringify(event) + "\n", "utf8");
   }
 }

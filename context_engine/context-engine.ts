@@ -197,6 +197,70 @@ export class ContextEngine {
   }
 
   /**
+   * Complete reindex after md_db files change at runtime.
+   * Performs full pipeline: sync markdown → rebuild vector index → rebuild link graph.
+   * 
+   * Call this when the system adds/modifies/deletes files in md_db during runtime.
+   */
+  async reindex(): Promise<void> {
+    if (!this.graphStore) {
+      throw new Error("ContextEngine not initialized. Call initialize() first.");
+    }
+
+    try {
+      // Phase 1: Re-sync markdown files to graph store
+      await syncMdDbToGraph(this.config.mdDbPath, this.graphStore);
+      
+      // Phase 2: Rebuild vector index from updated graph
+      this.vectorIndex = await buildVectorIndexFromGraph(this.graphStore);
+      
+      console.log('[context_engine] Full reindex completed');
+      
+    } catch (error) {
+      console.error('[context_engine] Full reindex failed:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Rebuild just the link graph after md_db changes.
+   * More efficient than full reindex if only link relationships changed.
+   */
+  async rebuildLinkGraph(): Promise<void> {
+    if (!this.graphStore) {
+      throw new Error("ContextEngine not initialized. Call initialize() first.");
+    }
+
+    const { LinkGraphProcessor } = await import("./link_graph/index.js");
+    
+    try {
+      const linkProcessor = new LinkGraphProcessor(
+        this.graphStore.getDatabase(), 
+        this.config.mdDbPath
+      );
+      
+      // Rebuild the enhanced link graph
+      await linkProcessor.buildFromMarkdownFiles();
+      
+      // Check for issues and warn if found  
+      const isHealthy = await linkProcessor.isHealthy();
+      if (!isHealthy) {
+        const issues = await linkProcessor.getIntegrityIssues();
+        const errorCount = issues.filter(i => i.severity === 'error').length;
+        const warningCount = issues.filter(i => i.severity === 'warning').length;
+        
+        if (errorCount > 0) {
+          console.warn(`[context_engine] Link graph rebuild: ${errorCount} errors, ${warningCount} warnings`);
+        }
+      }
+      
+    } catch (error) {
+      console.error('[context_engine] Link graph rebuild failed:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Close the underlying SQLite database.
    * Call when the context engine is no longer needed.
    */

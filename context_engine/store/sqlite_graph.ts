@@ -60,7 +60,36 @@ export class SqliteGraphStore {
 
   // ── Schema ────────────────────────────────────────────────────────────────
 
+  /**
+   * Current schema version. Bump this whenever a breaking schema change is made.
+   * On mismatch, notes + edges are dropped and recreated (they are pure caches of md_db).
+   */
+  private static readonly SCHEMA_VERSION = 2;
+
   private initSchema(): void {
+    // Bootstrap index_state first (it holds the version and is never dropped)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS index_state (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `);
+
+    // Check stored schema version
+    const row = this.db
+      .prepare("SELECT value FROM index_state WHERE key = 'schema_version'")
+      .get() as { value: string } | undefined;
+    const storedVersion = row ? parseInt(row.value, 10) : 0;
+
+    if (storedVersion < SqliteGraphStore.SCHEMA_VERSION) {
+      // Drop and recreate notes + edges so the new schema applies cleanly.
+      // These tables are pure caches — md_db is the source of truth.
+      this.db.exec(`
+        DROP TABLE IF EXISTS edges;
+        DROP TABLE IF EXISTS notes;
+      `);
+    }
+
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS notes (
         note_id          TEXT PRIMARY KEY,
@@ -81,12 +110,12 @@ export class SqliteGraphStore {
       );
 
       CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst_note_id);
-
-      CREATE TABLE IF NOT EXISTS index_state (
-        key   TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      );
     `);
+
+    // Persist version so we don't migrate on the next startup
+    this.db
+      .prepare("INSERT OR REPLACE INTO index_state (key, value) VALUES ('schema_version', ?)")
+      .run(String(SqliteGraphStore.SCHEMA_VERSION));
   }
 
   // ── Note operations ───────────────────────────────────────────────────────
@@ -268,6 +297,16 @@ export class SqliteGraphStore {
       .prepare("SELECT value FROM index_state WHERE key = ?")
       .get(key) as { value: string } | undefined;
     return row?.value ?? null;
+  }
+
+  // ── Database access ───────────────────────────────────────────────────────
+
+  /**
+   * Get access to the underlying SQLite database.
+   * Used by extensions that need direct database access.
+   */
+  getDatabase(): DB {
+    return this.db;
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
