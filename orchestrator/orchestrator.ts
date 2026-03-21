@@ -54,7 +54,7 @@ export class Orchestrator {
         error: err instanceof Error ? err.message : String(err),
       };
     } finally {
-      session.dispose();
+      await session.finalize();
     }
   }
 }

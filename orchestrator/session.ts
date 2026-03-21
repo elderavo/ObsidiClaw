@@ -24,10 +24,11 @@ import {
   SessionManager,
 } from "@mariozechner/pi-coding-agent";
 
-import type { RunLogger } from "../logger/index.js";
+import { RunLogger } from "../logger/index.js";
 import type { ContextEngine } from "../context_engine/index.js";
 import { createContextEngineMcpServer } from "../context_engine/index.js";
 import { createObsidiClawExtension } from "../extension/factory.js";
+import { runSessionReview, type ReviewTrigger } from "../insight_engine/session_review.js";
 import type { RunEvent, RunId, RunStage, SessionConfig, SessionId } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -134,6 +135,24 @@ export class OrchestratorSession {
     return this.piSessionReady ? "done" : "prompt_received";
   }
 
+  /**
+   * Preferred teardown: runs review (if enabled) then disposes.
+   * Falls back to dispose() if review is skipped.
+   */
+  async finalize(trigger: ReviewTrigger = "session_end"): Promise<void> {
+    if (this.isSubagent) {
+      this.dispose();
+      return;
+    }
+    try {
+      await this.runReviewHook(trigger);
+    } catch (err) {
+      console.error("[session_review] failed:", err);
+    } finally {
+      this.dispose();
+    }
+  }
+
   dispose(): void {
     if (this.piSession) {
       this.piSession.dispose();
@@ -207,9 +226,52 @@ export class OrchestratorSession {
         break;
       }
 
+      case "compaction": {
+        void this.runReviewHook("pre_compaction", event);
+        break;
+      }
+
       default:
         break;
     }
+  }
+
+  /**
+   * Run the review subagent for the given trigger. No-ops if contextEngine
+   * is unavailable or if this session is already a subagent.
+   */
+  private async runReviewHook(trigger: ReviewTrigger, compactionMeta?: unknown): Promise<void> {
+    if (this.isSubagent) return;
+    if (!this.contextEngine) return;
+
+    await runSessionReview({
+      trigger,
+      sessionId: this.sessionId,
+      messages: this.messages ?? [],
+      compactionMeta,
+      contextEngine: this.contextEngine,
+      rootDir: process.cwd(),
+      createChildSession: async (systemPrompt: string) => {
+        const childLogger = new RunLogger();
+        const childSession = new OrchestratorSession(childLogger, this.contextEngine, {
+          systemPrompt,
+          isSubagent: true,
+        });
+
+        return {
+          runReview: async (userMessage: string) => {
+            await childSession.prompt(userMessage);
+            const msgs = (childSession.messages ?? []) as Array<{ role?: string; content?: unknown }>;
+            const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
+            return extractTextFromContent(lastAssistant?.content) ?? "";
+          },
+          dispose: () => {
+            childSession.dispose();
+            childLogger.close();
+          },
+        };
+      },
+    });
   }
 
   /**
@@ -300,4 +362,22 @@ export class OrchestratorSession {
 
     return session;
   }
+}
+
+function extractTextFromContent(content: unknown): string | null {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const parts = content
+      .map((c) => {
+        if (typeof c === "string") return c;
+        if (c && typeof c === "object" && "text" in (c as any)) return String((c as any).text);
+        return null;
+      })
+      .filter(Boolean) as string[];
+    return parts.join("\n") || null;
+  }
+  if (content && typeof content === "object" && "text" in content) {
+    return String((content as any).text);
+  }
+  return null;
 }
