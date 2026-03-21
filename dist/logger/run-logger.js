@@ -72,15 +72,15 @@ export class RunLogger {
         else if (event.type === "prompt_error") {
             this._finalizeRun(event.runId, "error", event.timestamp);
         }
+        if (event.type === "context_retrieved") {
+            this.db
+                .prepare(`INSERT INTO synthesis_metrics
+             (session_id, timestamp, prompt_snippet, seed_count, expanded_count,
+              tool_count, retrieval_ms, raw_chars, stripped_chars, estimated_tokens)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+                .run(sessionId, event.timestamp, event.query.slice(0, 120), event.seedCount, event.expandedCount, event.toolCount, event.retrievalMs, event.rawChars, event.strippedChars, event.estimatedTokens);
+        }
         this._insertTrace(runId, sessionId, event.type, event.timestamp, event);
-    }
-    logSynthesis(m) {
-        this.db
-            .prepare(`INSERT INTO synthesis_metrics
-           (session_id, timestamp, prompt_snippet, seed_count, expanded_count,
-            tool_count, retrieval_ms, raw_chars, stripped_chars, estimated_tokens)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-            .run(m.sessionId, m.timestamp, m.promptSnippet, m.seedCount, m.expandedCount, m.toolCount, m.retrievalMs, m.rawChars, m.strippedChars, m.estimatedTokens);
     }
     close() {
         this.db.close();

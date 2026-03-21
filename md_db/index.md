@@ -20,3 +20,10 @@ The directory structure is flat, but the linking creates a graph structure.
 
 ## concepts
 [[concepts]]
+
+## rules
+[[NEVERs]]
+[[best_practices]]
+
+## self_knowledge
+[[obsidiclaw]]

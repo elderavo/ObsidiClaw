@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/Alex/AppData/Roaming/npm/node_modules/@mariozechner/pi-coding-agent/**)",
+      "Bash(npm install:*)",
+      "Bash(cd \"C:\\\\Users\\\\Alex\\\\Desktop\\\\Projects\\\\Coding\\\\ObsidiClaw\" && npx tsc --noEmit 2>&1)",
+      "mcp__llama-index-docs__search_docs",
+      "mcp__llama-index-docs__list_docs",
+      "mcp__llama-index-docs__read_doc",
+      "Bash(npx tsc:*)",
+      "Bash(npx tsx:*)",
+      "Bash(cd:*)",
+      "Bash(find . -not -path './node_modules/*' -not -path './dist/*' -name '*.js' -delete)",
+      "Bash(grep -r \"mcp\\\\|Mcp\\\\|MCP\" /c/Users/Alex/Desktop/Projects/Coding/ObsidiClaw/node_modules/@mariozechner/pi-coding-agent/dist --include=*.d.ts)"
+    ]
+  }
+}

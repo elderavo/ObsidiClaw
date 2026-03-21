@@ -1,6 +1,8 @@
 .*
 !.pi
 !.pi/**
+!.claude
+!.claude/**
 node_modules
 # Stale compiled JS in source dirs (outDir is dist/, not source)
 context_engine/**/*.js

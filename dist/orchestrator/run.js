@@ -26,19 +26,19 @@ import { ContextEngine } from "../context_engine/index.js";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const mdDbPath = resolve(__dirname, "../md_db");
 // ── Boot ──────────────────────────────────────────────────────────────────
-console.log("[obsidi-claw] Initializing context engine...");
+//console.log("[obsidi-claw] Initializing context engine...");
 const contextEngine = new ContextEngine({ mdDbPath });
 await contextEngine.initialize();
-console.log("[obsidi-claw] Context engine ready.\n");
+//console.log("[obsidi-claw] Context engine ready.\n");
 const logger = new RunLogger();
 const orchestrator = new Orchestrator(logger, contextEngine);
 // ── Start session ─────────────────────────────────────────────────────────
 const session = orchestrator.createSession({
     onOutput: (delta) => process.stdout.write(delta),
 });
-console.log("[obsidi-claw] Session started. Type your prompt and press Enter.");
-console.log("[obsidi-claw] First prompt → context injection + pi session creation.");
-console.log("[obsidi-claw] Ctrl+C or Ctrl+D to exit.\n");
+// console.log("[obsidi-claw] Session started. Type your prompt and press Enter.");
+// console.log("[obsidi-claw] First prompt → context injection + pi session creation.");
+// console.log("[obsidi-claw] Ctrl+C or Ctrl+D to exit.\n");
 // ── Readline loop ─────────────────────────────────────────────────────────
 const rl = createInterface({
     input: process.stdin,
@@ -67,7 +67,7 @@ rl.on("close", async () => {
         await activePrompt;
     session.dispose();
     logger.close();
-    console.log("\n[obsidi-claw] Session ended.");
+    // console.log("\n[obsidi-claw] Session ended.");
     process.exit(0);
 });
 //# sourceMappingURL=run.js.map

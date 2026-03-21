@@ -5,7 +5,8 @@ created:
 updated:
 ---
 
-
+concepts/NEVERs
+[[NEVERs]]
 concepts/failure_modes
 [[failure_modes]]
 concepts/best_practices

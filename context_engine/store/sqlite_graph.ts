@@ -66,7 +66,7 @@ export class SqliteGraphStore {
         note_id          TEXT PRIMARY KEY,
         path             TEXT NOT NULL UNIQUE,
         title            TEXT NOT NULL,
-        note_type        TEXT NOT NULL CHECK(note_type IN ('tool','concept','index')),
+        note_type        TEXT NOT NULL CHECK(note_type IN ('tool','concept','index','codebase')),
         body             TEXT NOT NULL,
         tool_id          TEXT,
         frontmatter_json TEXT NOT NULL DEFAULT '{}',

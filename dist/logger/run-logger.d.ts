@@ -1,20 +1,4 @@
 import type { RunEvent } from "../orchestrator/types.js";
-export interface SynthesisMetrics {
-    sessionId: string;
-    timestamp: number;
-    /** First 120 chars of the prompt (for inspection without storing full text). */
-    promptSnippet: string;
-    seedCount: number;
-    expandedCount: number;
-    toolCount: number;
-    retrievalMs: number;
-    /** Raw char count of all retrieved note bodies before stripping. */
-    rawChars: number;
-    /** Char count of the formatted context after frontmatter stripping. */
-    strippedChars: number;
-    /** Rough token estimate (strippedChars ÷ 4). */
-    estimatedTokens: number;
-}
 /**
  * RunLogger — SQLite-backed event store for orchestrator runs.
  *
@@ -33,7 +17,6 @@ export declare class RunLogger {
     constructor(dbPath?: string);
     private _initSchema;
     logEvent(event: RunEvent): void;
-    logSynthesis(m: SynthesisMetrics): void;
     close(): void;
     private _insertRun;
     private _finalizeRun;

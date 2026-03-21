@@ -77,7 +77,7 @@ export async function syncMdDbToGraph(
     graphStore.upsertNote(note);
   }
 
-  console.log(`[indexer] Upserted ${parsedNotes.length} notes into graph`);
+  //console.log(`[indexer] Upserted ${parsedNotes.length} notes into graph`);
 
   // Pass 2 — resolve wikilinks + insert edges
   for (const note of parsedNotes) {
@@ -92,7 +92,7 @@ export async function syncMdDbToGraph(
   }
 
   const totalLinks = parsedNotes.reduce((sum, n) => sum + n.linksOut.length, 0);
-  console.log(`[indexer] Resolved edges (${totalLinks} raw links → graph)`);
+  //console.log(`[indexer] Resolved edges (${totalLinks} raw links → graph)`);
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +131,6 @@ export async function buildVectorIndexFromGraph(
             }),
         );
 
-  console.log(`[indexer] Building vector index over ${docs.length} notes`);
+  //console.log(`[indexer] Building vector index over ${docs.length} notes`);
   return VectorStoreIndex.fromDocuments(docs);
 }

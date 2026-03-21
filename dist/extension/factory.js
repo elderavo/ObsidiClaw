@@ -1,28 +1,42 @@
 /**
- * ObsidiClaw ExtensionFactory — context injection + retrieve_context tool.
+ * ObsidiClaw ExtensionFactory — MCP-backed context injection + retrieve_context tool.
  *
  * Two hooks per session:
  *
  * 1. before_agent_start (every turn):
- *    - Runs RAG on the user's prompt → pre-injects initial context into system prompt
- *    - Appends a standing instruction reminding Pi to prefer retrieve_context
- *      over its own knowledge for anything project-specific
+ *    - Calls MCP get_preferences → injects preferences.md into system prompt
+ *    - Appends a standing instruction reminding Pi to use retrieve_context
  *
  * 2. retrieve_context tool (Pi-driven, any number of times per turn):
  *    - Pi calls this when it wants to look something up more specifically
- *    - Runs engine.build(query) with Pi's own query string
- *    - Returns formatted context as a tool result (visible in conversation)
+ *    - Proxies through MCP retrieve_context → returns formattedContext as tool result
+ *    - Metrics flow via onContextBuilt callback → orchestrator RunEvent → RunLogger
+ *      (the extension itself is logger-free)
  *
- * Usage (custom runner — engine already initialized):
- *   createObsidiClawExtension({ contextEngine: myEngine, logger: myLogger })
+ * Usage (custom runner — MCP server already built):
+ *   createObsidiClawExtension({ mcpServer: myMcpServer })
  *
  * Usage (Pi native TUI — .pi/extensions/):
  *   createObsidiClawExtension({ mdDbPath: "/path/to/md_db" })
  */
 import { join } from "path";
 import { Type } from "@sinclair/typebox";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ContextEngine } from "../context_engine/index.js";
-import { RunLogger } from "../logger/index.js";
+import { createContextEngineMcpServer } from "../context_engine/index.js";
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+/**
+ * Extract the first text block from an MCP CallToolResult.
+ * callTool() returns { [x: string]: unknown; content: ContentBlock[] } but the
+ * index signature widens content to unknown in TypeScript, so we cast here.
+ */
+function extractText(result) {
+    const blocks = result.content ?? [];
+    return blocks.find((c) => c.type === "text")?.text ?? "";
+}
 // ---------------------------------------------------------------------------
 // Standing system-prompt instruction (appended on every before_agent_start)
 // ---------------------------------------------------------------------------
@@ -38,26 +52,30 @@ You have access to a \`retrieve_context\` tool that searches this project's know
 // ---------------------------------------------------------------------------
 export function createObsidiClawExtension(config = {}) {
     return async (pi) => {
-        // Engine lifecycle
-        let engine;
-        let ownsEngine;
-        if (config.contextEngine) {
-            engine = config.contextEngine;
-            ownsEngine = false;
+        // ── Engine + MCP server setup ────────────────────────────────────────────
+        // When no server is provided, build our own engine and server (standalone path).
+        let ownedEngine;
+        let mcpServer;
+        if (config.mcpServer) {
+            mcpServer = config.mcpServer;
         }
         else {
-            engine = new ContextEngine({ mdDbPath: config.mdDbPath ?? join(process.cwd(), "md_db") });
-            ownsEngine = true;
+            ownedEngine = new ContextEngine({
+                mdDbPath: config.mdDbPath ?? join(process.cwd(), "md_db"),
+            });
+            mcpServer = createContextEngineMcpServer(ownedEngine);
         }
-        // Logger lifecycle
-        const logger = config.logger ?? (ownsEngine ? new RunLogger() : undefined);
-        const ownsLogger = !config.logger && ownsEngine;
-        // ── session_start: initialize engine if we own it ─────────────────────
+        // Create InMemoryTransport pair and client (connected in session_start).
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        const client = new Client({ name: "obsidi-claw-ext", version: "1.0.0" });
+        // ── session_start: initialize engine (if owned) + connect MCP pair ──────
         pi.on("session_start", async () => {
-            if (ownsEngine)
-                await engine.initialize();
+            if (ownedEngine)
+                await ownedEngine.initialize();
+            await mcpServer.connect(serverTransport);
+            await client.connect(clientTransport);
         });
-        // ── retrieve_context tool: Pi calls this when it decides it needs info ─
+        // ── retrieve_context tool: Pi calls this when it decides it needs info ──
         pi.registerTool({
             name: "retrieve_context",
             label: "Knowledge Base Retrieval",
@@ -71,55 +89,27 @@ export function createObsidiClawExtension(config = {}) {
                     description: "What to search for in the knowledge base.",
                 }),
             }),
-            execute: async (_toolCallId, { query }, _signal, _onUpdate, ctx) => {
-                const pkg = await engine.build(query);
-                logger?.logSynthesis({
-                    sessionId: ctx.sessionManager.getSessionId(),
-                    timestamp: Date.now(),
-                    promptSnippet: query.slice(0, 120),
-                    seedCount: pkg.seedNoteIds?.length ?? 0,
-                    expandedCount: pkg.expandedNoteIds?.length ?? 0,
-                    toolCount: pkg.suggestedTools.length,
-                    retrievalMs: pkg.retrievalMs,
-                    rawChars: pkg.rawChars,
-                    strippedChars: pkg.strippedChars,
-                    estimatedTokens: pkg.estimatedTokens,
-                });
+            execute: async (_toolCallId, { query }, _signal, _onUpdate, _ctx) => {
+                const result = await client.callTool({ name: "retrieve_context", arguments: { query } });
+                const text = extractText(result);
                 return {
-                    content: [{ type: "text", text: pkg.formattedContext }],
-                    details: {
-                        query,
-                        retrievalMs: pkg.retrievalMs,
-                        noteCount: pkg.retrievedNotes.length,
-                        estimatedTokens: pkg.estimatedTokens,
-                    },
+                    content: [{ type: "text", text }],
+                    details: { query },
                 };
             },
         });
-        // ── before_agent_start: warm context + standing tool reminder ─────────
+        // ── before_agent_start: inject preferences + standing tool reminder ─────
+        // Calls MCP get_preferences so the engine stays behind the MCP boundary.
         pi.on("before_agent_start", async (event, ctx) => {
             try {
-                if (ctx.hasUI)
-                    ctx.ui.setWorkingMessage("ObsidiClaw: retrieving context…");
-                const pkg = await engine.build(event.prompt);
-                if (ctx.hasUI)
-                    ctx.ui.setWorkingMessage();
-                logger?.logSynthesis({
-                    sessionId: ctx.sessionManager.getSessionId(),
-                    timestamp: Date.now(),
-                    promptSnippet: event.prompt.slice(0, 120),
-                    seedCount: pkg.seedNoteIds?.length ?? 0,
-                    expandedCount: pkg.expandedNoteIds?.length ?? 0,
-                    toolCount: pkg.suggestedTools.length,
-                    retrievalMs: pkg.retrievalMs,
-                    rawChars: pkg.rawChars,
-                    strippedChars: pkg.strippedChars,
-                    estimatedTokens: pkg.estimatedTokens,
-                });
+                const result = await client.callTool({ name: "get_preferences", arguments: {} });
+                const prefsContent = extractText(result);
+                const contextBlock = prefsContent
+                    ? `<!-- ObsidiClaw: Preferences -->\n\n${prefsContent}\n\n<!-- End ObsidiClaw Preferences -->`
+                    : "";
                 return {
                     systemPrompt: event.systemPrompt +
-                        "\n\n" +
-                        pkg.formattedContext +
+                        (contextBlock ? "\n\n" + contextBlock : "") +
                         "\n\n" +
                         TOOL_REMINDER,
                 };
@@ -131,12 +121,12 @@ export function createObsidiClawExtension(config = {}) {
                 return;
             }
         });
-        // ── session_shutdown ───────────────────────────────────────────────────
+        // ── session_shutdown ─────────────────────────────────────────────────────
         pi.on("session_shutdown", () => {
-            if (ownsEngine)
-                engine.close();
-            if (ownsLogger)
-                logger?.close();
+            void client.close();
+            void mcpServer.close();
+            if (ownedEngine)
+                ownedEngine.close();
         });
     };
 }

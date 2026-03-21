@@ -3,7 +3,7 @@
  *
  * TODO: Phase 1 — migrate to shared/types.ts once stable.
  */
-export type NoteType = "tool" | "concept" | "index";
+export type NoteType = "tool" | "concept" | "index" | "codebase";
 export interface RetrievedNote {
     /** Graph identity key (== relative path). */
     noteId: string;

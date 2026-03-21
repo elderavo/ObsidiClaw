@@ -8,7 +8,7 @@
 // Note types
 // ---------------------------------------------------------------------------
 
-export type NoteType = "tool" | "concept" | "index";
+export type NoteType = "tool" | "concept" | "index" | "codebase";
 
 // ---------------------------------------------------------------------------
 // RetrievedNote — a note that has entered the result set
@@ -89,6 +89,38 @@ export interface ContextPackage {
 
   /** Rough token estimate of formattedContext (chars ÷ 4). */
   estimatedTokens: number;
+}
+
+// ---------------------------------------------------------------------------
+// SubagentInput / SubagentPackage — input and output of buildSubagentPackage()
+// ---------------------------------------------------------------------------
+
+export interface SubagentInput {
+  /** Top-level task description passed to the subagent. */
+  prompt: string;
+
+  /** Detailed implementation plan produced by the main agent. */
+  plan: string;
+
+  /** Unambiguous, measurable criteria for task completion. */
+  successCriteria: string;
+}
+
+export interface SubagentPackage {
+  /** Original input from the main agent. */
+  input: SubagentInput;
+
+  /** RAG result retrieved against the plan. */
+  contextPackage: ContextPackage;
+
+  /**
+   * Ready-to-inject system prompt for the subagent session.
+   * Combines: task + plan + retrieved context + success criteria.
+   */
+  formattedSystemPrompt: string;
+
+  /** Unix timestamp (ms) when the package was built. */
+  builtAt: number;
 }
 
 // ---------------------------------------------------------------------------

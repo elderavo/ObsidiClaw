@@ -58,16 +58,18 @@ export class ContextEngine {
             model: this.config.embeddingModel,
             config: { host: this.config.ollamaHost },
         });
-        console.log(`[context_engine] Initializing — mdDb: ${this.config.mdDbPath}, ` +
-            `db: ${this.config.dbPath}, ` +
-            `embed: ${this.config.embeddingModel} @ ${this.config.ollamaHost}`);
+        // console.log(
+        //   `[context_engine] Initializing — mdDb: ${this.config.mdDbPath}, ` +
+        //     `db: ${this.config.dbPath}, ` +
+        //     `embed: ${this.config.embeddingModel} @ ${this.config.ollamaHost}`,
+        // );
         // Open graph store
         this.graphStore = new SqliteGraphStore(this.config.dbPath);
         // Sync md_db → graph (parse + upsert notes, then resolve wikilinks)
         await syncMdDbToGraph(this.config.mdDbPath, this.graphStore);
         // Build vector index from graph notes
         this.vectorIndex = await buildVectorIndexFromGraph(this.graphStore);
-        console.log("[context_engine] Ready");
+        //console.log("[context_engine] Ready");
     }
     /**
      * Build a ContextPackage for the given prompt.
@@ -101,6 +103,41 @@ export class ContextEngine {
             strippedChars: formattedContext.length,
             estimatedTokens: estimateTokens(formattedContext),
         };
+    }
+    /**
+     * Return the stripped body of a specific note by relative path.
+     * Returns null if the note is not in the graph or the engine is not initialized.
+     *
+     * The body is already frontmatter-stripped (stored without frontmatter by the parser).
+     */
+    getNoteContent(relativePath) {
+        return this.graphStore?.getNoteByPath(relativePath)?.body ?? null;
+    }
+    /**
+     * Get access to the underlying SQLite graph store.
+     * Returns null if the engine is not initialized.
+     *
+     * This allows extensions to add additional content to the same graph.
+     */
+    getGraphStore() {
+        return this.graphStore;
+    }
+    /**
+     * Get access to the vector index for rebuilding after adding new documents.
+     * Returns null if the engine is not initialized.
+     */
+    getVectorIndex() {
+        return this.vectorIndex;
+    }
+    /**
+     * Rebuild the vector index from current graph content.
+     * Call this after adding new documents to the graph store.
+     */
+    async rebuildVectorIndex() {
+        if (!this.graphStore) {
+            throw new Error("ContextEngine not initialized. Call initialize() first.");
+        }
+        this.vectorIndex = await buildVectorIndexFromGraph(this.graphStore);
     }
     /**
      * Close the underlying SQLite database.

@@ -23,7 +23,7 @@ import { syncMdDbToGraph, buildVectorIndexFromGraph } from "./indexer.js";
 import { hybridRetrieve } from "./retrieval/hybrid.js";
 import { SqliteGraphStore } from "./store/sqlite_graph.js";
 import { stripFrontmatter, estimateTokens } from "./frontmatter.js";
-import type { ContextEngineConfig, ContextPackage, RetrievedNote } from "./types.js";
+import type { ContextEngineConfig, ContextPackage, RetrievedNote, SubagentInput, SubagentPackage } from "./types.js";
 
 const DEFAULT_OLLAMA_HOST = process.env["OLLAMA_HOST"] ?? "10.0.132.100";
 const DEFAULT_EMBED_MODEL = process.env["OLLAMA_EMBED_MODEL"] ?? "nomic-embed-text:v1.5";
@@ -67,11 +67,11 @@ export class ContextEngine {
       config: { host: this.config.ollamaHost },
     });
 
-    console.log(
-      `[context_engine] Initializing — mdDb: ${this.config.mdDbPath}, ` +
-        `db: ${this.config.dbPath}, ` +
-        `embed: ${this.config.embeddingModel} @ ${this.config.ollamaHost}`,
-    );
+    // console.log(
+    //   `[context_engine] Initializing — mdDb: ${this.config.mdDbPath}, ` +
+    //     `db: ${this.config.dbPath}, ` +
+    //     `embed: ${this.config.embeddingModel} @ ${this.config.ollamaHost}`,
+    // );
 
     // Open graph store
     this.graphStore = new SqliteGraphStore(this.config.dbPath);
@@ -82,7 +82,7 @@ export class ContextEngine {
     // Build vector index from graph notes
     this.vectorIndex = await buildVectorIndexFromGraph(this.graphStore);
 
-    console.log("[context_engine] Ready");
+    //console.log("[context_engine] Ready");
   }
 
   /**
@@ -131,6 +131,32 @@ export class ContextEngine {
   }
 
   /**
+   * Build a SubagentPackage for the given subagent input.
+   *
+   * Runs hybrid retrieval against the plan (the richest query signal),
+   * then bundles the input + retrieved context into a formatted system prompt
+   * ready to inject into a child Pi session.
+   *
+   * Throws if initialize() has not been called.
+   */
+  async buildSubagentPackage(input: SubagentInput): Promise<SubagentPackage> {
+    if (!this.vectorIndex || !this.graphStore) {
+      throw new Error("ContextEngine not initialized. Call initialize() first.");
+    }
+
+    // Combine plan + prompt for retrieval; plan carries the most signal
+    const query = [input.plan, input.prompt].filter(Boolean).join(" ").slice(0, 1000);
+    const contextPackage = await this.build(query);
+
+    return {
+      input,
+      contextPackage,
+      formattedSystemPrompt: formatSubagentSystemPrompt(input, contextPackage),
+      builtAt: Date.now(),
+    };
+  }
+
+  /**
    * Return the stripped body of a specific note by relative path.
    * Returns null if the note is not in the graph or the engine is not initialized.
    *
@@ -138,6 +164,36 @@ export class ContextEngine {
    */
   getNoteContent(relativePath: string): string | null {
     return this.graphStore?.getNoteByPath(relativePath)?.body ?? null;
+  }
+
+  /**
+   * Get access to the underlying SQLite graph store.
+   * Returns null if the engine is not initialized.
+   * 
+   * This allows extensions to add additional content to the same graph.
+   */
+  getGraphStore(): SqliteGraphStore | null {
+    return this.graphStore;
+  }
+
+  /**
+   * Get access to the vector index for rebuilding after adding new documents.
+   * Returns null if the engine is not initialized.
+   */
+  getVectorIndex(): VectorStoreIndex | null {
+    return this.vectorIndex;
+  }
+
+  /**
+   * Rebuild the vector index from current graph content.
+   * Call this after adding new documents to the graph store.
+   */
+  async rebuildVectorIndex(): Promise<void> {
+    if (!this.graphStore) {
+      throw new Error("ContextEngine not initialized. Call initialize() first.");
+    }
+    
+    this.vectorIndex = await buildVectorIndexFromGraph(this.graphStore);
   }
 
   /**
@@ -149,6 +205,32 @@ export class ContextEngine {
     this.graphStore = null;
     this.vectorIndex = null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Subagent system prompt formatting
+// ---------------------------------------------------------------------------
+
+function formatSubagentSystemPrompt(input: SubagentInput, ctx: ContextPackage): string {
+  return [
+    "# Subagent Task",
+    "",
+    "## Your Task",
+    input.prompt,
+    "",
+    "## Implementation Plan",
+    input.plan,
+    "",
+    "## Success Criteria",
+    input.successCriteria,
+    "",
+    "## Retrieved Context",
+    ctx.formattedContext,
+    "",
+    "---",
+    "Focus exclusively on the plan above. Work systematically towards the success criteria.",
+    "Use `retrieve_context` for additional knowledge lookup.",
+  ].join("\n");
 }
 
 // ---------------------------------------------------------------------------

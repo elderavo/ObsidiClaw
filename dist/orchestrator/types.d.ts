@@ -94,6 +94,19 @@ export type RunEvent = {
     timestamp: number;
     contextInjected: boolean;
 } | {
+    type: "context_retrieved";
+    sessionId: SessionId;
+    runId: RunId;
+    timestamp: number;
+    query: string;
+    seedCount: number;
+    expandedCount: number;
+    toolCount: number;
+    retrievalMs: number;
+    rawChars: number;
+    strippedChars: number;
+    estimatedTokens: number;
+} | {
     type: "agent_prompt_sent";
     sessionId: SessionId;
     runId: RunId;
