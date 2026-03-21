@@ -195,6 +195,15 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - `tsc --noEmit` clean. Zero platform-specific code (`process.platform`, `win32`, etc.) in any new module.
 - **Next**: Phase 7 — comparison engine. Also: migrate existing OS calls to compat layer, implement `PersistentScheduleBackend` for at least one platform.
 
+**2026-03-21 — Session 10 (Context Pipeline Cleanup + Review Specializer)**
+- **OS compat migration complete** — all raw `fs`, `child_process`, `process` imports in existing code migrated to `shared/os/` abstractions. Files: `extension/factory.ts`, `context_engine/context-engine.ts`, `logger/run-logger.ts`, `insight_engine/session_review.ts`, `orchestrator/run.ts`, `scripts/run_detached_subagent.ts`. Also migrated `process.cwd()` → `resolvePaths()` in `orchestrator/session.ts`, `insight_engine/session_review.ts`, `.pi/extensions/codebase-indexer.ts`.
+- **Consolidated text extractors** — created `shared/text-utils.ts` with `extractMcpText()` and `extractMessageText()`, replacing 3 duplicate implementations across `extension/factory.ts`, `orchestrator/session.ts`, and `shared/agents/subagent-runner.ts`. `insight_engine/session_review.ts` also updated to use shared util.
+- **Removed stale TODO comments** — cleaned up outdated Phase 1/6/7 TODOs from `context_engine/types.ts`, `context-engine.ts`, `orchestrator/session.ts`, `logger/run-logger.ts`.
+- **Context reviewer evolved to synthesizer** — `ContextReviewer` now produces a synthesized, query-focused markdown document instead of binary keep/filter JSON decisions. LLM receives raw formatted context + query, outputs natural language — no structured JSON parsing needed. Falls back to raw notes on failure. Context-gardener personality rewritten with aggressive specialization instructions.
+- **Committed session 9 work in 7 waves** — OS compat layer, subagent entity, review gate, scheduler, subagent refactors, orchestrator wiring, pruning system.
+- `tsc --noEmit` clean. Zero `process.platform`/`win32` in application code.
+- **Next**: Phase 7 — comparison engine. Smoke test synthesizer with review enabled.
+
 # End-of-Run Protocol
 Every agent session MUST close by doing all three:
 1. Check off any completed phases in the Build Order above
