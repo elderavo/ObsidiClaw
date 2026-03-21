@@ -17,22 +17,49 @@
 
 import { mkdirSync, existsSync } from "fs";
 import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 import { Settings, VectorStoreIndex, storageContextFromDefaults } from "llamaindex";
 import { OllamaEmbedding } from "@llamaindex/ollama";
 import { syncMdDbToGraph, buildVectorIndexFromGraph, computeMdDbHash } from "./graph-indexer.js";
 import { hybridRetrieve } from "./retrieval/hybrid-retrieval.js";
 import { SqliteGraphStore } from "./store/graph-store.js";
 import { stripFrontmatter, estimateTokens } from "./frontmatter-utils.js";
-import type { ContextEngineConfig, ContextPackage, RetrievedNote, SubagentInput, SubagentPackage } from "./types.js";
+import { loadPersonality } from "../shared/agents/personality-loader.js";
+import { ContextReviewer } from "./review/context-reviewer.js";
+import { PruneClusterStorage } from "./prune/prune-storage.js";
+import { buildPruneClusters as buildPruneClustersOp } from "./prune/prune-builder.js";
+import type { PersonalityConfig } from "../shared/agents/types.js";
+import type {
+  ContextEngineConfig,
+  ContextPackage,
+  RetrievedNote,
+  SubagentInput,
+  SubagentPackage,
+  PruneCluster,
+  PruneConfig,
+} from "./types.js";
 
 const DEFAULT_OLLAMA_HOST = process.env["OLLAMA_HOST"] ?? "10.0.132.100";
 const DEFAULT_EMBED_MODEL = process.env["OLLAMA_EMBED_MODEL"] ?? "nomic-embed-text:v1.5";
 const DEFAULT_TOP_K = 5;
+const DEFAULT_PERSONALITIES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "shared", "agents", "personalities");
+const DEFAULT_PRUNE_CONFIG: PruneConfig = {
+  similarityThreshold: 0.9,
+  maxNeighborsPerNote: 10,
+  minClusterSize: 2,
+  includeNoteTypes: ["concept"],
+  excludeTags: [],
+};
 
 export class ContextEngine {
   private vectorIndex: VectorStoreIndex | null = null;
   private graphStore: SqliteGraphStore | null = null;
-  private readonly config: Required<ContextEngineConfig>;
+  private readonly config: Required<Omit<ContextEngineConfig, "review" | "pruneConfig">> & {
+    review?: ContextEngineConfig["review"];
+    pruneConfig?: ContextEngineConfig["pruneConfig"];
+  };
+  private readonly reviewer: ContextReviewer | null;
+  private readonly pruneConfig: PruneConfig;
 
   constructor(config: ContextEngineConfig) {
     const mdDbPath = config.mdDbPath;
@@ -44,7 +71,23 @@ export class ContextEngine {
       ollamaHost: config.ollamaHost ?? DEFAULT_OLLAMA_HOST,
       embeddingModel: config.embeddingModel ?? DEFAULT_EMBED_MODEL,
       topK: config.topK ?? DEFAULT_TOP_K,
+      personalitiesDir: config.personalitiesDir ?? DEFAULT_PERSONALITIES_DIR,
+      review: config.review,
+      pruneConfig: config.pruneConfig,
     };
+
+    this.pruneConfig = {
+      ...DEFAULT_PRUNE_CONFIG,
+      ...(config.pruneConfig ?? {}),
+    };
+
+    // Initialize context reviewer if enabled
+    this.reviewer = config.review?.enabled
+      ? new ContextReviewer({
+          ...config.review,
+          personalitiesDir: this.config.personalitiesDir,
+        })
+      : null;
   }
 
   /**
@@ -115,14 +158,37 @@ export class ContextEngine {
       this.config.topK,
     );
 
-    const allNotes = [...seedNotes, ...expandedNotes].sort((a, b) => b.score - a.score);
+    let allNotes = [...seedNotes, ...expandedNotes].sort((a, b) => b.score - a.score);
 
+    // ── Optional context review gate ──────────────────────────────────────
+    let reviewResult: ContextPackage["reviewResult"] | undefined;
+
+    if (this.reviewer) {
+      const review = await this.reviewer.review(prompt, allNotes);
+      reviewResult = {
+        filteredCount: review.filteredNoteIds.length,
+        reviewMs: review.reviewMs,
+        skipped: review.skipped,
+        skipReason: review.skipReason,
+      };
+
+      if (!review.skipped && review.filteredNoteIds.length > 0) {
+        const filtered = new Set(review.filteredNoteIds);
+        allNotes = allNotes.filter((n) => !filtered.has(n.noteId));
+      }
+    }
+
+    // ── Format and return ─────────────────────────────────────────────────
     const suggestedTools = allNotes
       .filter((n) => n.type === "tool" && n.toolId !== undefined)
       .map((n) => n.toolId!);
 
     const rawChars = allNotes.reduce((sum, n) => sum + n.content.length, 0);
-    const formattedContext = formatContext(seedNotes, expandedNotes);
+
+    // Re-split into seeds and expanded for formatting (post-filter)
+    const filteredSeeds = allNotes.filter((n) => n.depth === 0 || n.retrievalSource === "vector");
+    const filteredExpanded = allNotes.filter((n) => (n.depth ?? 0) > 0 && n.retrievalSource !== "vector");
+    const formattedContext = formatContext(filteredSeeds, filteredExpanded);
     const retrievalMs = Date.now() - t0;
 
     return {
@@ -132,11 +198,12 @@ export class ContextEngine {
       formattedContext,
       retrievalMs,
       builtAt: Date.now(),
-      seedNoteIds: seedNotes.map((n) => n.noteId),
-      expandedNoteIds: expandedNotes.map((n) => n.noteId),
+      seedNoteIds: filteredSeeds.map((n) => n.noteId),
+      expandedNoteIds: filteredExpanded.map((n) => n.noteId),
       rawChars,
       strippedChars: formattedContext.length,
       estimatedTokens: estimateTokens(formattedContext),
+      reviewResult,
     };
   }
 
@@ -158,12 +225,46 @@ export class ContextEngine {
     const query = [input.plan, input.prompt].filter(Boolean).join(" ").slice(0, 1000);
     const contextPackage = await this.build(query);
 
+    // Resolve personality if specified
+    let personalityConfig: PersonalityConfig | undefined;
+    if (input.personality) {
+      personalityConfig = loadPersonality(input.personality, this.config.personalitiesDir) ?? undefined;
+    }
+
     return {
       input,
       contextPackage,
-      formattedSystemPrompt: formatSubagentSystemPrompt(input, contextPackage),
+      formattedSystemPrompt: formatSubagentSystemPrompt(input, contextPackage, personalityConfig?.content),
+      personalityConfig,
       builtAt: Date.now(),
     };
+  }
+
+  /**
+   * Build pruning clusters from the current vector index + graph store.
+   * Writes results into prune_clusters tables and returns the in-memory clusters.
+   */
+  async buildPruneClusters(configOverride?: Partial<PruneConfig>): Promise<PruneCluster[]> {
+    if (!this.vectorIndex || !this.graphStore) {
+      throw new Error("ContextEngine not initialized. Call initialize() first.");
+    }
+
+    const effectiveConfig: PruneConfig = {
+      ...this.pruneConfig,
+      ...(configOverride ?? {}),
+    };
+
+    const clusters = await buildPruneClustersOp(
+      effectiveConfig,
+      this.vectorIndex,
+      this.graphStore,
+    );
+
+    const storage = new PruneClusterStorage(this.graphStore.getDatabase());
+    storage.resetClusters();
+    storage.storeClusters(clusters);
+
+    return clusters;
   }
 
   /**
@@ -289,9 +390,18 @@ export class ContextEngine {
 // Subagent system prompt formatting
 // ---------------------------------------------------------------------------
 
-function formatSubagentSystemPrompt(input: SubagentInput, ctx: ContextPackage): string {
-  return [
-    "# Subagent Task",
+function formatSubagentSystemPrompt(
+  input: SubagentInput,
+  ctx: ContextPackage,
+  personalityContent?: string,
+): string {
+  const sections: string[] = ["# Subagent Task"];
+
+  if (personalityContent) {
+    sections.push("", "## Personality", personalityContent);
+  }
+
+  sections.push(
     "",
     "## Your Task",
     input.prompt,
@@ -308,7 +418,9 @@ function formatSubagentSystemPrompt(input: SubagentInput, ctx: ContextPackage): 
     "---",
     "Focus exclusively on the plan above. Work systematically towards the success criteria.",
     "Use `retrieve_context` for additional knowledge lookup.",
-  ].join("\n");
+  );
+
+  return sections.join("\n");
 }
 
 // ---------------------------------------------------------------------------

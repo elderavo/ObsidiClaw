@@ -92,6 +92,14 @@ export interface ContextPackage {
 
   /** Rough token estimate of formattedContext (chars ÷ 4). */
   estimatedTokens: number;
+
+  /** Review result, if context review was performed. */
+  reviewResult?: {
+    filteredCount: number;
+    reviewMs: number;
+    skipped: boolean;
+    skipReason?: string;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -107,6 +115,9 @@ export interface SubagentInput {
 
   /** Unambiguous, measurable criteria for task completion. */
   successCriteria: string;
+
+  /** Optional personality name (loads from shared/agents/personalities/). */
+  personality?: string;
 }
 
 export interface SubagentPackage {
@@ -118,12 +129,50 @@ export interface SubagentPackage {
 
   /**
    * Ready-to-inject system prompt for the subagent session.
-   * Combines: task + plan + retrieved context + success criteria.
+   * Combines: personality + task + plan + retrieved context + success criteria.
    */
   formattedSystemPrompt: string;
 
+  /** Resolved personality config (if a personality was specified). */
+  personalityConfig?: import("../shared/agents/types.js").PersonalityConfig;
+
   /** Unix timestamp (ms) when the package was built. */
   builtAt: number;
+}
+
+// ---------------------------------------------------------------------------
+// Pruning types
+// ---------------------------------------------------------------------------
+
+export type PruneMemberStatus = "pending" | "keep" | "merge" | "ignore";
+
+export interface PruneClusterMember {
+  noteId: string;
+  similarity: number;
+  isRepresentative: boolean;
+  status: PruneMemberStatus;
+}
+
+export interface PruneClusterStats {
+  size: number;
+  maxSimilarity: number;
+  minSimilarity: number;
+  avgSimilarity: number;
+}
+
+export interface PruneCluster {
+  clusterId: string;
+  representativeNoteId: string;
+  members: PruneClusterMember[];
+  stats: PruneClusterStats;
+}
+
+export interface PruneConfig {
+  similarityThreshold: number;
+  maxNeighborsPerNote: number;
+  minClusterSize: number;
+  includeNoteTypes: NoteType[];
+  excludeTags?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -162,4 +211,26 @@ export interface ContextEngineConfig {
    * Default: 5
    */
   topK?: number;
+
+  /**
+   * Path to the subagent personalities directory.
+   * Default: shared/agents/personalities/ (relative to context_engine)
+   */
+  personalitiesDir?: string;
+
+  /**
+   * Context review configuration. Disabled by default.
+   * When enabled, retrieved context is evaluated for relevance before delivery.
+   */
+  review?: {
+    enabled?: boolean;
+    confidenceThreshold?: number;
+    personality?: string;
+    maxLatencyMs?: number;
+  };
+
+  /**
+   * Optional pruning configuration. Overrides defaults used by buildPruneClusters().
+   */
+  pruneConfig?: Partial<PruneConfig>;
 }
