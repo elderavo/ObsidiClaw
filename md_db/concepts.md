@@ -17,3 +17,5 @@ concepts/heuristics
 [[heuristics]]
 concepts/subagent_context_packaging
 [[subagent_context_packaging]]
+concepts/context_engine_startup_fast_path
+[[context_engine_startup_fast_path]]

@@ -3,6 +3,7 @@ import { ContextEngine } from "../context_engine/index.js";
 import { resolvePaths } from "../shared/config.js";
 import { extractMessageText } from "../shared/text-utils.js";
 import { ensureDir, fileExists, readText, writeText } from "../shared/os/fs.js";
+import { buildFrontmatter } from "../shared/markdown/frontmatter.js";
 
 export type ReviewTrigger = "session_end" | "pre_compaction";
 
@@ -230,17 +231,14 @@ function writeNewNote(opts: { note: NonNullable<ReviewProposal["new_notes"]>[num
   const tags = opts.note.tags?.length ? opts.note.tags : ["auto-derived", "insight"];
   const type = opts.note.type?.trim() || "concept";
 
-  const fm = [
-    "---",
-    `title: ${title}`,
-    `type: ${type}`,
-    `created: ${new Date(opts.timestamp).toISOString()}`,
-    `updated: ${new Date(opts.timestamp).toISOString()}`,
-    `source_trigger: ${opts.trigger}`,
-    `tags: [${tags.join(", ")}]`,
-    "---",
-    "",
-  ].join("\n");
+  const fm = buildFrontmatter({
+    title,
+    type,
+    created: new Date(opts.timestamp).toISOString(),
+    updated: new Date(opts.timestamp).toISOString(),
+    source_trigger: opts.trigger,
+    tags,
+  });
 
   const reason = opts.note.reason ? `\n\n## Source\nDerived automatically (trigger: ${opts.trigger}). Reason: ${opts.note.reason}` : "";
 

@@ -13,6 +13,7 @@ import { MetadataMode } from "llamaindex";
 import type { VectorStoreIndex } from "llamaindex";
 import type { SqliteGraphStore, StoredNote } from "../store/graph-store.js";
 import type { NoteType, RetrievedNote } from "../types.js";
+import { normalizeToken, normalizeTokens, extractTags, normalizeTagList } from "../../shared/markdown/tokens.js";
 
 const GRAPH_SCORE_DECAY = 0.7;
 const TAG_BOOST_PER_MATCH = 0.1;
@@ -153,46 +154,3 @@ function computeTagBoost(tags: string[], query: string): number {
   return Math.min(MAX_TAG_BOOST, TAG_BOOST_PER_MATCH * matches);
 }
 
-function extractTags(frontmatterJson?: string | null): string[] {
-  if (!frontmatterJson) return [];
-
-  try {
-    const parsed = JSON.parse(frontmatterJson) as Record<string, unknown>;
-    const rawTags = parsed["tags"];
-
-    if (Array.isArray(rawTags)) {
-      return normalizeTagList(rawTags.map((tag) => String(tag)));
-    }
-
-    if (typeof rawTags === "string") {
-      const parts = rawTags.split(",").map((tag) => tag.trim()).filter(Boolean);
-      return normalizeTagList(parts);
-    }
-  } catch {
-    return [];
-  }
-
-  return [];
-}
-
-function normalizeTagList(tags: string[]): string[] {
-  const normalized = tags
-    .map((tag) => normalizeToken(tag))
-    .filter(Boolean);
-  return [...new Set(normalized)];
-}
-
-function normalizeToken(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-}
-
-function normalizeTokens(value: string): string[] {
-  return value
-    .toLowerCase()
-    .split(/[^a-z0-9]+/g)
-    .map((token) => token.trim())
-    .filter(Boolean);
-}

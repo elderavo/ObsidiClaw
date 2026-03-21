@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { dirname, join } from "path";
 import { ensureDir, appendText } from "../shared/os/fs.js";
 import type { RunEvent } from "../orchestrator/types.js";
+import { TraceEmitter } from "./trace-emitter.js";
 
 
 export interface RunLoggerOptions {
@@ -34,6 +35,7 @@ export class RunLogger {
   private readonly debugDir: string | undefined;
   /** Track which session files have been created so we only mkdirSync once. */
   private readonly debugSessions = new Set<string>();
+  private _traceEmitter: TraceEmitter | null = null;
 
   constructor(options: RunLoggerOptions | string) {
     // Support legacy positional string arg for backwards compat
@@ -53,6 +55,16 @@ export class RunLogger {
 
   private _initSchema(): void {
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        session_id   TEXT    PRIMARY KEY,
+        created_at   INTEGER NOT NULL,
+        updated_at   INTEGER NOT NULL,
+        status       TEXT    NOT NULL DEFAULT 'running',
+        prompt_count INTEGER NOT NULL DEFAULT 0,
+        human_verdict TEXT,
+        human_notes   TEXT
+      );
+
       CREATE TABLE IF NOT EXISTS runs (
         run_id       TEXT    PRIMARY KEY,
         session_id   TEXT    NOT NULL,
@@ -108,6 +120,15 @@ export class RunLogger {
     if (!columnNames.has("is_subagent")) {
       this.db.exec("ALTER TABLE runs ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0");
     }
+    if (!columnNames.has("run_kind")) {
+      this.db.exec("ALTER TABLE runs ADD COLUMN run_kind TEXT NOT NULL DEFAULT 'core'");
+    }
+    if (!columnNames.has("parent_run_id")) {
+      this.db.exec("ALTER TABLE runs ADD COLUMN parent_run_id TEXT");
+    }
+    if (!columnNames.has("parent_session_id")) {
+      this.db.exec("ALTER TABLE runs ADD COLUMN parent_session_id TEXT");
+    }
     if (!columnNames.has("review_status")) {
       this.db.exec("ALTER TABLE runs ADD COLUMN review_status TEXT");
     }
@@ -137,14 +158,36 @@ export class RunLogger {
     }
   }
 
+  /**
+   * Structured trace emitter. Uses the same `trace` table but writes
+   * decomposed source/target/action/status columns with per-run seq counters.
+   * Lazily initialized on first access.
+   */
+  get trace(): TraceEmitter {
+    if (!this._traceEmitter) {
+      this._traceEmitter = new TraceEmitter(this.db);
+    }
+    return this._traceEmitter;
+  }
+
   logEvent(event: RunEvent): void {
     if (this.debugDir) this._debugAppend(event);
 
     const sessionId = event.sessionId;
     const runId = "runId" in event ? event.runId : null;
 
+    // ── Session lifecycle ──────────────────────────────────────────────────
+    if (event.type === "session_start") {
+      this._insertSession(sessionId, event.timestamp);
+    } else if (event.type === "session_end") {
+      this._finalizeSession(sessionId, event.timestamp);
+    }
+
+    // ── Run lifecycle ──────────────────────────────────────────────────────
     if (event.type === "prompt_received") {
-      this._insertRun(event.runId, sessionId, event.timestamp, Boolean(event.isSubagent));
+      const runKind = event.runKind ?? (event.isSubagent ? "subagent" : "core");
+      this._insertRun(event.runId, sessionId, event.timestamp, runKind, event.parentRunId, event.parentSessionId);
+      this._incrementSessionPromptCount(sessionId);
     }
 
     if (event.type === "prompt_complete") {
@@ -206,6 +249,22 @@ export class RunLogger {
   }
 
   /**
+   * Insert a run row for a scheduler job execution.
+   * Called by JobScheduler when a job starts.
+   */
+  insertJobRun(runId: string, sessionId: string, startTime: number, jobName: string): void {
+    this._insertRun(runId, sessionId, startTime, "job");
+  }
+
+  /**
+   * Finalize a run row (set status + end_time).
+   * Used by JobScheduler to close job runs.
+   */
+  finalizeRun(runId: string, status: string, endTime: number): void {
+    this._finalizeRun(runId, status, endTime);
+  }
+
+  /**
    * Mark a completed subagent run as awaiting human review.
    * Call this after the run finishes to change status from 'done' to 'awaiting_review'.
    */
@@ -258,18 +317,42 @@ export class RunLogger {
 
   // ── Private helpers ────────────────────────────────────────────────────────
 
+  private _insertSession(sessionId: string, timestamp: number): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO sessions (session_id, created_at, updated_at, status, prompt_count)
+         VALUES (?, ?, ?, 'running', 0)`
+      )
+      .run(sessionId, timestamp, timestamp);
+  }
+
+  private _finalizeSession(sessionId: string, timestamp: number): void {
+    this.db
+      .prepare(`UPDATE sessions SET status = 'completed', updated_at = ? WHERE session_id = ?`)
+      .run(timestamp, sessionId);
+  }
+
+  private _incrementSessionPromptCount(sessionId: string): void {
+    this.db
+      .prepare(`UPDATE sessions SET prompt_count = prompt_count + 1, updated_at = ? WHERE session_id = ?`)
+      .run(Date.now(), sessionId);
+  }
+
   private _insertRun(
     runId: string,
     sessionId: string,
     startTime: number,
-    isSubagent: boolean,
+    runKind: string,
+    parentRunId?: string,
+    parentSessionId?: string,
   ): void {
+    const isSubagent = runKind !== "core" && runKind !== "job" ? 1 : 0;
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO runs (run_id, session_id, status, start_time, is_subagent)
-         VALUES (?, ?, 'running', ?, ?)`
+        `INSERT OR IGNORE INTO runs (run_id, session_id, status, start_time, is_subagent, run_kind, parent_run_id, parent_session_id)
+         VALUES (?, ?, 'running', ?, ?, ?, ?, ?)`
       )
-      .run(runId, sessionId, startTime, isSubagent ? 1 : 0);
+      .run(runId, sessionId, startTime, isSubagent, runKind, parentRunId ?? null, parentSessionId ?? null);
   }
 
   private _finalizeRun(runId: string, status: string, endTime: number): void {

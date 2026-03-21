@@ -46,6 +46,12 @@ export interface SubagentSpec {
 
   /** Timeout in ms. Default: 300_000 (5 minutes). */
   timeoutMs?: number;
+
+  /** Run ID of the parent run that spawned this subagent (for lineage tracking). */
+  parentRunId?: string;
+
+  /** Session ID of the parent session (for cross-session lineage). */
+  parentSessionId?: string;
 }
 
 export interface SubagentResult {

@@ -130,6 +130,43 @@ export class JobScheduler {
   }
 
   /**
+   * Unregister a job. Stops its interval and removes it entirely.
+   * No-op if the job doesn't exist.
+   */
+  unregister(jobName: string): boolean {
+    const entry = this.jobs.get(jobName);
+    if (!entry) return false;
+
+    if (entry.timer) {
+      clearInterval(entry.timer);
+      entry.timer = null;
+    }
+    if (entry.controller) {
+      entry.controller.abort();
+      entry.controller = null;
+    }
+    this.jobs.delete(jobName);
+    return true;
+  }
+
+  /**
+   * Register a job and start its interval immediately (if scheduler is running).
+   */
+  registerAndStart(job: JobDefinition): void {
+    this.register(job);
+    if (this.running) {
+      const entry = this.jobs.get(job.name)!;
+      const intervalMs = this.scheduleToMs(entry.def.schedule);
+      if (intervalMs > 0) {
+        entry.timer = setInterval(() => {
+          void this.executeJob(entry);
+        }, intervalMs);
+        if (entry.timer.unref) entry.timer.unref();
+      }
+    }
+  }
+
+  /**
    * Disable or enable a job.
    */
   setEnabled(jobName: string, enabled: boolean): void {
@@ -181,6 +218,9 @@ export class JobScheduler {
       signal: controller.signal,
     };
 
+    // Create a run row so job executions appear alongside prompt-based runs
+    this.logger.insertJobRun(runId, this.sessionId, startTime, def.name);
+
     this.emitEvent({
       type: "job_start",
       sessionId: this.sessionId,
@@ -199,6 +239,8 @@ export class JobScheduler {
       state.lastError = null;
       state.runCount++;
 
+      this.logger.finalizeRun(runId, "done", Date.now());
+
       this.emitEvent({
         type: "job_complete",
         sessionId: this.sessionId,
@@ -214,6 +256,8 @@ export class JobScheduler {
       state.lastDurationMs = Date.now() - startTime;
       state.lastError = error;
       state.runCount++;
+
+      this.logger.finalizeRun(runId, "error", Date.now());
 
       this.emitEvent({
         type: "job_error",

@@ -82,5 +82,9 @@ export async function createPiAgentSession(
     sessionManager: SessionManager.inMemory(),
   });
 
+  // Trigger extension lifecycle — fires session_start which connects MCP transports.
+  // All bindings are optional; headless runners don't provide UI or command context.
+  await session.bindExtensions({});
+
   return session;
 }

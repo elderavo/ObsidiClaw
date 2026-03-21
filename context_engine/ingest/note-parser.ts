@@ -13,13 +13,15 @@
 import { basename, extname } from "path";
 import type { NoteType } from "../types.js";
 import type { ParsedNote } from "./note-models.js";
+import { parseFrontmatter } from "../../shared/markdown/frontmatter.js";
+import { extractWikilinks } from "../../shared/markdown/wikilinks.js";
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 export function parseMarkdownFile(content: string, relativePath: string): ParsedNote {
-  const { frontmatter, body } = splitFrontmatter(content);
+  const { frontmatter, body } = parseFrontmatter(content);
   const noteType = inferNoteType(frontmatter, relativePath);
   const title = extractTitle(frontmatter, body, relativePath);
   const linksOut = extractWikilinks(body);
@@ -40,132 +42,6 @@ export function parseMarkdownFile(content: string, relativePath: string): Parsed
     timeCreated: stringOrUndefined(frontmatter["time_created"]),
     lastEdited: stringOrUndefined(frontmatter["last_edited"]),
   };
-}
-
-// ---------------------------------------------------------------------------
-// Frontmatter extraction
-// ---------------------------------------------------------------------------
-
-function splitFrontmatter(
-  content: string,
-): { frontmatter: Record<string, unknown>; body: string } {
-  const lines = content.split("\n");
-
-  // Must start with --- on first non-empty line
-  if (lines[0]?.trim() !== "---") {
-    return { frontmatter: {}, body: content };
-  }
-
-  // Find closing ---
-  let closingIdx = -1;
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i]?.trim() === "---") {
-      closingIdx = i;
-      break;
-    }
-  }
-
-  // No closing delimiter — treat entire file as body
-  if (closingIdx === -1) {
-    return { frontmatter: {}, body: content };
-  }
-
-  const fmLines = lines.slice(1, closingIdx);
-  const frontmatter = parseFrontmatterLines(fmLines);
-  // Skip the closing --- and any single leading blank line
-  const bodyLines = lines.slice(closingIdx + 1);
-  const body = bodyLines.join("\n").trimStart();
-
-  return { frontmatter, body };
-}
-
-/**
- * Simple line-by-line key: value parser.
- * Handles: `key: value`, `key:` (null), `key: ` (null).
- * Does NOT handle YAML lists, nested objects, or multiline values.
- */
-function parseFrontmatterLines(lines: string[]): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i] ?? "";
-    const trimmed = line.trim();
-
-    if (!trimmed || trimmed.startsWith("#")) {
-      i++;
-      continue;
-    }
-
-    const colonIdx = trimmed.indexOf(":");
-    if (colonIdx <= 0) {
-      i++;
-      continue;
-    }
-
-    const key = trimmed.slice(0, colonIdx).trim();
-    const rawValue = trimmed.slice(colonIdx + 1).trim();
-
-    if (!rawValue) {
-      const listValues: string[] = [];
-      let j = i + 1;
-
-      while (j < lines.length) {
-        const nextLine = lines[j] ?? "";
-        const nextTrimmed = nextLine.trim();
-
-        if (!nextTrimmed) break;
-        if (nextTrimmed.startsWith("#")) {
-          j++;
-          continue;
-        }
-
-        const match = nextTrimmed.match(/^-\s+(.+)$/);
-        if (!match) break;
-
-        const value = match[1]?.trim();
-        if (value) listValues.push(value);
-        j++;
-      }
-
-      if (listValues.length > 0) {
-        result[key] = listValues;
-        i = j;
-        continue;
-      }
-
-      result[key] = null;
-      i++;
-      continue;
-    }
-
-    result[key] = rawValue;
-    i++;
-  }
-
-  return result;
-}
-
-// ---------------------------------------------------------------------------
-// Wikilink extraction
-// ---------------------------------------------------------------------------
-
-/**
- * Extracts [[wikilink]] targets from body text.
- * Handles [[note|alias]] — captures only the part before the pipe.
- * Deduplicates and filters empty captures.
- */
-function extractWikilinks(body: string): string[] {
-  const seen = new Set<string>();
-  const pattern = /\[\[([^|\]]+)(?:\|[^\]]+)?\]\]/g;
-  let match: RegExpExecArray | null;
-
-  while ((match = pattern.exec(body)) !== null) {
-    const linkText = match[1]?.trim();
-    if (linkText) seen.add(linkText);
-  }
-
-  return [...seen];
 }
 
 // ---------------------------------------------------------------------------

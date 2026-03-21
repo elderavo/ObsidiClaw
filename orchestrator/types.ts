@@ -12,6 +12,15 @@
 export type SessionId = string;
 
 /**
+ * Discriminates run type in the runs table.
+ *   core      — interactive user prompt via OrchestratorSession
+ *   subagent  — child agent spawned by SubagentRunner
+ *   reviewer  — post-session review subagent (insight_engine)
+ *   job       — scheduler job execution
+ */
+export type RunKind = "core" | "subagent" | "reviewer" | "job";
+
+/**
  * Unique ID for a single prompt/response round-trip within a session.
  * A session has one or more runs (one per prompt).
  */
@@ -56,8 +65,20 @@ export interface SessionConfig {
    */
   onOutput?: (delta: string) => void;
 
-  /** True for subagent sessions spawned from a parent run. */
+  /**
+   * What kind of run this session produces. Defaults to "core".
+   * @deprecated Use runKind instead of isSubagent.
+   */
   isSubagent?: boolean;
+
+  /** Discriminates run type. Defaults to "core". Takes precedence over isSubagent. */
+  runKind?: RunKind;
+
+  /** Run ID of the parent that spawned this session (for subagent/reviewer linking). */
+  parentRunId?: RunId;
+
+  /** Session ID of the parent session (for cross-session parent/child trees). */
+  parentSessionId?: SessionId;
 }
 
 // ---------------------------------------------------------------------------
@@ -98,7 +119,7 @@ export type RunEvent =
   | { type: "session_end";         sessionId: SessionId; timestamp: number }
 
   // ── Prompt lifecycle (one per prompt, reused across session) ─────────────
-  | { type: "prompt_received";     sessionId: SessionId; runId: RunId; timestamp: number; text: string; isSubagent?: boolean }
+  | { type: "prompt_received";     sessionId: SessionId; runId: RunId; timestamp: number; text: string; isSubagent?: boolean; runKind?: RunKind; parentRunId?: RunId; parentSessionId?: SessionId }
   | { type: "prompt_complete";     sessionId: SessionId; runId: RunId; timestamp: number; durationMs: number }
   | { type: "prompt_error";        sessionId: SessionId; runId: RunId; timestamp: number; error: string }
 
@@ -127,4 +148,16 @@ export type RunEvent =
   // ── Scheduled job lifecycle ────────────────────────────────────────────
   | { type: "job_start";           sessionId: SessionId; timestamp: number; jobName: string; runId: string }
   | { type: "job_complete";        sessionId: SessionId; timestamp: number; jobName: string; runId: string; durationMs: number }
-  | { type: "job_error";           sessionId: SessionId; timestamp: number; jobName: string; runId: string; error: string };
+  | { type: "job_error";           sessionId: SessionId; timestamp: number; jobName: string; runId: string; error: string }
+
+  // ── Context engine debug events (ce_*) ──────────────────────────────────
+  // Emitted via ContextEngine.onDebug callback for full internal visibility.
+  | { type: "ce_init_start";       sessionId: SessionId; runId: RunId; timestamp: number; path: "fast" | "slow" }
+  | { type: "ce_init_end";         sessionId: SessionId; runId: RunId; timestamp: number; path: "fast" | "slow"; durationMs: number; noteCount?: number }
+  | { type: "ce_retrieval_start";  sessionId: SessionId; runId: RunId; timestamp: number; query: string; topK: number }
+  | { type: "ce_vector_done";      sessionId: SessionId; runId: RunId; timestamp: number; seedCount: number; durationMs: number }
+  | { type: "ce_graph_done";       sessionId: SessionId; runId: RunId; timestamp: number; expandedCount: number; durationMs: number }
+  | { type: "ce_review_start";     sessionId: SessionId; runId: RunId; timestamp: number; noteCount: number; avgScore: number }
+  | { type: "ce_review_done";      sessionId: SessionId; runId: RunId; timestamp: number; skipped: boolean; skipReason?: string; reviewMs: number; inputChars: number; outputChars?: number }
+  | { type: "ce_reindex_start";    sessionId: SessionId; runId: RunId; timestamp: number }
+  | { type: "ce_reindex_done";     sessionId: SessionId; runId: RunId; timestamp: number; durationMs: number; noteCount: number };

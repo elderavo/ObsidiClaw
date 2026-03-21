@@ -28,6 +28,7 @@ import { buildPruneClusters as buildPruneClustersOp } from "./prune/prune-builde
 import type { PersonalityConfig } from "../shared/agents/types.js";
 import type {
   ContextEngineConfig,
+  ContextEngineEvent,
   ContextPackage,
   RetrievedNote,
   SubagentInput,
@@ -51,10 +52,11 @@ const DEFAULT_PRUNE_CONFIG: PruneConfig = {
 export class ContextEngine {
   private vectorIndex: VectorStoreIndex | null = null;
   private graphStore: SqliteGraphStore | null = null;
-  private readonly config: Required<Omit<ContextEngineConfig, "review" | "pruneConfig">> & {
+  private readonly config: Required<Omit<ContextEngineConfig, "review" | "pruneConfig" | "onDebug">> & {
     review?: ContextEngineConfig["review"];
     pruneConfig?: ContextEngineConfig["pruneConfig"];
   };
+  private readonly onDebug: ((event: ContextEngineEvent) => void) | undefined;
   private readonly reviewer: ContextReviewer | null;
   private readonly pruneConfig: PruneConfig;
 
@@ -72,6 +74,8 @@ export class ContextEngine {
       review: config.review,
       pruneConfig: config.pruneConfig,
     };
+
+    this.onDebug = config.onDebug;
 
     this.pruneConfig = {
       ...DEFAULT_PRUNE_CONFIG,
@@ -101,6 +105,8 @@ export class ContextEngine {
   async initialize(): Promise<void> {
     if (this.vectorIndex) return;
 
+    const t0 = Date.now();
+
     ensureDir(dirname(this.config.dbPath));
 
     Settings.embedModel = new OllamaEmbedding({
@@ -117,15 +123,18 @@ export class ContextEngine {
 
     if (currentHash === storedHash && fileExists(vectorFile)) {
       // ── Fast path: nothing changed ─────────────────────────────────────────
-      // Load the persisted vector index from disk. The SQLite graph is already
-      // current (it was written on the last slow-path run). No Ollama calls.
+      this.debug({ type: "ce_init_start", timestamp: Date.now(), path: "fast" });
+
       const storageContext = await storageContextFromDefaults({ persistDir: vectorDir });
       this.vectorIndex = await VectorStoreIndex.init({ storageContext });
+
+      this.debug({ type: "ce_init_end", timestamp: Date.now(), path: "fast", durationMs: Date.now() - t0, noteCount: this.graphStore.listAllNotes().length });
       return;
     }
 
     // ── Slow path: md_db changed (or first run) ─────────────────────────────
-    // Sync markdown files → SQLite graph, re-embed via Ollama, persist to disk.
+    this.debug({ type: "ce_init_start", timestamp: Date.now(), path: "slow" });
+
     await syncMdDbToGraph(this.config.mdDbPath, this.graphStore);
 
     const storageContext = await storageContextFromDefaults({ persistDir: vectorDir });
@@ -133,6 +142,8 @@ export class ContextEngine {
 
     // Record the hash so the next startup can take the fast path.
     this.graphStore.setState("md_db_hash", currentHash);
+
+    this.debug({ type: "ce_init_end", timestamp: Date.now(), path: "slow", durationMs: Date.now() - t0, noteCount: this.graphStore.listAllNotes().length });
   }
 
   /**
@@ -148,6 +159,9 @@ export class ContextEngine {
 
     const t0 = Date.now();
 
+    this.debug({ type: "ce_retrieval_start", timestamp: t0, query: prompt.slice(0, 200), topK: this.config.topK });
+
+    const tVector = Date.now();
     const { seedNotes, expandedNotes } = await hybridRetrieve(
       prompt,
       this.vectorIndex,
@@ -155,7 +169,12 @@ export class ContextEngine {
       this.config.topK,
     );
 
+    this.debug({ type: "ce_vector_done", timestamp: Date.now(), seedCount: seedNotes.length, durationMs: Date.now() - tVector });
+
+    const tGraph = Date.now();
     let allNotes = [...seedNotes, ...expandedNotes].sort((a, b) => b.score - a.score);
+
+    this.debug({ type: "ce_graph_done", timestamp: Date.now(), expandedCount: expandedNotes.length, durationMs: Date.now() - tGraph });
 
     // ── Format raw context ──────────────────────────────────────────────
     const suggestedTools = allNotes
@@ -173,12 +192,25 @@ export class ContextEngine {
     let reviewResult: ContextPackage["reviewResult"] | undefined;
 
     if (this.reviewer) {
+      const avgScore = allNotes.length > 0 ? allNotes.reduce((sum, n) => sum + n.score, 0) / allNotes.length : 0;
+      this.debug({ type: "ce_review_start", timestamp: Date.now(), noteCount: allNotes.length, avgScore });
+
       const review = await this.reviewer.review(prompt, allNotes, rawFormattedContext);
       reviewResult = {
         reviewMs: review.reviewMs,
         skipped: review.skipped,
         skipReason: review.skipReason,
       };
+
+      this.debug({
+        type: "ce_review_done",
+        timestamp: Date.now(),
+        skipped: review.skipped,
+        skipReason: review.skipReason,
+        reviewMs: review.reviewMs,
+        inputChars: rawFormattedContext.length,
+        outputChars: review.synthesizedContext?.length,
+      });
 
       if (!review.skipped && review.synthesizedContext) {
         formattedContext = review.synthesizedContext;
@@ -314,6 +346,9 @@ export class ContextEngine {
       throw new Error("ContextEngine not initialized. Call initialize() first.");
     }
 
+    const t0 = Date.now();
+    this.debug({ type: "ce_reindex_start", timestamp: t0 });
+
     try {
       await syncMdDbToGraph(this.config.mdDbPath, this.graphStore);
 
@@ -325,6 +360,7 @@ export class ContextEngine {
       const newHash = await computeMdDbHash(this.config.mdDbPath);
       this.graphStore.setState("md_db_hash", newHash);
 
+      this.debug({ type: "ce_reindex_done", timestamp: Date.now(), durationMs: Date.now() - t0, noteCount: this.graphStore.listAllNotes().length });
       console.log("[context_engine] Full reindex completed");
 
     } catch (error) {
@@ -379,6 +415,12 @@ export class ContextEngine {
     this.graphStore?.close();
     this.graphStore = null;
     this.vectorIndex = null;
+  }
+
+  // ── Debug helper ──────────────────────────────────────────────────────────
+
+  private debug(event: ContextEngineEvent): void {
+    this.onDebug?.(event);
   }
 }
 

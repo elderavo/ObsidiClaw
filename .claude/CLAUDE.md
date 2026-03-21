@@ -28,7 +28,7 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 | `context_engine/link_graph/` | Rich wikilink graph: parsing, storage, validation, cycle detection |
 | `extension/` | Pi extension factory: full-stack standalone mode (creates ObsidiClawStack) or orchestrator client mode |
 | `orchestrator/` | Headless session management: lifecycle stages, MCP wiring, event emission. Secondary entry point for scripting/gateway |
-| `logger/` | SQLite-backed run logging — `runs`, `trace`, `synthesis_metrics` tables + debug JSONL |
+| `logger/` | SQLite-backed run logging — `sessions`, `runs`, `trace`, `synthesis_metrics` tables + `TraceEmitter` (structured trace) + debug JSONL |
 | `tools/` | Live tools for real-time fact retrieval (web search via Perplexity API) |
 | `.pi/extensions/` | Pi TUI extensions: codebase indexing, subagent spawning, web search |
 | `shared/` | Types, config, event schema, MD templates, `stack.ts` (shared infrastructure factory) |
@@ -57,7 +57,9 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **OS compat layer**: All code uses `shared/os/` abstractions for process spawning, filesystem, signal handling. No `process.platform` or Windows-specific code.
 - **Shared markdown layer**: `shared/markdown/` is the single source of truth for frontmatter parsing/building, wikilink extraction, token normalization. All consumers import from here — no local duplicates.
 - **Context synthesis**: `ContextReviewer` in `context_engine/review/` takes raw formatted context + query and produces a focused markdown document via LLM. Natural language in/out, no structured JSON. Falls back to raw notes on failure.
-- **Scheduler**: In-process `setInterval`-based. Jobs: `reindex-md-db` (30m), `health-check` (15m), `normalize-md-db` (2h). `PersistentScheduleBackend` interface stubbed for future OS-native scheduling.
+- **Scheduler**: In-process `setInterval`-based. Jobs: `reindex-md-db` (30m), `health-check` (15m), `normalize-md-db` (2h). `PersistentScheduleBackend` interface stubbed for future OS-native scheduling. Job executions create `runs` rows with `run_kind="job"`.
+- **Session/Run/Trace hierarchy**: `sessions` table is the top-level container (multi-prompt). `runs` table has `run_kind` (`core`|`subagent`|`reviewer`|`job`) + `parent_run_id`/`parent_session_id` for lineage trees. `trace` table supports both legacy (`type`+`payload`) and structured (`source`/`target`/`action`/`status`/`seq`/`span_id`) columns. `TraceEmitter` in `logger/trace-emitter.ts` manages per-run monotonic seq counters.
+- **Trace modules**: Canonical module names in `shared/trace-modules.ts`: `orchestrator`, `pi_session`, `context_engine`, `scheduler`, `extension`, `subagent`, `insight_engine`, `logger`, `user`, `tool:<name>`. All trace events use these as source/target.
 
 # Build Order
 ## Foundation (Complete)
@@ -124,7 +126,8 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - Shared markdown layer: canonical frontmatter/wikilink/token handling, md_db normalizer
 - OS compat layer: all code uses `shared/os/` abstractions
 - Personality-driven subagents: `SubagentRunner` with personality files, spawnable from anywhere
-- Scheduler: reindex (30m), health-check (15m), normalize-md-db (2h)
+- Scheduler: reindex (30m), health-check (15m), normalize-md-db (2h). Job executions tracked in `runs` table.
+- Session/run/trace schema: `sessions` table, `run_kind` enum, parent linking, `TraceEmitter` with structured columns + seq counters
 
 ## What's Broken / Unvalidated
 - **Subagents feel flaky** — need to diagnose with debug JSONL (Phase 7)
@@ -265,6 +268,19 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **Architecture decision**: two entry points are both first-class. `pi` for interactive (full TUI), `OrchestratorSession` for headless (Telegram gateway, scripts). Both use same stack. Each process creates its own instance; WAL handles concurrent SQLite access.
 - `tsc --noEmit` clean
 - **Next**: Validate Pi full-stack startup end-to-end. Consider Telegram gateway design (Phase 12+).
+
+**2026-03-21 — Session 13 (Trace/Session Schema Refactor)**
+- **Validated user's schema refactor instructions** against codebase — identified 6 factual mismatches: sessions are multi-prompt (not single-prompt), module list included 3 phantom modules and missed 2 real ones, scheduler jobs had no run rows, `isSubagent` was boolean not enum, no parent linking, no structured trace columns.
+- **Implemented 6 foundational changes**:
+  1. **`sessions` table** — pure container (no user_prompt/final_output). Created on `session_start`, finalized on `session_end`, `prompt_count` incremented per prompt.
+  2. **`RunKind` enum** — `"core" | "subagent" | "reviewer" | "job"` replaces `isSubagent: boolean`. `run_kind` column on `runs` table. `isSubagent` kept for backward compat.
+  3. **Parent linking** — `parentRunId`/`parentSessionId` threaded through `SessionConfig`, `SubagentSpec`, `OrchestratorSession`, `SubagentRunner`, and `prompt_received` event. `parent_run_id`/`parent_session_id` columns on `runs`.
+  4. **Job runs in `runs` table** — `JobScheduler.executeJob()` now inserts/finalizes run rows with `run_kind="job"`. New public `insertJobRun()`/`finalizeRun()` on `RunLogger`.
+  5. **`TraceModule` constants** — `shared/trace-modules.ts` with 9 static modules + `tool:<name>` dynamic pattern. `TraceModule`/`TraceModuleOrTool` types.
+  6. **`TraceEmitter`** — `logger/trace-emitter.ts`. Per-run monotonic `seq` counters, structured columns (`event_id`, `seq`, `source`, `target`, `action`, `status`, `span_id`, `parent_event_id`, `payload_summary`, `error_text`). Backward compatible — legacy `type`+`payload` columns still populated. Accessible via `logger.trace`.
+- **Decision**: Deferred instrumentation (wiring `logger.trace.emit()` at module boundaries) until a consumer (visualizer) drives which events need it. Schema is forward-compatible.
+- `tsc --noEmit` clean.
+- **Next**: Build Phase 11 visualizer to drive targeted instrumentation. Or rebuild and test the new schema populates correctly.
 
 # End-of-Run Protocol
 Every agent session MUST close by doing all three:

@@ -226,4 +226,21 @@ export interface ContextEngineConfig {
    * Optional pruning configuration. Overrides defaults used by buildPruneClusters().
    */
   pruneConfig?: Partial<PruneConfig>;
+
+  /**
+   * Debug event callback. Called at each internal state transition
+   * (init, retrieval steps, review, reindex). Wire this to the orchestrator's
+   * event logger for full context engine visibility.
+   */
+  onDebug?: (event: ContextEngineEvent) => void;
+}
+
+// ---------------------------------------------------------------------------
+// Debug events — emitted via onDebug callback
+// ---------------------------------------------------------------------------
+
+export interface ContextEngineEvent {
+  type: string;
+  timestamp: number;
+  [key: string]: unknown;
 }

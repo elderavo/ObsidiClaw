@@ -111,8 +111,10 @@ export class SubagentRunner {
       {
         systemPrompt,
         onOutput: (delta) => { outputBuffer += delta; },
-        isSubagent: true,
+        runKind: "subagent",
         model: personality?.provider?.model,
+        parentRunId: spec.parentRunId,
+        parentSessionId: spec.parentSessionId,
       },
     );
 

@@ -27,7 +27,9 @@ import { createPiAgentSession } from "../shared/pi-session-factory.js";
 import { resolvePaths } from "../shared/config.js";
 import { extractMessageText } from "../shared/text-utils.js";
 import { runSessionReview, type ReviewTrigger } from "../insight_engine/session_review.js";
-import type { RunEvent, RunId, RunStage, SessionConfig, SessionId } from "./types.js";
+import type { JobScheduler } from "../scheduler/scheduler.js";
+import type { SubagentRunner } from "../shared/agents/subagent-runner.js";
+import type { RunEvent, RunId, RunKind, RunStage, SessionConfig, SessionId } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // OrchestratorSession
@@ -46,15 +48,22 @@ export class OrchestratorSession {
    */
   private currentRunId: RunId = "";
 
-  private readonly isSubagent: boolean;
+  private readonly runKind: RunKind;
+  private readonly parentRunId?: string;
+  private readonly parentSessionId?: string;
 
   constructor(
     private readonly logger: RunLogger,
     private readonly contextEngine?: ContextEngine,
     private readonly config: SessionConfig = {},
+    private readonly scheduler?: JobScheduler,
+    private readonly subagentRunner?: SubagentRunner,
   ) {
     this.sessionId = crypto.randomUUID();
-    this.isSubagent = Boolean(config.isSubagent);
+    // runKind takes precedence; fall back to isSubagent for backward compat
+    this.runKind = config.runKind ?? (config.isSubagent ? "subagent" : "core");
+    this.parentRunId = config.parentRunId;
+    this.parentSessionId = config.parentSessionId;
     this.emit({ type: "session_start", sessionId: this.sessionId, timestamp: Date.now() });
   }
 
@@ -72,7 +81,7 @@ export class OrchestratorSession {
     this.currentRunId = runId;
     const startTime = Date.now();
 
-    this.emit({ type: "prompt_received", sessionId: this.sessionId, runId, timestamp: Date.now(), text, isSubagent: this.isSubagent });
+    this.emit({ type: "prompt_received", sessionId: this.sessionId, runId, timestamp: Date.now(), text, isSubagent: this.runKind !== "core", runKind: this.runKind, parentRunId: this.parentRunId, parentSessionId: this.parentSessionId });
 
     try {
       // ── First prompt: create pi session ───────────────────────────────────
@@ -136,7 +145,7 @@ export class OrchestratorSession {
    * Falls back to dispose() if review is skipped.
    */
   async finalize(trigger: ReviewTrigger = "session_end"): Promise<void> {
-    if (this.isSubagent) {
+    if (this.runKind !== "core") {
       this.dispose();
       return;
     }
@@ -237,7 +246,7 @@ export class OrchestratorSession {
    * is unavailable or if this session is already a subagent.
    */
   private async runReviewHook(trigger: ReviewTrigger, compactionMeta?: unknown): Promise<void> {
-    if (this.isSubagent) return;
+    if (this.runKind !== "core") return;
     if (!this.contextEngine) return;
 
     await runSessionReview({
@@ -251,7 +260,9 @@ export class OrchestratorSession {
         const childLogger = new RunLogger({ dbPath: resolvePaths().dbPath });
         const childSession = new OrchestratorSession(childLogger, this.contextEngine, {
           systemPrompt,
-          isSubagent: true,
+          runKind: "reviewer",
+          parentRunId: this.currentRunId,
+          parentSessionId: this.sessionId,
         });
 
         return {
@@ -280,9 +291,9 @@ export class OrchestratorSession {
     // Build extension factories for context injection (when engine is available)
     const contextExtensions = this.contextEngine
       ? [createObsidiClawExtension({
-          mcpServer: createContextEngineMcpServer(
-            this.contextEngine,
-            (pkg) => this.emit({
+          mcpServer: createContextEngineMcpServer({
+            engine: this.contextEngine,
+            onContextBuilt: (pkg) => this.emit({
               type: "context_retrieved",
               sessionId: this.sessionId,
               runId: this.currentRunId,
@@ -298,7 +309,7 @@ export class OrchestratorSession {
               reviewMs: pkg.reviewResult?.reviewMs,
               reviewSkipped: pkg.reviewResult?.skipped,
             }),
-            (pkg) => this.emit({
+            onSubagentPrepared: (pkg) => this.emit({
               type: "subagent_start",
               sessionId: this.sessionId,
               runId: this.currentRunId,
@@ -309,7 +320,9 @@ export class OrchestratorSession {
               expandedCount: pkg.contextPackage.expandedNoteIds?.length ?? 0,
               estimatedTokens: pkg.contextPackage.estimatedTokens,
             }),
-          ),
+            scheduler: this.scheduler,
+            subagentRunner: this.subagentRunner,
+          }),
         })]
       : [];
 

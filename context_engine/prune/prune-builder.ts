@@ -7,6 +7,7 @@ import { randomUUID } from "crypto";
 import type { VectorStoreIndex } from "llamaindex";
 import type { SqliteGraphStore, StoredNote } from "../store/graph-store.js";
 import type { NoteType, PruneCluster, PruneClusterMember, PruneConfig } from "../types.js";
+import { normalizeToken, extractTags } from "../../shared/markdown/tokens.js";
 
 interface Edge {
   a: string;
@@ -171,28 +172,3 @@ function buildQueryFromNote(note: StoredNote): string {
   return `${note.title}\n\n${body}`;
 }
 
-function extractTags(frontmatterJson?: string | null): string[] {
-  if (!frontmatterJson) return [];
-  try {
-    const parsed = JSON.parse(frontmatterJson) as Record<string, unknown>;
-    const rawTags = parsed["tags"];
-
-    const tags: string[] = [];
-    if (Array.isArray(rawTags)) {
-      tags.push(...rawTags.map((t) => String(t)));
-    } else if (typeof rawTags === "string") {
-      tags.push(...rawTags.split(",").map((t) => t.trim()));
-    }
-
-    return tags.map(normalizeToken).filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-function normalizeToken(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-}

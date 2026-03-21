@@ -18,7 +18,7 @@ Self-knowledge about the ObsidiClaw project I'm currently operating within. This
 - `md_db/` - Flat-file markdown knowledge graph (tools, concepts, notes)  
 - `context_engine/` - Hybrid retrieval: LlamaIndex vector + SQLite BFS graph expansion
 - `orchestrator/` - Wraps Pi runs, manages lifecycle, event logging
-- `logger/` - SQLite run logging (`runs`, `trace`, `synthesis_metrics` tables)
+- `logger/` - SQLite run logging (`sessions`, `runs`, `trace`, `synthesis_metrics` tables; `TraceEmitter` for structured trace events)
 - `extension/` - Pi extension factory, pure MCP client
 - `insight_engine/` - Future: compares runs, derives lessons (Phase 7-8)
 
@@ -30,7 +30,9 @@ Self-knowledge about the ObsidiClaw project I'm currently operating within. This
 
 **Startup Behavior**: `before_agent_start` injects `preferences.md` only. Pi uses `retrieve_context` tool for on-demand project knowledge.
 
-**Event Flow**: Everything emits `RunEvent`s → orchestrator → SQLite logger. MCP metrics route via `onContextBuilt` callback.
+**Event Flow**: Everything emits `RunEvent`s → orchestrator → SQLite logger. MCP metrics route via `onContextBuilt` callback. Structured trace events via `TraceEmitter` add source/target/action/status decomposition with per-run seq counters.
+
+**Run Lineage**: Runs have a `run_kind` field (`core`, `subagent`, `reviewer`, `job`) and optional `parent_run_id`/`parent_session_id` for parent/child trees. Sessions are explicit rows in the `sessions` table.
 
 ## Current Status
 
