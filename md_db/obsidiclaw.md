@@ -24,7 +24,7 @@ Self-knowledge about the ObsidiClaw project I'm currently operating within. This
 
 ## Key Design Decisions
 
-**MCP Boundary**: `ContextEngine` only accessible through `context_engine/mcp/server.ts`. Extensions are pure MCP clients using `InMemoryTransport` pairs.
+**MCP Boundary**: `ContextEngine` only accessible through `context_engine/mcp/mcp-server.ts`. Extensions are pure MCP clients using `InMemoryTransport` pairs.
 
 **Hybrid Retrieval**: Vector seeds (LlamaIndex/Ollama embeddings) + depth-1 BFS graph expansion (SQLite). Index-type notes filtered out (navigation/TOC only).
 

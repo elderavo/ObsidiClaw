@@ -12,7 +12,7 @@
 
 import { basename, extname } from "path";
 import type { NoteType } from "../types.js";
-import type { ParsedNote } from "./models.js";
+import type { ParsedNote } from "./note-models.js";
 
 // ---------------------------------------------------------------------------
 // Public API

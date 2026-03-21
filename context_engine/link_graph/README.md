@@ -63,7 +63,7 @@ console.log(await processor.generateReport());
 
 ### Integration with Existing Indexer
 ```typescript
-// In indexer.ts
+// In graph-indexer.ts
 import { LinkGraphProcessor } from './link_graph/index.js';
 
 export async function syncMdDbToGraphWithLinkAnalysis(
@@ -144,7 +144,7 @@ The validator detects:
 ## Integration Points
 
 This module is designed to integrate with:
-- **Existing indexer** - Add to `syncMdDbToGraph()` 
+- **Graph indexer** - Add to `syncMdDbToGraph()` 
 - **Context retrieval** - Use link relationships for better context
 - **MCP server** - Expose validation as tool functions
 - **Orchestrator** - Include health checks in startup

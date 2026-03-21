@@ -17,7 +17,7 @@
 
 import Database from "better-sqlite3";
 import type { Database as DB } from "better-sqlite3";
-import type { ParsedNote } from "../ingest/models.js";
+import type { ParsedNote } from "../ingest/note-models.js";
 
 // ---------------------------------------------------------------------------
 // Row types — what better-sqlite3 returns from queries

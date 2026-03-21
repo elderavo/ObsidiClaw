@@ -10,8 +10,8 @@ import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { readdir, readFile } from "fs/promises";
 import { join, relative, extname, basename } from "path";
-import { SqliteGraphStore } from "../../context_engine/store/sqlite_graph.js";
-import type { ParsedNote } from "../../context_engine/ingest/models.js";
+import { SqliteGraphStore } from "../../context_engine/store/graph-store.js";
+import type { ParsedNote } from "../../context_engine/ingest/note-models.js";
 import { Document } from "llamaindex";
 
 interface CodeFile {

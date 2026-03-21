@@ -16,7 +16,7 @@ Subagent context is packaged by the **context engine synthesizer** and injected 
 # Key Implementation Points
 
 - **Spawn trigger**: `.pi/extensions/subagent.ts` calls MCP `prepare_subagent` with `prompt`, `plan`, and `success_criteria` before creating a child `OrchestratorSession`.
-- **Synthesizer**: `context_engine/mcp/server.ts` exposes `prepare_subagent`, which calls `ContextEngine.buildSubagentPackage(...)`.
+- **Synthesizer**: `context_engine/mcp/mcp-server.ts` exposes `prepare_subagent`, which calls `ContextEngine.buildSubagentPackage(...)`.
 - **Packaging**: `context_engine/context-engine.ts` uses `buildSubagentPackage` to:
   - run hybrid retrieval on `plan + prompt` (via `build()`),
   - assemble a `SubagentPackage`, and

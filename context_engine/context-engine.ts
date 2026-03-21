@@ -19,10 +19,10 @@ import { mkdirSync, existsSync } from "fs";
 import { dirname, join } from "path";
 import { Settings, VectorStoreIndex, storageContextFromDefaults } from "llamaindex";
 import { OllamaEmbedding } from "@llamaindex/ollama";
-import { syncMdDbToGraph, buildVectorIndexFromGraph, computeMdDbHash } from "./indexer.js";
-import { hybridRetrieve } from "./retrieval/hybrid.js";
-import { SqliteGraphStore } from "./store/sqlite_graph.js";
-import { stripFrontmatter, estimateTokens } from "./frontmatter.js";
+import { syncMdDbToGraph, buildVectorIndexFromGraph, computeMdDbHash } from "./graph-indexer.js";
+import { hybridRetrieve } from "./retrieval/hybrid-retrieval.js";
+import { SqliteGraphStore } from "./store/graph-store.js";
+import { stripFrontmatter, estimateTokens } from "./frontmatter-utils.js";
 import type { ContextEngineConfig, ContextPackage, RetrievedNote, SubagentInput, SubagentPackage } from "./types.js";
 
 const DEFAULT_OLLAMA_HOST = process.env["OLLAMA_HOST"] ?? "10.0.132.100";

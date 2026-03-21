@@ -14,13 +14,16 @@
  * has changed since the last run (see context-engine.ts initialize()).
  */
 
+// TODO: Split file discovery/hash logic from graph sync + vector index building.
+// This module currently mixes filesystem scanning, graph persistence, and embedding concerns.
+
 import { readdir, readFile, stat } from "fs/promises";
 import { join, relative, extname } from "path";
 import { createHash } from "crypto";
 import { Document, VectorStoreIndex } from "llamaindex";
 import type { StorageContext } from "llamaindex";
-import { parseMarkdownFile } from "./ingest/parser.js";
-import type { SqliteGraphStore } from "./store/sqlite_graph.js";
+import { parseMarkdownFile } from "./ingest/note-parser.js";
+import type { SqliteGraphStore } from "./store/graph-store.js";
 
 // ---------------------------------------------------------------------------
 // File collection (shared by sync + hash)

@@ -11,7 +11,7 @@
 
 import { MetadataMode } from "llamaindex";
 import type { VectorStoreIndex } from "llamaindex";
-import type { SqliteGraphStore, StoredNote } from "../store/sqlite_graph.js";
+import type { SqliteGraphStore, StoredNote } from "../store/graph-store.js";
 import type { NoteType, RetrievedNote } from "../types.js";
 
 const GRAPH_SCORE_DECAY = 0.7;
