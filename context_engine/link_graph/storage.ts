@@ -39,11 +39,25 @@ export class LinkGraphStorage {
   
   /**
    * Initialize enhanced schema for detailed link storage.
-   * Adds new tables while preserving existing notes/edges structure.
+   *
+   * Always drops and recreates the derived link tables so schema changes take
+   * effect immediately. These tables are pure computed caches (rebuilt from
+   * markdown on every sync), so dropping them is always safe.
+   *
+   * NOTE: No foreign keys on source_file/target_file — wikilink targets are
+   * raw text (e.g. "network"), not resolved note_ids ("concepts/network.md").
+   * Broken links must be storable for broken-link detection to work.
    */
   private initEnhancedSchema(): void {
+    // Drop derived tables so schema changes and stale FK constraints are cleared.
     this.db.exec(`
-      -- Enhanced wikilinks table with full metadata
+      DROP TABLE IF EXISTS link_validation_cache;
+      DROP TABLE IF EXISTS detected_cycles;
+      DROP TABLE IF EXISTS wikilinks;
+    `);
+
+    this.db.exec(`
+      -- Wikilink metadata table — no FK constraints (targets are raw link text)
       CREATE TABLE IF NOT EXISTS wikilinks (
         link_id      INTEGER PRIMARY KEY AUTOINCREMENT,
         source_file  TEXT NOT NULL,
@@ -53,31 +67,24 @@ export class LinkGraphStorage {
         raw_text     TEXT NOT NULL,
         position     INTEGER NOT NULL,
         line_number  INTEGER NOT NULL,
-        created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
-        
-        -- Foreign keys to notes table
-        FOREIGN KEY (source_file) REFERENCES notes(note_id) ON DELETE CASCADE,
-        FOREIGN KEY (target_file) REFERENCES notes(note_id) ON DELETE CASCADE
+        created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
       );
-      
-      -- Index for efficient queries
+
       CREATE INDEX IF NOT EXISTS idx_wikilinks_source ON wikilinks(source_file);
       CREATE INDEX IF NOT EXISTS idx_wikilinks_target ON wikilinks(target_file);
       CREATE INDEX IF NOT EXISTS idx_wikilinks_source_target ON wikilinks(source_file, target_file);
-      
-      -- Cycle detection metadata
+
       CREATE TABLE IF NOT EXISTS detected_cycles (
         cycle_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-        cycle_path   TEXT NOT NULL,  -- JSON array of node IDs
-        trigger_link TEXT NOT NULL,  -- JSON of WikiLink that would complete cycle
+        cycle_path   TEXT NOT NULL,
+        trigger_link TEXT NOT NULL,
         detected_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
         resolved     BOOLEAN DEFAULT FALSE
       );
-      
-      -- Link validation cache  
+
       CREATE TABLE IF NOT EXISTS link_validation_cache (
         cache_key    TEXT PRIMARY KEY,
-        result       TEXT NOT NULL,  -- JSON of validation results
+        result       TEXT NOT NULL,
         updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP
       );
     `);
