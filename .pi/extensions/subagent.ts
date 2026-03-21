@@ -24,6 +24,7 @@ import { ContextEngine } from "../../context_engine/index.js";
 import { RunLogger } from "../../logger/run-logger.js";
 import { SubagentRunner } from "../../shared/agents/subagent-runner.js";
 import { resolvePaths, type ObsidiClawPaths } from "../../shared/config.js";
+import { getSharedEngine, getSharedRunner } from "../../extension/factory.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -59,10 +60,23 @@ export default function subagentExtension(
   async function ensureRunner(): Promise<SubagentRunner> {
     if (runner) return runner;
 
+    // Prefer shared instances from the main ObsidiClaw extension (avoids duplicate engine)
+    const sharedRunner = getSharedRunner();
+    if (sharedRunner) {
+      runner = sharedRunner;
+      return runner;
+    }
+
+    // Fallback: create own engine if main extension hasn't initialized yet
     if (!engine) {
-      engine = new ContextEngine({ mdDbPath: paths.mdDbPath });
-      await engine.initialize();
-      ownsEngine = true;
+      const sharedEngine = getSharedEngine();
+      if (sharedEngine) {
+        engine = sharedEngine;
+      } else {
+        engine = new ContextEngine({ mdDbPath: paths.mdDbPath });
+        await engine.initialize();
+        ownsEngine = true;
+      }
     }
 
     runner = new SubagentRunner({

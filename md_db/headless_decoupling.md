@@ -67,24 +67,28 @@ Converted from `.js` to `.ts`. Uses `createPiAgentSession()` and `resolvePaths()
 
 ## How Headless Integration Works
 
-After these changes, `OrchestratorSession` is a clean headless agent core. Any integration follows this pattern:
+After these changes, `OrchestratorSession` is a clean headless agent core. Use `createObsidiClawStack()` to bootstrap infrastructure, then create sessions as needed:
 
 ```typescript
-import { ContextEngine } from "./context_engine/index.js";
-import { RunLogger } from "./logger/index.js";
-import { OrchestratorSession } from "./orchestrator/session.js";
-import { resolvePaths } from "./shared/config.js";
+import { createObsidiClawStack } from "./shared/stack.js";
+import { Orchestrator } from "./orchestrator/orchestrator.js";
 
-const paths = resolvePaths("/path/to/project");
-const engine = new ContextEngine({ mdDbPath: paths.mdDbPath });
-await engine.initialize();
+const stack = createObsidiClawStack({
+  rootDir: "/path/to/project",
+  enableScheduler: false, // gateway doesn't need its own scheduler
+});
+await stack.initialize();
 
-// One engine, many sessions (e.g. one per Telegram chat)
-const logger = new RunLogger({ dbPath: paths.dbPath });
-const session = new OrchestratorSession(logger, engine);
+const orchestrator = new Orchestrator(stack.logger, stack.engine, stack.scheduler, stack.runner);
 
+// One stack, many sessions (e.g. one per Telegram chat)
+const session = orchestrator.createSession();
 await session.prompt("user message here");
 const messages = session.messages; // extract response
+await session.finalize();
+
+// On process exit
+await stack.shutdown();
 ```
 
 The session handles: context injection (RAG), tool execution, subagent spawning, full SQLite logging — all without a TUI.

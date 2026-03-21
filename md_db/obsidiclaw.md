@@ -34,13 +34,13 @@ Self-knowledge about the ObsidiClaw project I'm currently operating within. This
 
 ## Current Status
 
-**Completed Phases**: 3-5 (orchestrator, logging, hybrid retrieval)  
-**Next Phase**: 6 (tool execution integration)  
-**Entry Point**: `npx tsx orchestrator/run.ts`
+**Completed Phases**: 1-6.5 (foundation, orchestrator, logging, hybrid retrieval, tools, infrastructure hardening)
+**Active Work**: Phase 7-11 (subagent reliability, review pipeline, graph refactor, scheduler validation, visualizer)
+**Entry Points**: `pi` (interactive, full stack via extension) or `npx tsx orchestrator/run.ts` (headless/scripting)
 
 ## Common Patterns
 
-**Indexing Lifecycle**: Only happens on orchestrator startup via `contextEngine.initialize()`. SQLite graph sync → vector index rebuild. Changes require session restart.
+**Indexing Lifecycle**: Happens on startup via `contextEngine.initialize()` (fast path if md_db unchanged). Periodic re-sync via `reindex-md-db` scheduled job (30min).
 
 **Note Types**: `tool` (executable), `concept` (insights), `index` (filtered navigation). Frontmatter `type:` field controls categorization.
 
@@ -57,36 +57,53 @@ Current session status tracked in `.claude/CLAUDE.md` - always check phase progr
 
 ----
 
-  ---
-  What happens when you run pi                                                                                                                                                   
-  pi (CLI binary from @mariozechner/pi-coding-agent)                                                                                                                                 └── DefaultResourceLoader.reload()
-          ├── packageManager.resolve()  ← scans .pi/extensions/ automatically
-          │     ├── .pi/extensions/codebase-indexer.ts  ✅ loads
-          │     ├── .pi/extensions/debug-logger.ts      ✅ loads
-          │     ├── .pi/extensions/subagent.ts           ✅ loads
-          │     └── .pi/extensions/web-search.ts         ✅ loads
-          └── extensionFactories: []   ← nothing, you passed none
-                └── (empty)
+## Startup Paths
 
-  What runs from YOUR code: only the four .pi/extensions/ files. Nothing else.
+Both entry points use `createObsidiClawStack()` from `shared/stack.ts` to create shared infrastructure (ContextEngine, RunLogger, JobScheduler, SubagentRunner).
 
-  What does NOT run: extension/factory.ts (the one that wires retrieve_context and before_agent_start context injection). The orchestrator (orchestrator/session.ts, RunLogger)
-  is completely absent.
+### Running `pi` (interactive — recommended)
 
-  ---
-  What happens when you run npx tsx orchestrator/run.ts
+```
+pi (TUI binary)
+  └── auto-discovers .pi/extensions/
+        ├── obsidi-claw.ts → createObsidiClawExtension({ rootDir })
+        │     └── extension/factory.ts (standalone path)
+        │           └── createObsidiClawStack({ rootDir })
+        │                 ├── RunLogger (debug JSONL ON by default)
+        │                 ├── ContextEngine (with onDebug callback)
+        │                 ├── JobScheduler (reindex, health-check, normalize)
+        │                 └── SubagentRunner
+        │           └── createContextEngineMcpServer(full options)
+        │                 ├── retrieve_context, get_preferences
+        │                 ├── list_jobs, run_job, set_job_enabled
+        │                 └── schedule_task, unschedule_task
+        ├── subagent.ts (reuses shared engine/runner via getSharedEngine())
+        └── web-search.ts
+```
 
-  orchestrator/run.ts
-    └── OrchestratorSession.createPiSession()
-          └── DefaultResourceLoader({ extensionFactories: [...] }).reload()
-                ├── packageManager.resolve()  ← SAME auto-scan of .pi/extensions/
-                │     ├── .pi/extensions/codebase-indexer.ts  ✅ loads
-                │     ├── .pi/extensions/debug-logger.ts      ✅ loads
-                │     ├── .pi/extensions/subagent.ts           ✅ loads
-                │     └── .pi/extensions/web-search.ts         ✅ loads
-                └── extensionFactories (explicit, from orchestrator)
-                      ├── ollamaProvider                       ✅ loads
-                      └── createObsidiClawExtension(...)       ✅ loads  ← this is the missing piece
+Full stack: context injection, scheduler, event logging, subagent tools.
 
-  DefaultResourceLoader ALWAYS auto-discovers .pi/extensions/ unless you pass noExtensions: true. So both paths load the same four files. The orchestrator adds
-  createObsidiClawExtension on top.
+### Running `npx tsx orchestrator/run.ts` (headless/scripting/gateway)
+
+```
+orchestrator/run.ts
+  └── createObsidiClawStack({ rootDir })  ← same stack factory
+        ├── RunLogger, ContextEngine, JobScheduler, SubagentRunner
+  └── Orchestrator → OrchestratorSession
+        └── createPiSession() (creates its own Pi session internally)
+              └── createObsidiClawExtension({ mcpServer })  ← orchestrator path
+  └── readline loop (bare TUI)
+```
+
+Same infrastructure, different session management. OrchestratorSession creates and owns the Pi session — used for headless integrations (Telegram bot, CI, scripts).
+
+### Shared infrastructure (`shared/stack.ts`)
+
+```typescript
+const stack = createObsidiClawStack({ rootDir, enableScheduler? });
+await stack.initialize();  // engine init + scheduler start
+// ... use stack.engine, stack.logger, stack.scheduler, stack.runner ...
+await stack.shutdown();    // scheduler stop + engine close + logger close
+```
+
+Each process creates its own stack instance. SQLite WAL mode handles concurrent access across processes.

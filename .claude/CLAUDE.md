@@ -22,19 +22,22 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 | `context_engine/mcp/` | MCP server exposing context engine — sole interface between retrieval and Pi |
 | `context_engine/store/` | SQLite graph store with better-sqlite3, WAL mode, BFS traversal |
 | `context_engine/retrieval/` | Hybrid retrieval: LlamaIndex vector seeds + graph expansion |
-| `context_engine/ingest/` | Markdown parser, frontmatter extraction, wikilink resolution |
-| `extension/` | Pi extension factory: MCP client, registers `retrieve_context` tool + `before_agent_start` hook |
-| `orchestrator/` | Session management: lifecycle stages, MCP wiring, event emission |
-| `logger/` | SQLite-backed run logging — `runs`, `trace`, `synthesis_metrics` tables |
+| `context_engine/review/` | Context synthesis: LLM rewrites raw notes into query-focused context |
+| `context_engine/ingest/` | Domain-specific note parsing (noteType inference, toolId). Uses `shared/markdown/` |
+| `context_engine/prune/` | Vector-similarity clustering for note deduplication |
+| `context_engine/link_graph/` | Rich wikilink graph: parsing, storage, validation, cycle detection |
+| `extension/` | Pi extension factory: full-stack standalone mode (creates ObsidiClawStack) or orchestrator client mode |
+| `orchestrator/` | Headless session management: lifecycle stages, MCP wiring, event emission. Secondary entry point for scripting/gateway |
+| `logger/` | SQLite-backed run logging — `runs`, `trace`, `synthesis_metrics` tables + debug JSONL |
 | `tools/` | Live tools for real-time fact retrieval (web search via Perplexity API) |
 | `.pi/extensions/` | Pi TUI extensions: codebase indexing, subagent spawning, web search |
-| `shared/` | Types, config, event schema, MD templates |
+| `shared/` | Types, config, event schema, MD templates, `stack.ts` (shared infrastructure factory) |
 | `shared/os/` | OS compatibility layer: process spawning, filesystem, scheduling backend interface |
+| `shared/markdown/` | Canonical markdown utilities: frontmatter parse/build, wikilinks, token normalization, md_db normalizer |
 | `shared/agents/` | First-class subagent entity: SubagentRunner, personality loader, personality files |
 | `shared/agents/personalities/` | Subagent personality markdown files (outside md_db, not indexed) |
-| `context_engine/review/` | Context review gate: evaluates retrieved context for relevance before MCP delivery |
-| `scheduler/` | In-process job scheduler with setInterval, built-in reindex + health-check jobs |
-| `insight_engine/` | Compares runs, derives lessons, writes new/updated notes back to md_db (Phase 7–8) |
+| `scheduler/` | In-process job scheduler with setInterval: reindex (30m), health-check (15m), normalize-md-db (2h) |
+| `insight_engine/` | Post-session review: captures session transcripts, proposes preference updates + new concept notes |
 
 # Key Design Decisions
 - `md_db/tools/` nodes point to **live tools** that fetch real-time facts — never hardcode facts
@@ -42,58 +45,93 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - Knowledge graph is flat-file but link-structured (Obsidian-style `[[wikilinks]]`)
 - Use **Conda** for all Python commands
 - **MCP boundary**: `ContextEngine` is only accessible through `context_engine/mcp/server.ts` — Pi's extension never holds a direct engine reference. This lets the context engine be swapped to a remote/subprocess transport without changing the extension.
-- **Metrics via events**: `onContextBuilt` callback on the MCP server fires with the full `ContextPackage`; the orchestrator converts it to a `context_retrieved` `RunEvent` which the logger persists. The extension itself is logger-free.
+- **Shared infrastructure**: `createObsidiClawStack()` in `shared/stack.ts` creates ContextEngine, RunLogger, JobScheduler, and SubagentRunner. Both `extension/factory.ts` (Pi TUI) and `orchestrator/run.ts` (headless) consume it. Each process creates its own instance; SQLite WAL handles concurrency.
+- **Two entry points**: `pi` (interactive, full stack via extension) and `orchestrator/run.ts` (headless/scripting/gateway via OrchestratorSession). Both use `createObsidiClawStack()`.
+- **Metrics via events**: `onContextBuilt` callback on the MCP server fires with the full `ContextPackage`; both the extension (standalone mode) and orchestrator convert it to a `context_retrieved` `RunEvent` which the logger persists.
+- **Debug events**: `ContextEngine` emits `ce_*` events via `onDebug` callback at every internal state transition (init, vector retrieval, graph expansion, review, reindex). Debug JSONL is **ON by default** (`OBSIDI_CLAW_DEBUG=0` to disable). All events land in `trace` table + `.obsidi-claw/debug/{sessionId}.jsonl`.
 - **Startup injection**: `before_agent_start` calls MCP `get_preferences` and injects `preferences.md` only — no RAG on startup. Pi uses `retrieve_context` for on-demand project knowledge.
 - **Index notes filtered**: `note_type === "index"` notes (TOC/nav files) are excluded from hybrid retrieval results and do not act as graph expansion origins.
-- **LlamaIndex owns embeddings only**: wikilink graph lives in SQLite (`better-sqlite3`); LlamaIndex handles vector seeds.
+- **LlamaIndex owns embeddings only**: wikilink graph lives in SQLite (`better-sqlite3`); LlamaIndex handles vector seeds. *(Planned: migrate graph to Python LlamaIndex for property graph support — see Build Order Phase 9.)*
 - **Subagents are first-class entities**: `SubagentRunner` in `shared/agents/` can be spawned from Pi tools, scheduler, or standalone scripts — no parent Pi session required.
 - **Personalities**: Stored in `shared/agents/personalities/` (outside `md_db/`) with frontmatter provider config. Injected into system prompt before task section.
-- **OS compat layer**: All new code uses `shared/os/` abstractions for process spawning, filesystem, signal handling. No `process.platform` or Windows-specific code.
-- **Context review gate**: Optional quality gate in `ContextEngine.build()` — direct Ollama API call using personality's configured model, triggered by low confidence scores.
-- **Scheduler**: In-process `setInterval`-based. `PersistentScheduleBackend` interface stubbed for future OS-native scheduling (cron/launchd/Task Scheduler).
+- **OS compat layer**: All code uses `shared/os/` abstractions for process spawning, filesystem, signal handling. No `process.platform` or Windows-specific code.
+- **Shared markdown layer**: `shared/markdown/` is the single source of truth for frontmatter parsing/building, wikilink extraction, token normalization. All consumers import from here — no local duplicates.
+- **Context synthesis**: `ContextReviewer` in `context_engine/review/` takes raw formatted context + query and produces a focused markdown document via LLM. Natural language in/out, no structured JSON. Falls back to raw notes on failure.
+- **Scheduler**: In-process `setInterval`-based. Jobs: `reindex-md-db` (30m), `health-check` (15m), `normalize-md-db` (2h). `PersistentScheduleBackend` interface stubbed for future OS-native scheduling.
 
-# Build Order (8 Phases)
-- [x] **Phase 1** — Project skeleton + shared contracts (types, config, event schema, context package schema)
+# Build Order
+## Foundation (Complete)
+- [x] **Phase 1** — Project skeleton + shared contracts (types, config, event schema)
 - [x] **Phase 2** — Pi runtime adapter (minimal end-to-end: prompt in → result out)
 - [x] **Phase 3** — Orchestrator skeleton (wraps Pi run, run_id, lifecycle, run logger)
 - [x] **Phase 4** — SQLite logging + context injection path working end-to-end
-- [x] **Phase 5** — Retrieval pipeline (hybrid RAG: vector seeds + BFS graph expansion, frontmatter strip, token estimation)
-- [x] **Phase 6** — Tool execution integration (web search, Pi extensions, MCP boundary complete)
-- [ ] **Phase 7** — Comparison engine (compare logged runs)
-- [ ] **Phase 8** — Insight generation (derive lessons, write back to md_db)
+- [x] **Phase 5** — Retrieval pipeline (hybrid RAG: vector seeds + BFS graph expansion)
+- [x] **Phase 6** — Tool execution integration (web search, Pi extensions, MCP boundary)
+- [x] **Phase 6.5** — Infrastructure hardening (OS compat layer, shared markdown, context synthesis, debug events, scheduler, personality system, subagent entity)
 
-# Current Phase
-**Phases 3–6 complete.** Full system operational with tool integration:
+## Active Work
+- [ ] **Phase 7 — Subagent reliability** *(problem: subagents feel flaky)*
+  - [ ] 7a. Diagnose: run subagents with debug ON, capture `ce_*` + agent events in JSONL, identify failure modes (timeout? LLM errors? context too large? personality misconfigured?)
+  - [ ] 7b. Add structured error reporting: catch and classify subagent failures (LLM timeout, malformed output, empty response, OOM)
+  - [ ] 7c. Add retry logic or graceful degradation to `SubagentRunner` based on diagnosed failure modes
+  - [ ] 7d. Validate subagent lifecycle end-to-end: spawn → context injection → prompt → output extraction → dispose
 
-## Phase 3–5 (Complete)
-- `OrchestratorSession` manages Pi lifecycle, lazy session creation, full `RunEvent` logging
-- SQLite logger persists `runs`, `trace`, and `synthesis_metrics` tables to `.obsidi-claw/runs.db`
-- Hybrid retrieval: LlamaIndex vector seeds + SQLite BFS graph expansion via `better-sqlite3`
-- MCP boundary in place: `ContextEngine` exposed only via `context_engine/mcp/server.ts`; extension is pure MCP client
-- `before_agent_start` injects `preferences.md` only; Pi uses `retrieve_context` tool for on-demand RAG
-- Metrics route via `context_retrieved` RunEvent → logger (extension is logger-free)
-- Index-type notes filtered from retrieval results
+- [ ] **Phase 8 — Post-session review pipeline** *(problem: capturing logs but not generating md_db files)*
+  - [ ] 8a. Diagnose: run a session with debug ON, trace `session_review.ts` flow — is `runSessionReview` called? Does the child session produce output? Does `parseProposal` return null?
+  - [ ] 8b. Validate the review subagent actually produces valid JSON (check if LLM output matches expected schema, or if `extractJson()` is failing silently)
+  - [ ] 8c. Validate `applyProposal` → `writeNewNote` path: are files being written? Is the md_db path correct? Are file permissions blocking writes?
+  - [ ] 8d. Add logging/debug events to `session_review.ts` so the review pipeline is visible in JSONL (proposal received, notes written, errors)
+  - [ ] 8e. End-to-end test: session with a clear learnable pattern → review fires → new concept note appears in md_db
 
-## Phase 6 (Complete)
-- **Tool Ecosystem**: Web search via Perplexity API (`tools/web_search.ts`), custom tools framework
-- **Pi Extensions**: Codebase indexer, subagent spawning, web search extensions in `.pi/extensions/`
-- **MCP Tools Integration**: `retrieve_context` and `get_preferences` tools exposed via MCP server
-- **Extension Factory**: Full MCP client implementation with InMemoryTransport pair
-- **API Access Methods**: `getGraphStore()`, `getVectorIndex()`, `rebuildVectorIndex()` for extensions
+- [ ] **Phase 9 — Graph system refactor to Python** *(LlamaIndex property graph only in Python)*
+  - [ ] 9a. Evaluate: what does LlamaIndex Python property graph give us that SQLite BFS doesn't? (typed edges, graph queries, community detection, better retrieval strategies)
+  - [ ] 9b. Design the bridge: Python graph service (FastAPI or stdio subprocess) that the TS context engine calls. The MCP boundary means only the engine internals change — extension/orchestrator untouched.
+  - [ ] 9c. Implement Python graph service: LlamaIndex PropertyGraphIndex with Ollama embeddings, expose build/query/sync endpoints
+  - [ ] 9d. Migrate TS `context_engine/store/` and `context_engine/retrieval/` to call the Python service instead of direct SQLite BFS
+  - [ ] 9e. Validate: same retrieval quality or better, with richer graph capabilities (typed edges for "is-tool-for", "contradicts", "supersedes")
 
-**Interactive entry point:** `npm run build && npx tsx orchestrator/run.ts`
+- [ ] **Phase 10 — Scheduler validation** *(depends on Phase 7 — if agents are flaky, scheduled jobs may silently fail)*
+  - [ ] 10a. Verify all scheduled jobs run: `reindex-md-db`, `health-check`, `normalize-md-db` — check `job_start`/`job_complete` events in runs.db
+  - [ ] 10b. Verify scheduled subagent jobs (if any) complete successfully using Phase 7 fixes
+  - [ ] 10c. Add a `scheduler-status` MCP tool or CLI command that reports job states, last run times, error counts
+  - [ ] 10d. Evaluate whether `PersistentScheduleBackend` is needed (do jobs need to survive process restarts?) — implement if yes
 
-**Next: Phase 7** — comparison engine (getRuns/getTrace queries, run comparison logic for insight derivation).
+- [ ] **Phase 11 — runs.db visualizer** *(need to see what the pipeline actually does)*
+  - [ ] 11a. Build a CLI tool (`scripts/trace-viewer.ts`) that reads runs.db and prints a timeline of events for a session: `session_start → ce_init_start(slow) → ce_init_end(3200ms, 42 notes) → prompt_received → ce_retrieval_start → ce_vector_done(5 seeds) → ...`
+  - [ ] 11b. Add context inspection: for `context_retrieved` events, show seed note IDs, expanded note IDs, and the actual `formattedContext` (or a preview). For `ce_review_done`, show whether synthesis ran, input/output char counts.
+  - [ ] 11c. Add tool call inspection: for `tool_call`/`tool_result` events, show tool name, args, and result preview
+  - [ ] 11d. Add filtering: by session ID, by event type prefix (`ce_*`, `tool_*`), by time range
+  - [ ] 11e. Consider a web UI (simple HTML + SQLite query API) for richer visualization — but CLI-first
 
-## Architectural Completeness
-- ✅ Knowledge graph (SQLite + wikilinks)
-- ✅ Vector similarity search (LlamaIndex + Ollama embeddings) 
-- ✅ Hybrid retrieval pipeline (semantic + graph expansion)
-- ✅ MCP server/client boundary (transport-agnostic context engine)
-- ✅ Session lifecycle management with comprehensive event logging
-- ✅ Tool execution framework with Pi extension ecosystem
-- ✅ Context injection system (preferences + on-demand RAG)
-- 🚧 Run comparison and insight generation (Phase 7–8)
+## Future
+- [ ] **Phase 12** — Comparison engine (compare logged runs, diff outcomes)
+- [ ] **Phase 13** — Insight generation (derive durable lessons from run comparisons, write back to md_db)
+- [ ] **Phase 14** — Self-improvement loop validation (full cycle: session → review → new note → better retrieval → measurably better next session)
+
+# Current Status
+
+**Interactive entry point:** `pi` (full stack via extension/factory.ts)
+**Headless entry point:** `npx tsx orchestrator/run.ts` (scripting, gateway, CI)
+
+## What Works
+- Full stack in Pi TUI: context injection, scheduler, event logging, subagent tools — all via `createObsidiClawStack()`
+- Full orchestrator lifecycle: session creation, multi-prompt conversations, lazy Pi session, event logging
+- Hybrid RAG: LlamaIndex vector seeds + SQLite BFS graph expansion + tag boosting
+- Context synthesis: optional LLM rewrite of raw notes into query-focused context
+- MCP boundary: context engine accessible only through MCP server; extension is pure client
+- Comprehensive event logging: all events → SQLite `trace` table + debug JSONL (ON by default)
+- `ce_*` debug events: full visibility into context engine internals (init path, vector/graph timing, review status)
+- Shared markdown layer: canonical frontmatter/wikilink/token handling, md_db normalizer
+- OS compat layer: all code uses `shared/os/` abstractions
+- Personality-driven subagents: `SubagentRunner` with personality files, spawnable from anywhere
+- Scheduler: reindex (30m), health-check (15m), normalize-md-db (2h)
+
+## What's Broken / Unvalidated
+- **Subagents feel flaky** — need to diagnose with debug JSONL (Phase 7)
+- **Post-session review not generating files** — `session_review.ts` runs but `md_db/` notes not appearing (Phase 8)
+- **Scheduler jobs unvalidated** — registered but never confirmed running successfully in production (Phase 10)
+- **Context synthesis untested** — review gate exists but hasn't been smoke-tested with review enabled (Phase 8a)
+- **No way to inspect pipeline output** — need runs.db visualizer to see what context the agent actually received (Phase 11)
 
 # Session Notes
 <!-- Agents: append a dated entry here at the end of every run -->
@@ -203,6 +241,30 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **Committed session 9 work in 7 waves** — OS compat layer, subagent entity, review gate, scheduler, subagent refactors, orchestrator wiring, pruning system.
 - `tsc --noEmit` clean. Zero `process.platform`/`win32` in application code.
 - **Next**: Phase 7 — comparison engine. Smoke test synthesizer with review enabled.
+
+**2026-03-21 — Session 11 (Shared Markdown Layer + Debug Events + CLAUDE.md Rewrite)**
+- **Shared markdown layer** (`shared/markdown/`) — consolidated duplicate markdown utilities from 4+ modules into single source of truth:
+  - `frontmatter.ts`: merged two separate parsers (note-parser + personality-loader), added `buildFrontmatter()` for canonical YAML output
+  - `wikilinks.ts`: combined simple `extractWikilinks()` and rich `parseWikiLinks()` (with position/alias/anchor)
+  - `tokens.ts`: consolidated duplicate `normalizeToken()`, `extractTags()`, `normalizeTagList()` from hybrid-retrieval and prune-builder
+  - `normalizer.ts`: md_db health checker — scans for frontmatter inconsistencies, broken wikilinks, auto-fixes safe issues
+- **Consumers migrated**: `context_engine/ingest/note-parser.ts`, `context_engine/retrieval/hybrid-retrieval.ts`, `context_engine/prune/prune-builder.ts`, `context_engine/link_graph/parser.ts` (now thin re-export), `shared/agents/personality-loader.ts`, `insight_engine/session_review.ts`
+- **`buildFrontmatter()` fixes inconsistency** — `session_review.ts` was generating `tags: [a, b]` inline format; now produces canonical YAML dash lists
+- **md_db normalizer job** — `normalize-md-db` registered in scheduler (every 2h), auto-fixes inline arrays → YAML dash lists, infers missing `type` field from path
+- **Debug mode with `ce_*` events** — 9 new `RunEvent` types for context engine internal visibility: `ce_init_start/end`, `ce_retrieval_start`, `ce_vector_done`, `ce_graph_done`, `ce_review_start/done`, `ce_reindex_start/done`. `onDebug` callback on `ContextEngineConfig`, same pattern as `onContextBuilt`. Debug JSONL flipped to ON by default (`OBSIDI_CLAW_DEBUG=0` to disable).
+- **CLAUDE.md rewrite** — Module Map updated, Key Design Decisions expanded, Build Order rewritten as problem-driven roadmap (Phases 7-14) based on 5 known issues: flaky subagents, review not writing files, Python graph migration, scheduler validation, runs.db visualizer
+- `tsc --noEmit` clean
+- **Next**: User to choose which phase to tackle (Phase 7 subagent reliability, Phase 8 review pipeline, Phase 11 visualizer, etc.)
+
+**2026-03-21 — Session 12 (Shared Infrastructure Stack + Pi Full-Stack Unification)**
+- **`shared/stack.ts`** (new) — `createObsidiClawStack()` extracts infrastructure setup from `orchestrator/run.ts` into a reusable factory. Creates RunLogger (with debug JSONL), ContextEngine (with `onDebug` callback), optional JobScheduler (reindex/health-check/normalize jobs), and SubagentRunner. `initialize()` boots engine + starts scheduler; `shutdown()` tears down cleanly.
+- **`extension/factory.ts`** (major rewrite) — standalone path now creates full `ObsidiClawStack` instead of bare ContextEngine. Wires `onContextBuilt`/`onSubagentPrepared` callbacks and scheduler/runner into MCP server (enables `list_jobs`, `run_job`, `schedule_task` etc. for Pi). Adds Pi event logging (`prompt_received`, `agent_turn_start/end`, `tool_call/result`, `agent_done`, `session_start/end`). Exports `getSharedEngine()`/`getSharedRunner()` for cross-extension reuse.
+- **`orchestrator/run.ts`** (simplified) — replaced 30 lines of manual setup with `createObsidiClawStack()`. Marked as headless/scripting/gateway entry point. Pi is now the recommended interactive path.
+- **`.pi/extensions/subagent.ts`** — `ensureRunner()` checks shared getters before falling back to lazy engine creation, preventing duplicate ContextEngine instances.
+- **md_db updated** — `obsidiclaw.md` startup call stacks rewritten, `scheduler_and_cron.md` wiring updated, `headless_decoupling.md` integration example updated to use stack.
+- **Architecture decision**: two entry points are both first-class. `pi` for interactive (full TUI), `OrchestratorSession` for headless (Telegram gateway, scripts). Both use same stack. Each process creates its own instance; WAL handles concurrent SQLite access.
+- `tsc --noEmit` clean
+- **Next**: Validate Pi full-stack startup end-to-end. Consider Telegram gateway design (Phase 12+).
 
 # End-of-Run Protocol
 Every agent session MUST close by doing all three:
