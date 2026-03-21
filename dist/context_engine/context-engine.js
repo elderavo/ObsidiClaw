@@ -14,14 +14,14 @@
  * TODO: Phase 6 — tool execution: orchestrator runs suggestedTools and their
  *   outputs are appended to formattedContext before the agent sees it
  */
-import { mkdirSync } from "fs";
+import { mkdirSync, existsSync } from "fs";
 import { dirname, join } from "path";
-import { Settings } from "llamaindex";
+import { Settings, VectorStoreIndex, storageContextFromDefaults } from "llamaindex";
 import { OllamaEmbedding } from "@llamaindex/ollama";
-import { syncMdDbToGraph, buildVectorIndexFromGraph } from "./indexer.js";
-import { hybridRetrieve } from "./retrieval/hybrid.js";
-import { SqliteGraphStore } from "./store/sqlite_graph.js";
-import { stripFrontmatter, estimateTokens } from "./frontmatter.js";
+import { syncMdDbToGraph, buildVectorIndexFromGraph, computeMdDbHash } from "./graph-indexer.js";
+import { hybridRetrieve } from "./retrieval/hybrid-retrieval.js";
+import { SqliteGraphStore } from "./store/graph-store.js";
+import { stripFrontmatter, estimateTokens } from "./frontmatter-utils.js";
 const DEFAULT_OLLAMA_HOST = process.env["OLLAMA_HOST"] ?? "10.0.132.100";
 const DEFAULT_EMBED_MODEL = process.env["OLLAMA_EMBED_MODEL"] ?? "nomic-embed-text:v1.5";
 const DEFAULT_TOP_K = 5;
@@ -43,33 +43,42 @@ export class ContextEngine {
     /**
      * Must be called before build(). Idempotent — safe to call multiple times.
      *
-     * 1. Configures LlamaIndex embedding model (Ollama)
-     * 2. Opens the SQLite graph store (creates .obsidi-claw/ dir if needed)
-     * 3. Syncs md_db markdown files into the graph (two-pass: notes, then edges)
-     * 4. Builds in-memory VectorStoreIndex from graph notes
+     * Fast path (md_db unchanged since last run):
+     *   Loads the persisted vector index from disk — no file parsing, no Ollama calls.
+     *
+     * Slow path (first run, or md_db files added/modified/removed):
+     *   Syncs md_db → SQLite graph (two-pass: notes, then edges), re-embeds all
+     *   notes via Ollama, persists the vector index to .obsidi-claw/vector-index/,
+     *   and saves an mtime fingerprint so the next startup can use the fast path.
      */
     async initialize() {
         if (this.vectorIndex)
             return;
-        // Ensure .obsidi-claw/ directory exists
         mkdirSync(dirname(this.config.dbPath), { recursive: true });
-        // Configure LlamaIndex embeddings
         Settings.embedModel = new OllamaEmbedding({
             model: this.config.embeddingModel,
             config: { host: this.config.ollamaHost },
         });
-        // console.log(
-        //   `[context_engine] Initializing — mdDb: ${this.config.mdDbPath}, ` +
-        //     `db: ${this.config.dbPath}, ` +
-        //     `embed: ${this.config.embeddingModel} @ ${this.config.ollamaHost}`,
-        // );
-        // Open graph store
         this.graphStore = new SqliteGraphStore(this.config.dbPath);
-        // Sync md_db → graph (parse + upsert notes, then resolve wikilinks)
+        const vectorDir = join(dirname(this.config.dbPath), "vector-index");
+        const vectorFile = join(vectorDir, "vector_store.json");
+        const currentHash = await computeMdDbHash(this.config.mdDbPath);
+        const storedHash = this.graphStore.getState("md_db_hash");
+        if (currentHash === storedHash && existsSync(vectorFile)) {
+            // ── Fast path: nothing changed ─────────────────────────────────────────
+            // Load the persisted vector index from disk. The SQLite graph is already
+            // current (it was written on the last slow-path run). No Ollama calls.
+            const storageContext = await storageContextFromDefaults({ persistDir: vectorDir });
+            this.vectorIndex = await VectorStoreIndex.init({ storageContext });
+            return;
+        }
+        // ── Slow path: md_db changed (or first run) ─────────────────────────────
+        // Sync markdown files → SQLite graph, re-embed via Ollama, persist to disk.
         await syncMdDbToGraph(this.config.mdDbPath, this.graphStore);
-        // Build vector index from graph notes
-        this.vectorIndex = await buildVectorIndexFromGraph(this.graphStore);
-        //console.log("[context_engine] Ready");
+        const storageContext = await storageContextFromDefaults({ persistDir: vectorDir });
+        this.vectorIndex = await buildVectorIndexFromGraph(this.graphStore, storageContext);
+        // Record the hash so the next startup can take the fast path.
+        this.graphStore.setState("md_db_hash", currentHash);
     }
     /**
      * Build a ContextPackage for the given prompt.
@@ -102,6 +111,29 @@ export class ContextEngine {
             rawChars,
             strippedChars: formattedContext.length,
             estimatedTokens: estimateTokens(formattedContext),
+        };
+    }
+    /**
+     * Build a SubagentPackage for the given subagent input.
+     *
+     * Runs hybrid retrieval against the plan (the richest query signal),
+     * then bundles the input + retrieved context into a formatted system prompt
+     * ready to inject into a child Pi session.
+     *
+     * Throws if initialize() has not been called.
+     */
+    async buildSubagentPackage(input) {
+        if (!this.vectorIndex || !this.graphStore) {
+            throw new Error("ContextEngine not initialized. Call initialize() first.");
+        }
+        // Combine plan + prompt for retrieval; plan carries the most signal
+        const query = [input.plan, input.prompt].filter(Boolean).join(" ").slice(0, 1000);
+        const contextPackage = await this.build(query);
+        return {
+            input,
+            contextPackage,
+            formattedSystemPrompt: formatSubagentSystemPrompt(input, contextPackage),
+            builtAt: Date.now(),
         };
     }
     /**
@@ -140,6 +172,60 @@ export class ContextEngine {
         this.vectorIndex = await buildVectorIndexFromGraph(this.graphStore);
     }
     /**
+     * Complete reindex after md_db files change at runtime.
+     * Performs full pipeline: sync markdown → rebuild vector index → rebuild link graph.
+     *
+     * Call this when the system adds/modifies/deletes files in md_db during runtime.
+     */
+    async reindex() {
+        if (!this.graphStore) {
+            throw new Error("ContextEngine not initialized. Call initialize() first.");
+        }
+        try {
+            await syncMdDbToGraph(this.config.mdDbPath, this.graphStore);
+            const vectorDir = join(dirname(this.config.dbPath), "vector-index");
+            const storageContext = await storageContextFromDefaults({ persistDir: vectorDir });
+            this.vectorIndex = await buildVectorIndexFromGraph(this.graphStore, storageContext);
+            // Update hash so next startup fast-paths correctly
+            const newHash = await computeMdDbHash(this.config.mdDbPath);
+            this.graphStore.setState("md_db_hash", newHash);
+            console.log("[context_engine] Full reindex completed");
+        }
+        catch (error) {
+            console.error("[context_engine] Full reindex failed:", error);
+            throw error;
+        }
+    }
+    /**
+     * Rebuild just the link graph after md_db changes.
+     * More efficient than full reindex if only link relationships changed.
+     */
+    async rebuildLinkGraph() {
+        if (!this.graphStore) {
+            throw new Error("ContextEngine not initialized. Call initialize() first.");
+        }
+        const { LinkGraphProcessor } = await import("./link_graph/index.js");
+        try {
+            const linkProcessor = new LinkGraphProcessor(this.graphStore.getDatabase(), this.config.mdDbPath);
+            // Rebuild the enhanced link graph
+            await linkProcessor.buildFromMarkdownFiles();
+            // Check for issues and warn if found  
+            const isHealthy = await linkProcessor.isHealthy();
+            if (!isHealthy) {
+                const issues = await linkProcessor.getIntegrityIssues();
+                const errorCount = issues.filter(i => i.severity === 'error').length;
+                const warningCount = issues.filter(i => i.severity === 'warning').length;
+                if (errorCount > 0) {
+                    console.warn(`[context_engine] Link graph rebuild: ${errorCount} errors, ${warningCount} warnings`);
+                }
+            }
+        }
+        catch (error) {
+            console.error('[context_engine] Link graph rebuild failed:', error);
+            throw error;
+        }
+    }
+    /**
      * Close the underlying SQLite database.
      * Call when the context engine is no longer needed.
      */
@@ -148,6 +234,30 @@ export class ContextEngine {
         this.graphStore = null;
         this.vectorIndex = null;
     }
+}
+// ---------------------------------------------------------------------------
+// Subagent system prompt formatting
+// ---------------------------------------------------------------------------
+function formatSubagentSystemPrompt(input, ctx) {
+    return [
+        "# Subagent Task",
+        "",
+        "## Your Task",
+        input.prompt,
+        "",
+        "## Implementation Plan",
+        input.plan,
+        "",
+        "## Success Criteria",
+        input.successCriteria,
+        "",
+        "## Retrieved Context",
+        ctx.formattedContext,
+        "",
+        "---",
+        "Focus exclusively on the plan above. Work systematically towards the success criteria.",
+        "Use `retrieve_context` for additional knowledge lookup.",
+    ].join("\n");
 }
 // ---------------------------------------------------------------------------
 // Context formatting

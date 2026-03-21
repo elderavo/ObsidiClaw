@@ -179,4 +179,4 @@ Every agent session MUST close by doing all three:
 1. Check off any completed phases in the Build Order above
 2. Update the "Current Phase" section with what's done and what's next
 3. Append a dated entry to "Session Notes" — what was done, what worked, what didn't, what's next
-4. Update memory files at `C:\Users\Alex\.claude\projects\C--Users-Alex-Desktop-Projects-Coding-ObsidiClaw\memory\` if new preferences or project facts were uncovered
+4. Update memory files at `C:\Users\Alex\.claude\projects\C--Users-Alex-Desktop-Projects-Coding-ObsidiClaw\memory\` if new preferences or project facts were uncover

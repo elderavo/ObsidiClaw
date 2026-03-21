@@ -17,26 +17,16 @@
  *     → agent_done → prompt_complete
  */
 
-import {
-  AgentSession,
-  createAgentSession,
-  DefaultResourceLoader,
-  SessionManager,
-} from "@mariozechner/pi-coding-agent";
+import type { AgentSession } from "@mariozechner/pi-coding-agent";
 
 import { RunLogger } from "../logger/index.js";
 import type { ContextEngine } from "../context_engine/index.js";
 import { createContextEngineMcpServer } from "../context_engine/index.js";
 import { createObsidiClawExtension } from "../extension/factory.js";
+import { createPiAgentSession } from "../shared/pi-session-factory.js";
+import { resolvePaths } from "../shared/config.js";
 import { runSessionReview, type ReviewTrigger } from "../insight_engine/session_review.js";
 import type { RunEvent, RunId, RunStage, SessionConfig, SessionId } from "./types.js";
-
-// ---------------------------------------------------------------------------
-// Provider constants — TODO: Phase 1 move to shared/config.ts
-// ---------------------------------------------------------------------------
-
-const OLLAMA_BASE_URL = process.env["OLLAMA_BASE_URL"] ?? "http://10.0.132.100/v1";
-const OLLAMA_MODEL    = process.env["OLLAMA_MODEL"]    ?? "llama3";
 
 // ---------------------------------------------------------------------------
 // OrchestratorSession
@@ -128,6 +118,11 @@ export class OrchestratorSession {
   /** Full message history from the pi session (undefined if session not started). */
   get messages() {
     return this.piSession?.messages ?? [];
+  }
+
+  /** Run ID from the most recent prompt() call. Empty string if none yet. */
+  get lastRunId(): RunId {
+    return this.currentRunId;
   }
 
   /** Current stage of the last prompt round-trip (for single-shot compat). */
@@ -252,7 +247,7 @@ export class OrchestratorSession {
       contextEngine: this.contextEngine,
       rootDir: process.cwd(),
       createChildSession: async (systemPrompt: string) => {
-        const childLogger = new RunLogger();
+        const childLogger = new RunLogger({ dbPath: resolvePaths().dbPath });
         const childSession = new OrchestratorSession(childLogger, this.contextEngine, {
           systemPrompt,
           isSubagent: true,
@@ -283,84 +278,45 @@ export class OrchestratorSession {
    * TODO: Phase 1 — pull Ollama config from shared/config.ts
    */
   private async createPiSession() {
-    const model = this.config.model ?? OLLAMA_MODEL;
+    // Build extension factories for context injection (when engine is available)
+    const contextExtensions = this.contextEngine
+      ? [createObsidiClawExtension({
+          mcpServer: createContextEngineMcpServer(
+            this.contextEngine,
+            (pkg) => this.emit({
+              type: "context_retrieved",
+              sessionId: this.sessionId,
+              runId: this.currentRunId,
+              timestamp: Date.now(),
+              query: pkg.query,
+              seedCount: pkg.seedNoteIds?.length ?? 0,
+              expandedCount: pkg.expandedNoteIds?.length ?? 0,
+              toolCount: pkg.suggestedTools.length,
+              retrievalMs: pkg.retrievalMs,
+              rawChars: pkg.rawChars,
+              strippedChars: pkg.strippedChars,
+              estimatedTokens: pkg.estimatedTokens,
+            }),
+            (pkg) => this.emit({
+              type: "subagent_start",
+              sessionId: this.sessionId,
+              runId: this.currentRunId,
+              timestamp: Date.now(),
+              prompt: pkg.input.prompt,
+              plan: pkg.input.plan,
+              seedCount: pkg.contextPackage.seedNoteIds?.length ?? 0,
+              expandedCount: pkg.contextPackage.expandedNoteIds?.length ?? 0,
+              estimatedTokens: pkg.contextPackage.estimatedTokens,
+            }),
+          ),
+        })]
+      : [];
 
-    const loader = new DefaultResourceLoader({
-      extensionFactories: [
-        // Register Ollama as the LLM provider
-        (pi) => {
-          pi.registerProvider("ollama", {
-            baseUrl: OLLAMA_BASE_URL,
-            apiKey: "ollama",
-            api: "openai-completions",
-            models: [
-              {
-                id: model,
-                name: `Ollama / ${model}`,
-                reasoning: false,
-                input: ["text"],
-                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                contextWindow: 32768,
-                maxTokens: 4096,
-                compat: {
-                  supportsDeveloperRole: false,
-                  maxTokensField: "max_tokens",
-                },
-              },
-            ],
-          });
-        },
-
-        // ObsidiClaw context injection via MCP.
-        // The MCP server wraps the context engine; the onContextBuilt callback routes
-        // full ContextPackage metrics to the orchestrator event log (context_retrieved).
-        ...(this.contextEngine
-          ? [createObsidiClawExtension({
-              mcpServer: createContextEngineMcpServer(
-                this.contextEngine,
-                (pkg) => this.emit({
-                  type: "context_retrieved",
-                  sessionId: this.sessionId,
-                  runId: this.currentRunId,
-                  timestamp: Date.now(),
-                  query: pkg.query,
-                  seedCount: pkg.seedNoteIds?.length ?? 0,
-                  expandedCount: pkg.expandedNoteIds?.length ?? 0,
-                  toolCount: pkg.suggestedTools.length,
-                  retrievalMs: pkg.retrievalMs,
-                  rawChars: pkg.rawChars,
-                  strippedChars: pkg.strippedChars,
-                  estimatedTokens: pkg.estimatedTokens,
-                }),
-                (pkg) => this.emit({
-                  type: "subagent_start",
-                  sessionId: this.sessionId,
-                  runId: this.currentRunId,
-                  timestamp: Date.now(),
-                  prompt: pkg.input.prompt,
-                  plan: pkg.input.plan,
-                  seedCount: pkg.contextPackage.seedNoteIds?.length ?? 0,
-                  expandedCount: pkg.contextPackage.expandedNoteIds?.length ?? 0,
-                  estimatedTokens: pkg.contextPackage.estimatedTokens,
-                }),
-              ),
-            })]
-          : []),
-      ],
-
-      ...(this.config.systemPrompt
-        ? { systemPromptOverride: () => this.config.systemPrompt! }
-        : {}),
+    return createPiAgentSession({
+      ollama: this.config.model ? { model: this.config.model } : undefined,
+      extensionFactories: contextExtensions,
+      systemPrompt: this.config.systemPrompt,
     });
-
-    await loader.reload();
-
-    const { session } = await createAgentSession({
-      resourceLoader: loader,
-      sessionManager: SessionManager.inMemory(),
-    });
-
-    return session;
   }
 }
 

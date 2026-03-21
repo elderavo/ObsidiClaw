@@ -17,8 +17,10 @@
     "logger/**/*.ts",
     "context_engine/**/*.ts",
     "insight_engine/**/*.ts",
+    "extension/**/*.ts",
     "pi_agent/**/*.ts",
-    "shared/**/*.ts"
+    "shared/**/*.ts",
+    "scripts/**/*.ts"
   ],
   "exclude": ["node_modules", "dist"]
 }

@@ -23,8 +23,10 @@ import { join } from "path";
 import { Type } from "@sinclair/typebox";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createAgentSession, DefaultResourceLoader, SessionManager, } from "@mariozechner/pi-coding-agent";
 import { ContextEngine } from "../context_engine/index.js";
 import { createContextEngineMcpServer } from "../context_engine/index.js";
+import { runSessionReview } from "../insight_engine/session_review.js";
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -37,6 +39,11 @@ function extractText(result) {
     const blocks = result.content ?? [];
     return blocks.find((c) => c.type === "text")?.text ?? "";
 }
+// ---------------------------------------------------------------------------
+// LLM defaults (mirrors orchestrator/session)
+// ---------------------------------------------------------------------------
+const OLLAMA_BASE_URL = process.env["OLLAMA_BASE_URL"] ?? "http://10.0.132.100/v1";
+const OLLAMA_MODEL = process.env["OLLAMA_MODEL"] ?? "llama3";
 // ---------------------------------------------------------------------------
 // Standing system-prompt instruction (appended on every before_agent_start)
 // ---------------------------------------------------------------------------
@@ -65,6 +72,8 @@ export function createObsidiClawExtension(config = {}) {
             });
             mcpServer = createContextEngineMcpServer(ownedEngine);
         }
+        // Track latest transcript (updated on agent_end) for review hook
+        let latestMessages = [];
         // Create InMemoryTransport pair and client (connected in session_start).
         const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
         const client = new Client({ name: "obsidi-claw-ext", version: "1.0.0" });
@@ -121,13 +130,101 @@ export function createObsidiClawExtension(config = {}) {
                 return;
             }
         });
+        // ── agent_end: capture transcript for session review ─────────────────────
+        pi.on("agent_end", (event) => {
+            const messages = event?.messages;
+            if (Array.isArray(messages))
+                latestMessages = messages;
+        });
         // ── session_shutdown ─────────────────────────────────────────────────────
-        pi.on("session_shutdown", () => {
-            void client.close();
-            void mcpServer.close();
-            if (ownedEngine)
-                ownedEngine.close();
+        pi.on("session_shutdown", async () => {
+            try {
+                // Only run review when this extension owns the engine (pi TUI path).
+                if (ownedEngine) {
+                    await runSessionReview({
+                        trigger: "session_end",
+                        sessionId: `pi-tui-${Date.now()}`,
+                        messages: latestMessages,
+                        contextEngine: ownedEngine,
+                        rootDir: process.cwd(),
+                        createChildSession: async (systemPrompt) => {
+                            const loader = new DefaultResourceLoader({
+                                extensionFactories: [
+                                    (piChild) => {
+                                        piChild.registerProvider("ollama", {
+                                            baseUrl: OLLAMA_BASE_URL,
+                                            apiKey: "ollama",
+                                            api: "openai-completions",
+                                            models: [
+                                                {
+                                                    id: OLLAMA_MODEL,
+                                                    name: `Ollama / ${OLLAMA_MODEL}`,
+                                                    reasoning: false,
+                                                    input: ["text"],
+                                                    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                                                    contextWindow: 32768,
+                                                    maxTokens: 4096,
+                                                    compat: {
+                                                        supportsDeveloperRole: false,
+                                                        maxTokensField: "max_tokens",
+                                                    },
+                                                },
+                                            ],
+                                        });
+                                    },
+                                ],
+                                systemPromptOverride: () => systemPrompt,
+                            });
+                            await loader.reload();
+                            const { session } = await createAgentSession({
+                                resourceLoader: loader,
+                                sessionManager: SessionManager.inMemory(),
+                            });
+                            return {
+                                runReview: async (userMessage) => {
+                                    await session.prompt(userMessage);
+                                    const msgs = (session.messages ?? []);
+                                    const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
+                                    return extractTextFromContent(lastAssistant?.content) ?? "";
+                                },
+                                dispose: () => {
+                                    session.dispose();
+                                },
+                            };
+                        },
+                    });
+                }
+            }
+            catch (err) {
+                console.error("[session_review] failed in extension:", err);
+            }
+            finally {
+                void client.close();
+                void mcpServer.close();
+                if (ownedEngine)
+                    ownedEngine.close();
+            }
         });
     };
+}
+function extractTextFromContent(content) {
+    if (typeof content === "string")
+        return content;
+    if (Array.isArray(content)) {
+        const parts = content
+            .map((c) => {
+            if (typeof c === "string")
+                return c;
+            if (c && typeof c === "object" && "text" in c)
+                return String(c.text);
+            return null;
+        })
+            .filter(Boolean);
+        return parts.join("\n") || null;
+    }
+    if (content && typeof content === "object" && "text" in content) {
+        return String(content.text);
+    }
+    return null;
 }
 //# sourceMappingURL=factory.js.map

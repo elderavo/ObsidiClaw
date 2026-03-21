@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { mkdirSync } from "fs";
+import { mkdirSync, appendFileSync } from "fs";
 import { dirname, join } from "path";
 const DEFAULT_DB_PATH = join(process.cwd(), ".obsidi-claw", "runs.db");
 /**
@@ -13,24 +13,38 @@ const DEFAULT_DB_PATH = join(process.cwd(), ".obsidi-claw", "runs.db");
  * Session-level events (session_start / session_end) have no run_id;
  * they are written to trace with run_id = NULL.
  *
+ * Debug mode (debugDir set): appends every event as JSONL to
+ * {debugDir}/{sessionId}.jsonl for easy inspection.
+ *
  * TODO: Phase 7 — add getRuns() / getTrace() query methods for insight engine
  */
 export class RunLogger {
     db;
-    constructor(dbPath = DEFAULT_DB_PATH) {
+    debugDir;
+    /** Track which session files have been created so we only mkdirSync once. */
+    debugSessions = new Set();
+    constructor(options = {}) {
+        // Support legacy positional string arg for backwards compat
+        const opts = typeof options === "string" ? { dbPath: options } : options;
+        const dbPath = opts.dbPath ?? DEFAULT_DB_PATH;
+        this.debugDir = opts.debugDir;
         mkdirSync(dirname(dbPath), { recursive: true });
         this.db = new Database(dbPath);
         this.db.pragma("journal_mode = WAL");
         this._initSchema();
+        if (this.debugDir) {
+            mkdirSync(this.debugDir, { recursive: true });
+        }
     }
     _initSchema() {
         this.db.exec(`
       CREATE TABLE IF NOT EXISTS runs (
-        run_id     TEXT    PRIMARY KEY,
-        session_id TEXT    NOT NULL,
-        status     TEXT    NOT NULL DEFAULT 'running',
-        start_time INTEGER NOT NULL,
-        end_time   INTEGER
+        run_id       TEXT    PRIMARY KEY,
+        session_id   TEXT    NOT NULL,
+        status       TEXT    NOT NULL DEFAULT 'running',
+        start_time   INTEGER NOT NULL,
+        end_time     INTEGER,
+        is_subagent  INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS trace (
@@ -59,12 +73,22 @@ export class RunLogger {
       CREATE INDEX IF NOT EXISTS trace_run_id        ON trace(run_id);
       CREATE INDEX IF NOT EXISTS synthesis_session   ON synthesis_metrics(session_id);
     `);
+        this._ensureRunSchema();
+    }
+    _ensureRunSchema() {
+        const columns = this.db.prepare("PRAGMA table_info(runs)").all();
+        const columnNames = new Set(columns.map((col) => col.name));
+        if (!columnNames.has("is_subagent")) {
+            this.db.exec("ALTER TABLE runs ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0");
+        }
     }
     logEvent(event) {
+        if (this.debugDir)
+            this._debugAppend(event);
         const sessionId = event.sessionId;
         const runId = "runId" in event ? event.runId : null;
         if (event.type === "prompt_received") {
-            this._insertRun(event.runId, sessionId, event.timestamp);
+            this._insertRun(event.runId, sessionId, event.timestamp, Boolean(event.isSubagent));
         }
         if (event.type === "prompt_complete") {
             this._finalizeRun(event.runId, "done", event.timestamp);
@@ -86,11 +110,11 @@ export class RunLogger {
         this.db.close();
     }
     // ── Private helpers ────────────────────────────────────────────────────────
-    _insertRun(runId, sessionId, startTime) {
+    _insertRun(runId, sessionId, startTime, isSubagent) {
         this.db
-            .prepare(`INSERT OR IGNORE INTO runs (run_id, session_id, status, start_time)
-         VALUES (?, ?, 'running', ?)`)
-            .run(runId, sessionId, startTime);
+            .prepare(`INSERT OR IGNORE INTO runs (run_id, session_id, status, start_time, is_subagent)
+         VALUES (?, ?, 'running', ?, ?)`)
+            .run(runId, sessionId, startTime, isSubagent ? 1 : 0);
     }
     _finalizeRun(runId, status, endTime) {
         this.db
@@ -102,6 +126,17 @@ export class RunLogger {
             .prepare(`INSERT INTO trace (run_id, session_id, type, timestamp, payload)
          VALUES (?, ?, ?, ?, ?)`)
             .run(runId, sessionId, type, timestamp, JSON.stringify(event));
+    }
+    _debugAppend(event) {
+        const sessionId = event.sessionId;
+        const filePath = join(this.debugDir, `${sessionId}.jsonl`);
+        // Write a header comment on first event for this session
+        if (!this.debugSessions.has(sessionId)) {
+            this.debugSessions.add(sessionId);
+            const header = `# session: ${sessionId}  started: ${new Date().toISOString()}\n`;
+            appendFileSync(filePath, header, "utf8");
+        }
+        appendFileSync(filePath, JSON.stringify(event) + "\n", "utf8");
     }
 }
 //# sourceMappingURL=run-logger.js.map

@@ -12,10 +12,12 @@
  *   npx tsx orchestrator/run.ts
  *
  * Environment variables:
- *   OLLAMA_BASE_URL    — LLM endpoint   (default: http://10.0.132.100/v1)
- *   OLLAMA_MODEL       — LLM model      (default: llama3)
- *   OLLAMA_HOST        — embeddings host (default: 10.0.132.100)
- *   OLLAMA_EMBED_MODEL — embeddings model (default: nomic-embed-text:v1.5)
+ *   OLLAMA_BASE_URL      — LLM endpoint   (default: http://10.0.132.100/v1)
+ *   OLLAMA_MODEL         — LLM model      (default: llama3)
+ *   OLLAMA_HOST          — embeddings host (default: 10.0.132.100)
+ *   OLLAMA_EMBED_MODEL   — embeddings model (default: nomic-embed-text:v1.5)
+ *   OBSIDI_CLAW_DEBUG    — set to 1/true to write all session events as JSONL
+ *                          to .obsidi-claw/debug/{sessionId}.jsonl
  */
 import { createInterface } from "readline";
 import { resolve } from "path";
@@ -30,7 +32,8 @@ const mdDbPath = resolve(__dirname, "../md_db");
 const contextEngine = new ContextEngine({ mdDbPath });
 await contextEngine.initialize();
 //console.log("[obsidi-claw] Context engine ready.\n");
-const logger = new RunLogger();
+const debugEnabled = ["1", "true"].includes((process.env["OBSIDI_CLAW_DEBUG"] ?? "").toLowerCase());
+const logger = new RunLogger(debugEnabled ? { debugDir: resolve(__dirname, "../.obsidi-claw/debug") } : {});
 const orchestrator = new Orchestrator(logger, contextEngine);
 // ── Start session ─────────────────────────────────────────────────────────
 const session = orchestrator.createSession({
@@ -54,6 +57,11 @@ rl.on("line", async (line) => {
         rl.prompt();
         return;
     }
+    // Graceful shutdown via command
+    if (text === "/quit" || text === "/exit") {
+        rl.close();
+        return;
+    }
     rl.pause();
     process.stdout.write("\nagent> ");
     activePrompt = session.prompt(text).then(() => { process.stdout.write("\n"); }, (err) => { console.error("\n[error]", err instanceof Error ? err.message : String(err)); }).finally(() => {
@@ -62,12 +70,24 @@ rl.on("line", async (line) => {
         rl.prompt();
     });
 });
-rl.on("close", async () => {
+async function gracefulShutdown() {
+    rl.pause();
     if (activePrompt)
         await activePrompt;
-    session.dispose();
-    logger.close();
-    // console.log("\n[obsidi-claw] Session ended.");
-    process.exit(0);
+    try {
+        await session.finalize();
+    }
+    catch (err) {
+        console.error("\n[session_finalize_error]", err instanceof Error ? err.message : String(err));
+    }
+    finally {
+        logger.close();
+        process.exit(0);
+    }
+}
+rl.on("close", () => { void gracefulShutdown(); });
+process.on("SIGINT", () => {
+    process.stdout.write("\n[obsidi-claw] Caught SIGINT, shutting down...\n");
+    rl.close();
 });
 //# sourceMappingURL=run.js.map

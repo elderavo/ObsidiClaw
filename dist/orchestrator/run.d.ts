@@ -12,10 +12,12 @@
  *   npx tsx orchestrator/run.ts
  *
  * Environment variables:
- *   OLLAMA_BASE_URL    — LLM endpoint   (default: http://10.0.132.100/v1)
- *   OLLAMA_MODEL       — LLM model      (default: llama3)
- *   OLLAMA_HOST        — embeddings host (default: 10.0.132.100)
- *   OLLAMA_EMBED_MODEL — embeddings model (default: nomic-embed-text:v1.5)
+ *   OLLAMA_BASE_URL      — LLM endpoint   (default: http://10.0.132.100/v1)
+ *   OLLAMA_MODEL         — LLM model      (default: llama3)
+ *   OLLAMA_HOST          — embeddings host (default: 10.0.132.100)
+ *   OLLAMA_EMBED_MODEL   — embeddings model (default: nomic-embed-text:v1.5)
+ *   OBSIDI_CLAW_DEBUG    — set to 1/true to write all session events as JSONL
+ *                          to .obsidi-claw/debug/{sessionId}.jsonl
  */
 export {};
 //# sourceMappingURL=run.d.ts.map

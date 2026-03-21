@@ -1,0 +1,6 @@
+1. for AI context, summaries and blurbs are fine. linking is just nice-to-have. 
+2. For human vault, summaries are the enemy, linking is the core requirement. 
+
+For both, periodically cluster via embeddings and produce merge candidates (for AI context, this means re-summarize).
+For human vault, this means re-write as a single atomic note. 
+

@@ -31,6 +31,8 @@ export interface SessionConfig {
      * Use this to print agent output in real time.
      */
     onOutput?: (delta: string) => void;
+    /** True for subagent sessions spawned from a parent run. */
+    isSubagent?: boolean;
 }
 export interface RunConfig extends SessionConfig {
     prompt: string;
@@ -57,6 +59,7 @@ export type RunEvent = {
     runId: RunId;
     timestamp: number;
     text: string;
+    isSubagent?: boolean;
 } | {
     type: "prompt_complete";
     sessionId: SessionId;
@@ -107,6 +110,16 @@ export type RunEvent = {
     strippedChars: number;
     estimatedTokens: number;
 } | {
+    type: "subagent_start";
+    sessionId: SessionId;
+    runId: RunId;
+    timestamp: number;
+    prompt: string;
+    plan: string;
+    seedCount: number;
+    expandedCount: number;
+    estimatedTokens: number;
+} | {
     type: "agent_prompt_sent";
     sessionId: SessionId;
     runId: RunId;
@@ -133,12 +146,16 @@ export type RunEvent = {
     runId: RunId;
     timestamp: number;
     toolName: string;
+    toolCallId?: string;
+    toolArgs?: unknown;
 } | {
     type: "tool_result";
     sessionId: SessionId;
     runId: RunId;
     timestamp: number;
     toolName: string;
+    toolCallId?: string;
     isError: boolean;
+    toolResult?: unknown;
 };
 //# sourceMappingURL=types.d.ts.map

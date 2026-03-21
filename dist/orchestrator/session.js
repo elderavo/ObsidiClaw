@@ -17,8 +17,10 @@
  *     → agent_done → prompt_complete
  */
 import { createAgentSession, DefaultResourceLoader, SessionManager, } from "@mariozechner/pi-coding-agent";
+import { RunLogger } from "../logger/index.js";
 import { createContextEngineMcpServer } from "../context_engine/index.js";
 import { createObsidiClawExtension } from "../extension/factory.js";
+import { runSessionReview } from "../insight_engine/session_review.js";
 // ---------------------------------------------------------------------------
 // Provider constants — TODO: Phase 1 move to shared/config.ts
 // ---------------------------------------------------------------------------
@@ -40,11 +42,13 @@ export class OrchestratorSession {
      * Used by the pi event subscription (subscribed once, references this field).
      */
     currentRunId = "";
+    isSubagent;
     constructor(logger, contextEngine, config = {}) {
         this.logger = logger;
         this.contextEngine = contextEngine;
         this.config = config;
         this.sessionId = crypto.randomUUID();
+        this.isSubagent = Boolean(config.isSubagent);
         this.emit({ type: "session_start", sessionId: this.sessionId, timestamp: Date.now() });
     }
     // ── Public API ────────────────────────────────────────────────────────────
@@ -59,7 +63,7 @@ export class OrchestratorSession {
         const runId = crypto.randomUUID();
         this.currentRunId = runId;
         const startTime = Date.now();
-        this.emit({ type: "prompt_received", sessionId: this.sessionId, runId, timestamp: Date.now(), text });
+        this.emit({ type: "prompt_received", sessionId: this.sessionId, runId, timestamp: Date.now(), text, isSubagent: this.isSubagent });
         try {
             // ── First prompt: create pi session ───────────────────────────────────
             if (!this.piSessionReady) {
@@ -104,6 +108,25 @@ export class OrchestratorSession {
     getLastStage() {
         return this.piSessionReady ? "done" : "prompt_received";
     }
+    /**
+     * Preferred teardown: runs review (if enabled) then disposes.
+     * Falls back to dispose() if review is skipped.
+     */
+    async finalize(trigger = "session_end") {
+        if (this.isSubagent) {
+            this.dispose();
+            return;
+        }
+        try {
+            await this.runReviewHook(trigger);
+        }
+        catch (err) {
+            console.error("[session_review] failed:", err);
+        }
+        finally {
+            this.dispose();
+        }
+    }
     dispose() {
         if (this.piSession) {
             this.piSession.dispose();
@@ -144,6 +167,8 @@ export class OrchestratorSession {
                     runId,
                     timestamp: Date.now(),
                     toolName: String(event["toolName"] ?? "unknown"),
+                    toolCallId: typeof event["toolCallId"] === "string" ? String(event["toolCallId"]) : undefined,
+                    toolArgs: event["args"],
                 });
                 break;
             case "tool_execution_end":
@@ -153,7 +178,9 @@ export class OrchestratorSession {
                     runId,
                     timestamp: Date.now(),
                     toolName: String(event["toolName"] ?? "unknown"),
+                    toolCallId: typeof event["toolCallId"] === "string" ? String(event["toolCallId"]) : undefined,
                     isError: Boolean(event["isError"]),
+                    toolResult: event["result"],
                 });
                 break;
             case "message_update": {
@@ -163,9 +190,50 @@ export class OrchestratorSession {
                 }
                 break;
             }
+            case "compaction": {
+                void this.runReviewHook("pre_compaction", event);
+                break;
+            }
             default:
                 break;
         }
+    }
+    /**
+     * Run the review subagent for the given trigger. No-ops if contextEngine
+     * is unavailable or if this session is already a subagent.
+     */
+    async runReviewHook(trigger, compactionMeta) {
+        if (this.isSubagent)
+            return;
+        if (!this.contextEngine)
+            return;
+        await runSessionReview({
+            trigger,
+            sessionId: this.sessionId,
+            messages: this.messages ?? [],
+            compactionMeta,
+            contextEngine: this.contextEngine,
+            rootDir: process.cwd(),
+            createChildSession: async (systemPrompt) => {
+                const childLogger = new RunLogger();
+                const childSession = new OrchestratorSession(childLogger, this.contextEngine, {
+                    systemPrompt,
+                    isSubagent: true,
+                });
+                return {
+                    runReview: async (userMessage) => {
+                        await childSession.prompt(userMessage);
+                        const msgs = (childSession.messages ?? []);
+                        const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
+                        return extractTextFromContent(lastAssistant?.content) ?? "";
+                    },
+                    dispose: () => {
+                        childSession.dispose();
+                        childLogger.close();
+                    },
+                };
+            },
+        });
     }
     /**
      * Creates a pi agent session configured for Ollama, with the ObsidiClaw
@@ -220,6 +288,16 @@ export class OrchestratorSession {
                                 rawChars: pkg.rawChars,
                                 strippedChars: pkg.strippedChars,
                                 estimatedTokens: pkg.estimatedTokens,
+                            }), (pkg) => this.emit({
+                                type: "subagent_start",
+                                sessionId: this.sessionId,
+                                runId: this.currentRunId,
+                                timestamp: Date.now(),
+                                prompt: pkg.input.prompt,
+                                plan: pkg.input.plan,
+                                seedCount: pkg.contextPackage.seedNoteIds?.length ?? 0,
+                                expandedCount: pkg.contextPackage.expandedNoteIds?.length ?? 0,
+                                estimatedTokens: pkg.contextPackage.estimatedTokens,
                             })),
                         })]
                     : []),
@@ -235,5 +313,25 @@ export class OrchestratorSession {
         });
         return session;
     }
+}
+function extractTextFromContent(content) {
+    if (typeof content === "string")
+        return content;
+    if (Array.isArray(content)) {
+        const parts = content
+            .map((c) => {
+            if (typeof c === "string")
+                return c;
+            if (c && typeof c === "object" && "text" in c)
+                return String(c.text);
+            return null;
+        })
+            .filter(Boolean);
+        return parts.join("\n") || null;
+    }
+    if (content && typeof content === "object" && "text" in content) {
+        return String(content.text);
+    }
+    return null;
 }
 //# sourceMappingURL=session.js.map

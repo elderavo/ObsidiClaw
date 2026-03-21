@@ -16,8 +16,9 @@
  *     → agent_prompt_sent → [agent_turn_start/end, tool_call/result]
  *     → agent_done → prompt_complete
  */
-import type { RunLogger } from "../logger/index.js";
+import { RunLogger } from "../logger/index.js";
 import type { ContextEngine } from "../context_engine/index.js";
+import { type ReviewTrigger } from "../insight_engine/session_review.js";
 import type { RunStage, SessionConfig, SessionId } from "./types.js";
 export declare class OrchestratorSession {
     private readonly logger;
@@ -32,6 +33,7 @@ export declare class OrchestratorSession {
      * Used by the pi event subscription (subscribed once, references this field).
      */
     private currentRunId;
+    private readonly isSubagent;
     constructor(logger: RunLogger, contextEngine?: ContextEngine | undefined, config?: SessionConfig);
     /**
      * Send a prompt to the pi agent.
@@ -45,6 +47,11 @@ export declare class OrchestratorSession {
     get messages(): import("@mariozechner/pi-agent-core").AgentMessage[];
     /** Current stage of the last prompt round-trip (for single-shot compat). */
     getLastStage(): RunStage;
+    /**
+     * Preferred teardown: runs review (if enabled) then disposes.
+     * Falls back to dispose() if review is skipped.
+     */
+    finalize(trigger?: ReviewTrigger): Promise<void>;
     dispose(): void;
     private emit;
     /**
@@ -53,6 +60,11 @@ export declare class OrchestratorSession {
      * any prompt in this session are attributed to the correct run.
      */
     private handlePiEvent;
+    /**
+     * Run the review subagent for the given trigger. No-ops if contextEngine
+     * is unavailable or if this session is already a subagent.
+     */
+    private runReviewHook;
     /**
      * Creates a pi agent session configured for Ollama, with the ObsidiClaw
      * context-injection extension wired in.

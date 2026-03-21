@@ -14,6 +14,6 @@ import { fileURLToPath } from "url";
 import { createObsidiClawExtension } from "../../extension/factory.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const mdDbPath = join(__dirname, "../../md_db");
+const rootDir = join(__dirname, "../..");
 
-export default createObsidiClawExtension({ mdDbPath });
+export default createObsidiClawExtension({ rootDir });

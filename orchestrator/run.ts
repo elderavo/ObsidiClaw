@@ -27,19 +27,20 @@ import { fileURLToPath } from "url";
 import { Orchestrator } from "./orchestrator.js";
 import { RunLogger } from "../logger/index.js";
 import { ContextEngine } from "../context_engine/index.js";
+import { resolvePaths } from "../shared/config.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const mdDbPath = resolve(__dirname, "../md_db");
+const paths = resolvePaths(resolve(__dirname, ".."));
 
 // ── Boot ──────────────────────────────────────────────────────────────────
 
 //console.log("[obsidi-claw] Initializing context engine...");
-const contextEngine = new ContextEngine({ mdDbPath });
+const contextEngine = new ContextEngine({ mdDbPath: paths.mdDbPath });
 await contextEngine.initialize();
 //console.log("[obsidi-claw] Context engine ready.\n");
 
 const debugEnabled = ["1", "true"].includes((process.env["OBSIDI_CLAW_DEBUG"] ?? "").toLowerCase());
-const logger = new RunLogger(debugEnabled ? { debugDir: resolve(__dirname, "../.obsidi-claw/debug") } : {});
+const logger = new RunLogger({ dbPath: paths.dbPath, ...(debugEnabled ? { debugDir: resolve(paths.rootDir, ".obsidi-claw/debug") } : {}) });
 const orchestrator = new Orchestrator(logger, contextEngine);
 
 // ── Start session ─────────────────────────────────────────────────────────
@@ -72,6 +73,12 @@ rl.on("line", async (line) => {
     return;
   }
 
+  // Graceful shutdown via command
+  if (text === "/quit" || text === "/exit") {
+    rl.close();
+    return;
+  }
+
   rl.pause();
   process.stdout.write("\nagent> ");
 
@@ -85,10 +92,22 @@ rl.on("line", async (line) => {
   });
 });
 
-rl.on("close", async () => {
+async function gracefulShutdown() {
+  rl.pause();
   if (activePrompt) await activePrompt;
-  session.dispose();
-  logger.close();
-  // console.log("\n[obsidi-claw] Session ended.");
-  process.exit(0);
+  try {
+    await session.finalize();
+  } catch (err) {
+    console.error("\n[session_finalize_error]", err instanceof Error ? err.message : String(err));
+  } finally {
+    logger.close();
+    process.exit(0);
+  }
+}
+
+rl.on("close", () => { void gracefulShutdown(); });
+
+process.on("SIGINT", () => {
+  process.stdout.write("\n[obsidi-claw] Caught SIGINT, shutting down...\n");
+  rl.close();
 });

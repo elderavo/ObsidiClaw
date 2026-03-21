@@ -3,11 +3,10 @@ import { mkdirSync, appendFileSync } from "fs";
 import { dirname, join } from "path";
 import type { RunEvent } from "../orchestrator/types.js";
 
-const DEFAULT_DB_PATH = join(process.cwd(), ".obsidi-claw", "runs.db");
-
 
 export interface RunLoggerOptions {
-  dbPath?: string;
+  /** Path to the SQLite database file. Required — use resolvePaths().dbPath. */
+  dbPath: string;
   /**
    * When set, every RunEvent is also appended as a JSON line to
    * {debugDir}/{sessionId}.jsonl. One file per session, created on first event.
@@ -38,10 +37,10 @@ export class RunLogger {
   /** Track which session files have been created so we only mkdirSync once. */
   private readonly debugSessions = new Set<string>();
 
-  constructor(options: RunLoggerOptions | string = {}) {
+  constructor(options: RunLoggerOptions | string) {
     // Support legacy positional string arg for backwards compat
     const opts: RunLoggerOptions = typeof options === "string" ? { dbPath: options } : options;
-    const dbPath = opts.dbPath ?? DEFAULT_DB_PATH;
+    const dbPath = opts.dbPath;
     this.debugDir = opts.debugDir;
 
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -102,6 +101,15 @@ export class RunLogger {
     if (!columnNames.has("is_subagent")) {
       this.db.exec("ALTER TABLE runs ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0");
     }
+    if (!columnNames.has("review_status")) {
+      this.db.exec("ALTER TABLE runs ADD COLUMN review_status TEXT");
+    }
+    if (!columnNames.has("utility_score")) {
+      this.db.exec("ALTER TABLE runs ADD COLUMN utility_score INTEGER");
+    }
+    if (!columnNames.has("review_feedback")) {
+      this.db.exec("ALTER TABLE runs ADD COLUMN review_feedback TEXT");
+    }
   }
 
   logEvent(event: RunEvent): void {
@@ -143,6 +151,53 @@ export class RunLogger {
     }
 
     this._insertTrace(runId, sessionId, event.type, event.timestamp, event);
+  }
+
+  /**
+   * Mark a completed subagent run as awaiting human review.
+   * Call this after the run finishes to change status from 'done' to 'awaiting_review'.
+   */
+  markAwaitingReview(runId: string): void {
+    this.db
+      .prepare(`UPDATE runs SET status = 'awaiting_review', review_status = 'pending' WHERE run_id = ?`)
+      .run(runId);
+  }
+
+  /**
+   * Record a human review for a subagent run.
+   * @param runId - The run to review
+   * @param score - Utility score: 1 (not useful), 2 (partially useful), 3 (fully useful)
+   * @param feedback - Optional feedback text (required if score < 3)
+   */
+  recordReview(runId: string, score: number, feedback: string | null): void {
+    this.db
+      .prepare(
+        `UPDATE runs
+         SET review_status = 'reviewed',
+             utility_score = ?,
+             review_feedback = ?,
+             status = 'done'
+         WHERE run_id = ?`,
+      )
+      .run(score, feedback, runId);
+  }
+
+  /**
+   * Get all runs awaiting human review.
+   */
+  getPendingReviews(): Array<{ run_id: string; session_id: string; start_time: number; end_time: number | null }> {
+    return this.db
+      .prepare(`SELECT run_id, session_id, start_time, end_time FROM runs WHERE status = 'awaiting_review' ORDER BY end_time DESC`)
+      .all() as Array<{ run_id: string; session_id: string; start_time: number; end_time: number | null }>;
+  }
+
+  /**
+   * Get the output trace for a specific run (for review context).
+   */
+  getRunTrace(runId: string): Array<{ type: string; timestamp: number; payload: string }> {
+    return this.db
+      .prepare(`SELECT type, timestamp, payload FROM trace WHERE run_id = ? ORDER BY timestamp`)
+      .all(runId) as Array<{ type: string; timestamp: number; payload: string }>;
   }
 
   close(): void {

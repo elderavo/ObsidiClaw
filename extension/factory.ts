@@ -20,14 +20,18 @@
  *   createObsidiClawExtension({ mdDbPath: "/path/to/md_db" })
  */
 
+import { randomUUID } from "crypto";
+import { spawn } from "child_process";
+import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { Type } from "@sinclair/typebox";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
+import { type ExtensionFactory } from "@mariozechner/pi-coding-agent";
 import { ContextEngine } from "../context_engine/index.js";
 import { createContextEngineMcpServer } from "../context_engine/index.js";
+import { resolvePaths } from "../shared/config.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -57,9 +61,21 @@ export interface ObsidiClawExtensionConfig {
   /**
    * Path to the md_db directory.
    * Only used when mcpServer is not provided (standalone / Pi TUI path).
-   * Defaults to process.cwd()/md_db.
+   * Defaults to resolvePaths().mdDbPath.
    */
   mdDbPath?: string;
+
+  /**
+   * Project root directory. Used to resolve paths for review worker scripts, etc.
+   * Defaults to resolvePaths().rootDir (which falls back to process.cwd()).
+   */
+  rootDir?: string;
+
+  /**
+   * Explicit session ID. When provided, used for review job metadata instead of
+   * generating a random one.
+   */
+  sessionId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -87,14 +103,20 @@ export function createObsidiClawExtension(
     let ownedEngine: ContextEngine | undefined;
     let mcpServer: McpServer;
 
+    const paths = resolvePaths(config.rootDir);
+    const mdDbPath = config.mdDbPath ?? paths.mdDbPath;
+
     if (config.mcpServer) {
       mcpServer = config.mcpServer;
     } else {
       ownedEngine = new ContextEngine({
-        mdDbPath: config.mdDbPath ?? join(process.cwd(), "md_db"),
+        mdDbPath,
       });
       mcpServer = createContextEngineMcpServer(ownedEngine);
     }
+
+    // Track latest transcript (updated on agent_end) for review hook
+    let latestMessages: unknown[] = [];
 
     // Create InMemoryTransport pair and client (connected in session_start).
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -102,6 +124,8 @@ export function createObsidiClawExtension(
 
     // ── session_start: initialize engine (if owned) + connect MCP pair ──────
     pi.on("session_start", async () => {
+      // Ensure .obsidi-claw/ directory exists for detached workers (review, subagent)
+      mkdirSync(join(paths.rootDir, ".obsidi-claw"), { recursive: true });
       if (ownedEngine) await ownedEngine.initialize();
       await mcpServer.connect(serverTransport);
       await client.connect(clientTransport);
@@ -157,11 +181,56 @@ export function createObsidiClawExtension(
       }
     });
 
+    // ── agent_end: capture transcript for session review ─────────────────────
+    pi.on("agent_end", (event) => {
+      const messages = (event as unknown as { messages?: unknown[] })?.messages;
+      if (Array.isArray(messages)) latestMessages = messages;
+    });
+
     // ── session_shutdown ─────────────────────────────────────────────────────
-    pi.on("session_shutdown", () => {
-      void client.close();
-      void mcpServer.close();
-      if (ownedEngine) ownedEngine.close();
+    pi.on("session_shutdown", async () => {
+      try {
+        // Only queue review when this extension owns the engine (pi TUI path).
+        if (ownedEngine) {
+          const jobId = randomUUID();
+          const sessionId = config.sessionId ?? randomUUID();
+          const workDir = join(paths.rootDir, ".obsidi-claw", "reviews");
+          const specPath = join(workDir, `${jobId}.json`);
+          const resultPath = join(workDir, `${jobId}.result.json`);
+          const logPath = join(workDir, `${jobId}.log`);
+          const scriptPath = join(paths.rootDir, "dist", "scripts", "run_detached_subagent.js");
+
+          mkdirSync(workDir, { recursive: true });
+
+          const spec = {
+            type: "review",
+            jobId,
+            sessionId,
+            rootDir: paths.rootDir,
+            trigger: "session_end",
+            messages: latestMessages,
+            compactionMeta: undefined,
+            mdDbPath,
+            resultPath,
+            logPath,
+            createdAt: Date.now(),
+          };
+
+          writeFileSync(specPath, JSON.stringify(spec, null, 2), "utf8");
+
+          const child = spawn(process.execPath, [scriptPath, specPath], {
+            detached: true,
+            stdio: "ignore",
+          });
+          child.unref();
+        }
+      } catch (err) {
+        console.error("[session_review] enqueue failed in extension:", err);
+      } finally {
+        void client.close();
+        void mcpServer.close();
+        if (ownedEngine) ownedEngine.close();
+      }
     });
   };
 }

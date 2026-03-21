@@ -50,7 +50,7 @@ export class Orchestrator {
             };
         }
         finally {
-            session.dispose();
+            await session.finalize();
         }
     }
 }

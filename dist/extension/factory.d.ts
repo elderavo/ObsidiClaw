@@ -20,7 +20,7 @@
  *   createObsidiClawExtension({ mdDbPath: "/path/to/md_db" })
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
+import { type ExtensionFactory } from "@mariozechner/pi-coding-agent";
 export interface ObsidiClawExtensionConfig {
     /**
      * Already-built MCP server wrapping a ContextEngine (e.g. from OrchestratorSession).

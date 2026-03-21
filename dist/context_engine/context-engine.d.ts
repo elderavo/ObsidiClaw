@@ -15,8 +15,8 @@
  *   outputs are appended to formattedContext before the agent sees it
  */
 import { VectorStoreIndex } from "llamaindex";
-import { SqliteGraphStore } from "./store/sqlite_graph.js";
-import type { ContextEngineConfig, ContextPackage } from "./types.js";
+import { SqliteGraphStore } from "./store/graph-store.js";
+import type { ContextEngineConfig, ContextPackage, SubagentInput, SubagentPackage } from "./types.js";
 export declare class ContextEngine {
     private vectorIndex;
     private graphStore;
@@ -25,10 +25,13 @@ export declare class ContextEngine {
     /**
      * Must be called before build(). Idempotent — safe to call multiple times.
      *
-     * 1. Configures LlamaIndex embedding model (Ollama)
-     * 2. Opens the SQLite graph store (creates .obsidi-claw/ dir if needed)
-     * 3. Syncs md_db markdown files into the graph (two-pass: notes, then edges)
-     * 4. Builds in-memory VectorStoreIndex from graph notes
+     * Fast path (md_db unchanged since last run):
+     *   Loads the persisted vector index from disk — no file parsing, no Ollama calls.
+     *
+     * Slow path (first run, or md_db files added/modified/removed):
+     *   Syncs md_db → SQLite graph (two-pass: notes, then edges), re-embeds all
+     *   notes via Ollama, persists the vector index to .obsidi-claw/vector-index/,
+     *   and saves an mtime fingerprint so the next startup can use the fast path.
      */
     initialize(): Promise<void>;
     /**
@@ -38,6 +41,16 @@ export declare class ContextEngine {
      * Throws if initialize() has not been called.
      */
     build(prompt: string): Promise<ContextPackage>;
+    /**
+     * Build a SubagentPackage for the given subagent input.
+     *
+     * Runs hybrid retrieval against the plan (the richest query signal),
+     * then bundles the input + retrieved context into a formatted system prompt
+     * ready to inject into a child Pi session.
+     *
+     * Throws if initialize() has not been called.
+     */
+    buildSubagentPackage(input: SubagentInput): Promise<SubagentPackage>;
     /**
      * Return the stripped body of a specific note by relative path.
      * Returns null if the note is not in the graph or the engine is not initialized.
@@ -62,6 +75,18 @@ export declare class ContextEngine {
      * Call this after adding new documents to the graph store.
      */
     rebuildVectorIndex(): Promise<void>;
+    /**
+     * Complete reindex after md_db files change at runtime.
+     * Performs full pipeline: sync markdown → rebuild vector index → rebuild link graph.
+     *
+     * Call this when the system adds/modifies/deletes files in md_db during runtime.
+     */
+    reindex(): Promise<void>;
+    /**
+     * Rebuild just the link graph after md_db changes.
+     * More efficient than full reindex if only link relationships changed.
+     */
+    rebuildLinkGraph(): Promise<void>;
     /**
      * Close the underlying SQLite database.
      * Call when the context engine is no longer needed.
