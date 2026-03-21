@@ -2,55 +2,28 @@
  * Subagent Extension
  *
  * Enables the main Pi agent to spawn a focused in-process subagent.
+ * This is a thin wrapper around SubagentRunner — the first-class subagent entity
+ * that can also be called from the scheduler or standalone scripts.
  *
  * Workflow:
- *   1. Main agent calls spawn_subagent(plan, context, success_criteria)
- *   2. Extension calls MCP prepare_subagent → ContextEngine builds SubagentPackage
- *   3. Extension creates a child OrchestratorSession with injected system prompt
- *   4. Subagent runs to completion; run is marked `awaiting_review` in runs.db
- *   5. Tool result instructs the main agent to ask the user for a grade
- *   6. Main agent calls grade_subagent(run_id, score, feedback) → persisted
+ *   1. Main agent calls spawn_subagent(plan, context, success_criteria, personality?)
+ *   2. Extension delegates to SubagentRunner.run(spec)
+ *   3. Subagent runs to completion; run is marked `awaiting_review` in runs.db
+ *   4. Tool result instructs the main agent to ask the user for a grade
+ *   5. Main agent calls grade_subagent(run_id, score, feedback) → persisted
  *
  * Human review loop:
  *   Subagent runs finalize as `awaiting_review` instead of `done`. The main
  *   agent is instructed to ask the user for a utility score (1-3) and optional
- *   feedback. This creates a training signal for refining the context engine's
- *   prompt synthesizer over time.
+ *   feedback. This creates a training signal for the insight engine.
  */
 
-import { randomUUID } from "crypto";
-import { spawn } from "child_process";
-import { mkdirSync, writeFileSync } from "fs";
-import { join } from "path";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ContextEngine } from "../../context_engine/index.js";
-import { createContextEngineMcpServer } from "../../context_engine/index.js";
 import { RunLogger } from "../../logger/run-logger.js";
-import { OrchestratorSession } from "../../orchestrator/session.js";
+import { SubagentRunner } from "../../shared/agents/subagent-runner.js";
 import { resolvePaths, type ObsidiClawPaths } from "../../shared/config.js";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function extractText(result: unknown): string {
-  const blocks = (result as { content?: Array<{ type: string; text?: string }> }).content ?? [];
-  return blocks.find((c) => c.type === "text")?.text ?? "";
-}
-
-function extractMessageText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return (content as Array<{ type?: string; text?: string }>)
-      .filter((c) => typeof c?.text === "string")
-      .map((c) => c.text!)
-      .join("\n");
-  }
-  return "";
-}
 
 // ---------------------------------------------------------------------------
 // Config
@@ -61,8 +34,6 @@ export interface SubagentExtensionConfig {
   contextEngine?: ContextEngine;
   /** Explicit paths. Defaults to resolvePaths(). */
   paths?: ObsidiClawPaths;
-  /** Explicit session ID. Defaults to a new UUID. */
-  sessionId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -74,18 +45,19 @@ export default function subagentExtension(
   config: SubagentExtensionConfig = {},
 ) {
   const paths = config.paths ?? resolvePaths();
-  const sessionId = config.sessionId ?? randomUUID();
 
-  // Engine + MCP client — may be provided or lazily created
+  // Engine — may be provided or lazily created
   let engine: ContextEngine | undefined = config.contextEngine;
   let ownsEngine = false;
-  let mcpClient: Client | undefined;
+
+  // SubagentRunner — lazily created once engine is ready
+  let runner: SubagentRunner | undefined;
 
   // Track completed subagent runs awaiting review (run_id → plan summary)
   const pendingReviews = new Map<string, { plan: string; output: string; durationS: number }>();
 
-  async function ensureInitialized(): Promise<void> {
-    if (engine && mcpClient) return;
+  async function ensureRunner(): Promise<SubagentRunner> {
+    if (runner) return runner;
 
     if (!engine) {
       engine = new ContextEngine({ mdDbPath: paths.mdDbPath });
@@ -93,12 +65,13 @@ export default function subagentExtension(
       ownsEngine = true;
     }
 
-    const server = createContextEngineMcpServer(engine);
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    mcpClient = new Client({ name: "subagent-ext", version: "1.0.0" });
+    runner = new SubagentRunner({
+      dbPath: paths.dbPath,
+      contextEngine: engine,
+      rootDir: paths.rootDir,
+    });
 
-    await server.connect(serverTransport);
-    await mcpClient.connect(clientTransport);
+    return runner;
   }
 
   // ── spawn_subagent tool ───────────────────────────────────────────────────
@@ -107,14 +80,15 @@ export default function subagentExtension(
     label: "Spawn Subagent",
     description:
       "Launch a focused in-process Pi subagent. Before calling, create a detailed " +
-      "implementation spec using the subagent spec template. The subagent gets full " +
-      "retrieve_context access and a system prompt built from the plan + retrieved knowledge. " +
+      "implementation spec. The subagent gets full retrieve_context access and a system " +
+      "prompt built from the plan + retrieved knowledge + optional personality. " +
       "After the subagent finishes, you MUST ask the user to grade the result using grade_subagent.",
-    promptSnippet: "spawn_subagent(plan, context, success_criteria) — launch focused subagent",
+    promptSnippet: "spawn_subagent(plan, context, success_criteria, personality?) — launch focused subagent",
     promptGuidelines: [
       "Write a detailed plan before calling — the plan drives knowledge retrieval",
       "success_criteria should be unambiguous and measurable",
       "Use context to pass any facts the subagent needs that aren't in the knowledge base",
+      "Use personality to select a behavioral profile (e.g., 'deep-researcher', 'code-reviewer')",
       "IMPORTANT: After receiving the result, immediately ask the user to review it with grade_subagent",
     ],
     parameters: Type.Object({
@@ -127,6 +101,11 @@ export default function subagentExtension(
       success_criteria: Type.String({
         description: "Clear, measurable criteria for determining task completion",
       }),
+      personality: Type.Optional(
+        Type.String({
+          description: "Named personality profile (e.g., 'deep-researcher', 'code-reviewer', 'context-gardener')",
+        }),
+      ),
       timeout_minutes: Type.Optional(
         Type.Number({
           description: "Max runtime in minutes (default: 5, max: 30)",
@@ -137,110 +116,63 @@ export default function subagentExtension(
     }),
 
     async execute(_toolCallId, params, signal, onUpdate, _ctx) {
-      await ensureInitialized();
+      const r = await ensureRunner();
 
-      const startTime = Date.now();
-
-      // ── Step 1: prepare_subagent via MCP ─────────────────────────────────
       onUpdate?.({
-        content: [{ type: "text", text: "Retrieving context for subagent..." }],
-        details: { status: "preparing" },
+        content: [{ type: "text", text: "Preparing and running subagent..." }],
+        details: { status: "running" },
       });
 
-      const prepResult = await mcpClient!.callTool({
-        name: "prepare_subagent",
-        arguments: {
+      const result = await r.run(
+        {
           prompt: params.context.trim() || params.plan,
           plan: params.plan,
-          success_criteria: params.success_criteria,
+          successCriteria: params.success_criteria,
+          personality: params.personality,
+          callerContext: params.context,
+          timeoutMs: (params.timeout_minutes ?? 5) * 60 * 1000,
         },
-      });
+        signal,
+      );
 
-      const formattedSystemPrompt = extractText(prepResult);
+      const durationS = Math.round(result.durationMs / 1000);
 
-      if (!formattedSystemPrompt) {
-        return {
-          content: [{ type: "text" as const, text: "prepare_subagent returned no content — cannot spawn subagent." }],
-        };
-      }
-
-      onUpdate?.({
-        content: [{ type: "text", text: "Context packaged. Spawning subagent..." }],
-        details: { status: "spawning" },
-      });
-
-      // ── Step 2: create child OrchestratorSession ──────────────────────────
-      const childLogger = new RunLogger({ dbPath: paths.dbPath });
-
-      let outputBuffer = "";
-      const childSession = new OrchestratorSession(childLogger, engine, {
-        systemPrompt: formattedSystemPrompt,
-        onOutput: (delta) => { outputBuffer += delta; },
-        isSubagent: true,
-      });
-
-      // ── Step 3: run the subagent with timeout + cancellation ─────────────
-      const timeoutMs = (params.timeout_minutes ?? 5) * 60 * 1000;
-
-      const runPromise = (async (): Promise<"done"> => {
-        await childSession.prompt(params.plan);
-        return "done";
-      })();
-
-      const timeoutPromise = new Promise<"timeout">((resolve) => {
-        const timer = setTimeout(() => resolve("timeout"), timeoutMs);
-        if (timer.unref) timer.unref();
-      });
-
-      let cancelResolve: ((v: "cancelled") => void) | undefined;
-      const cancelPromise = new Promise<"cancelled">((resolve) => {
-        cancelResolve = resolve;
-      });
-      const abortHandler = () => cancelResolve?.("cancelled");
-      signal?.addEventListener("abort", abortHandler, { once: true });
-
-      let outcome: "done" | "timeout" | "cancelled";
-      let runId = "";
-      try {
-        outcome = await Promise.race([runPromise, timeoutPromise, cancelPromise]);
-        runId = childSession.lastRunId;
-
-        // Mark subagent run as awaiting human review instead of 'done'
-        if (runId && outcome === "done") {
-          childLogger.markAwaitingReview(runId);
+      // Mark as awaiting review
+      if (result.runId && result.outcome === "done") {
+        const logger = new RunLogger({ dbPath: paths.dbPath });
+        try {
+          logger.markAwaitingReview(result.runId);
+        } finally {
+          logger.close();
         }
-      } finally {
-        signal?.removeEventListener("abort", abortHandler);
-        childSession.dispose();
-        childLogger.close();
       }
 
-      // ── Step 4: extract output ────────────────────────────────────────────
-      const messages = childSession.messages as Array<{ role: string; content: unknown }>;
-      const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
-      const output = extractMessageText(lastAssistant?.content) || outputBuffer || "(no output)";
-
-      const durationS = Math.round((Date.now() - startTime) / 1000);
-
-      if (outcome === "cancelled") {
+      if (result.outcome === "cancelled") {
         return {
-          content: [{ type: "text" as const, text: `Subagent cancelled after ${durationS}s.\n\n${output}` }],
-          details: { outcome: "cancelled", duration_ms: Date.now() - startTime },
+          content: [{ type: "text" as const, text: `Subagent cancelled after ${durationS}s.\n\n${result.output}` }],
+          details: { outcome: "cancelled", duration_ms: result.durationMs },
         };
       }
 
-      if (outcome === "timeout") {
+      if (result.outcome === "timeout") {
         return {
-          content: [{ type: "text" as const, text: `Subagent timed out after ${params.timeout_minutes ?? 5}m.\n\n${output}` }],
-          details: { outcome: "timeout", duration_ms: Date.now() - startTime },
+          content: [{ type: "text" as const, text: `Subagent timed out after ${params.timeout_minutes ?? 5}m.\n\n${result.output}` }],
+          details: { outcome: "timeout", duration_ms: result.durationMs },
         };
       }
 
-      // Track this run for the grade_subagent tool
-      if (runId) {
-        pendingReviews.set(runId, {
+      if (result.outcome === "error") {
+        return {
+          content: [{ type: "text" as const, text: `Subagent error: ${result.output}` }],
+          details: { outcome: "error", duration_ms: result.durationMs },
+        };
+      }
+
+      // Track for grade_subagent
+      if (result.runId) {
+        pendingReviews.set(result.runId, {
           plan: params.plan.slice(0, 200),
-          output: output.slice(0, 500),
+          output: result.output.slice(0, 500),
           durationS,
         });
       }
@@ -250,16 +182,16 @@ export default function subagentExtension(
           type: "text" as const,
           text: [
             `**Subagent completed** (${durationS}s)`,
-            `**Run ID:** \`${runId}\``,
+            `**Run ID:** \`${result.runId}\``,
             "",
-            output,
+            result.output,
             "",
             "---",
             `**Review required.** Please ask the user to grade this subagent result.`,
-            `Use \`grade_subagent\` with run_id \`${runId}\`, a utility score (1-3), and any feedback.`,
+            `Use \`grade_subagent\` with run_id \`${result.runId}\`, a utility score (1-3), and any feedback.`,
           ].join("\n"),
         }],
-        details: { outcome: "awaiting_review", run_id: runId, duration_ms: Date.now() - startTime },
+        details: { outcome: "awaiting_review", run_id: result.runId, duration_ms: result.durationMs },
       };
     },
   });
@@ -309,7 +241,6 @@ export default function subagentExtension(
         };
       }
 
-      // Open a fresh logger to record the review (the child logger is long closed)
       const logger = new RunLogger({ dbPath: paths.dbPath });
       try {
         logger.recordReview(params.run_id, score, feedback);
@@ -317,7 +248,6 @@ export default function subagentExtension(
         logger.close();
       }
 
-      // Clean up from pending list
       const meta = pendingReviews.get(params.run_id);
       pendingReviews.delete(params.run_id);
 
@@ -348,7 +278,7 @@ export default function subagentExtension(
     label: "Spawn Subagent (Detached)",
     description:
       "Queue a subagent to run in a detached worker process. The worker packages context, " +
-      "runs the subagent, logs to runs.db under this session, and writes a result JSON to .obsidi-claw/subagents.",
+      "runs the subagent, logs to runs.db, and writes a result JSON to .obsidi-claw/subagents.",
     promptSnippet: "spawn_subagent_detached(plan, context, success_criteria) — background subagent",
     promptGuidelines: [
       "Provide a detailed plan; the worker will run it with packaged context.",
@@ -358,59 +288,40 @@ export default function subagentExtension(
       plan: Type.String({ description: "Detailed implementation plan for the subagent to execute" }),
       context: Type.String({ description: "Additional background facts (optional, empty ok)" }),
       success_criteria: Type.String({ description: "Clear, measurable criteria for success" }),
+      personality: Type.Optional(
+        Type.String({ description: "Named personality profile (e.g., 'deep-researcher')" }),
+      ),
       timeout_minutes: Type.Optional(
         Type.Number({ description: "Timeout in minutes (default 5, max 30)", minimum: 1, maximum: 30 }),
       ),
     }),
 
     async execute(_toolCallId, params) {
-      const jobId = randomUUID();
-      const workDir = join(paths.rootDir, ".obsidi-claw", "subagents");
-      const specPath = join(workDir, `${jobId}.json`);
-      const resultPath = join(workDir, `${jobId}.result.json`);
-      const logPath = join(workDir, `${jobId}.log`);
-      const scriptPath = join(paths.rootDir, "dist", "scripts", "run_detached_subagent.js");
+      const r = await ensureRunner();
 
-      mkdirSync(workDir, { recursive: true });
-
-      const spec = {
-        type: "subagent",
-        jobId,
-        sessionId,
-        rootDir: paths.rootDir,
-        mdDbPath: paths.mdDbPath,
+      const { jobId, resultPath } = r.runDetached({
+        prompt: params.context.trim() || params.plan,
         plan: params.plan,
-        context: params.context,
         successCriteria: params.success_criteria,
-        timeoutMinutes: params.timeout_minutes,
-        resultPath,
-        logPath,
-        createdAt: Date.now(),
-      };
-
-      writeFileSync(specPath, JSON.stringify(spec, null, 2), "utf8");
-
-      const child = spawn(process.execPath, [scriptPath, specPath], {
-        detached: true,
-        stdio: "ignore",
+        personality: params.personality,
+        callerContext: params.context,
+        timeoutMs: params.timeout_minutes ? params.timeout_minutes * 60 * 1000 : undefined,
       });
-      child.unref();
 
       return {
         content: [
           {
             type: "text" as const,
-            text: `Detached subagent queued.\njob: ${jobId}\nsession: ${sessionId}\nspec: ${specPath}\nresult: ${resultPath}`,
+            text: `Detached subagent queued.\njob: ${jobId}\nresult: ${resultPath}`,
           },
         ],
-        details: { job_id: jobId, session_id: sessionId, spec_path: specPath, result_path: resultPath },
+        details: { job_id: jobId, result_path: resultPath },
       };
     },
   });
 
   // ── session_shutdown: clean up ────────────────────────────────────────────
   pi.on("session_shutdown", async () => {
-    await mcpClient?.close();
     if (ownsEngine) engine?.close();
   });
 }
