@@ -1,9 +1,10 @@
 /**
  * Context Reviewer — quality gate between retrieval and MCP delivery.
  *
- * Evaluates retrieved notes for relevance to the query before they're
- * sent to the agent. Uses a direct Ollama API call with the configured
- * personality's model (default: context-gardener) to keep latency low.
+ * When enabled, takes the raw formatted context + query and asks the
+ * configured personality's LLM to synthesize a focused, query-specific
+ * context document. The LLM outputs natural language (markdown), not
+ * structured JSON — no fragile parsing required.
  *
  * Configurable:
  *   - enabled: off by default
@@ -36,7 +37,7 @@ export interface ContextReviewConfig {
   /** Personality name to use for the review. Default: "context-gardener". */
   personality: string;
 
-  /** Max time for the review call in ms. Default: 10000. */
+  /** Max time for the review call in ms. Default: 15000. */
   maxLatencyMs: number;
 
   /** Path to personalities directory. */
@@ -44,8 +45,8 @@ export interface ContextReviewConfig {
 }
 
 export interface ReviewResult {
-  /** Note IDs filtered out by the reviewer. */
-  filteredNoteIds: string[];
+  /** Synthesized context document. Null if review was skipped or failed. */
+  synthesizedContext: string | null;
 
   /** Time taken for review in ms. */
   reviewMs: number;
@@ -65,7 +66,7 @@ const DEFAULTS: ContextReviewConfig = {
   enabled: false,
   confidenceThreshold: 0.5,
   personality: "context-gardener",
-  maxLatencyMs: 10_000,
+  maxLatencyMs: 15_000,
   personalitiesDir: "",
 };
 
@@ -81,29 +82,31 @@ export class ContextReviewer {
   }
 
   /**
-   * Review retrieved notes for relevance to the query.
+   * Review retrieved context and produce a synthesized, query-focused version.
    *
-   * Returns which notes to filter out. If review is skipped (disabled,
-   * high confidence, timeout), returns an empty filteredNoteIds array.
+   * @param query              The user's original query.
+   * @param notes              Retrieved notes (used for avg-score confidence check).
+   * @param rawFormattedContext Pre-formatted context from formatContext() — sent to the LLM as input.
+   * @returns ReviewResult with synthesizedContext (the LLM's output) or null if skipped/failed.
    */
-  async review(query: string, notes: RetrievedNote[]): Promise<ReviewResult> {
+  async review(query: string, notes: RetrievedNote[], rawFormattedContext: string): Promise<ReviewResult> {
     const t0 = Date.now();
 
     // Skip if disabled
     if (!this.config.enabled) {
-      return { filteredNoteIds: [], reviewMs: 0, skipped: true, skipReason: "disabled" };
+      return { synthesizedContext: null, reviewMs: 0, skipped: true, skipReason: "disabled" };
     }
 
     // Skip if no notes
     if (notes.length === 0) {
-      return { filteredNoteIds: [], reviewMs: 0, skipped: true, skipReason: "no_notes" };
+      return { synthesizedContext: null, reviewMs: 0, skipped: true, skipReason: "no_notes" };
     }
 
     // Skip if high confidence (avg score above threshold)
     const avgScore = notes.reduce((sum, n) => sum + n.score, 0) / notes.length;
     if (avgScore >= this.config.confidenceThreshold) {
       return {
-        filteredNoteIds: [],
+        synthesizedContext: null,
         reviewMs: Date.now() - t0,
         skipped: true,
         skipReason: "high_confidence",
@@ -114,17 +117,17 @@ export class ContextReviewer {
     const personality = loadPersonality(this.config.personality, this.config.personalitiesDir);
 
     try {
-      const filteredNoteIds = await this.callReviewLLM(query, notes, personality);
+      const synthesized = await this.callSynthesizeLLM(query, rawFormattedContext, personality);
       return {
-        filteredNoteIds,
+        synthesizedContext: synthesized,
         reviewMs: Date.now() - t0,
         skipped: false,
       };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      console.warn(`[context_review] Review failed (${errMsg}), passing all notes through`);
+      console.warn(`[context_review] Review failed (${errMsg}), using raw context`);
       return {
-        filteredNoteIds: [],
+        synthesizedContext: null,
         reviewMs: Date.now() - t0,
         skipped: true,
         skipReason: "error",
@@ -133,14 +136,14 @@ export class ContextReviewer {
   }
 
   /**
-   * Direct Ollama API call for context review.
-   * Returns IDs of notes to filter out.
+   * Direct Ollama API call for context synthesis.
+   * Returns the synthesized markdown context document.
    */
-  private async callReviewLLM(
+  private async callSynthesizeLLM(
     query: string,
-    notes: RetrievedNote[],
+    rawContext: string,
     personality: PersonalityConfig | null,
-  ): Promise<string[]> {
+  ): Promise<string> {
     const ollamaConfig = getOllamaConfig();
 
     // Determine model: personality > default
@@ -150,30 +153,25 @@ export class ContextReviewer {
     const baseUrl = personality?.provider?.baseUrl ?? ollamaConfig.baseUrl;
     const ollamaHost = baseUrl.replace(/\/v1\/?$/, "");
 
-    // Build the prompt
-    const notesList = notes
-      .map((n, i) => `[${i + 1}] ID: "${n.noteId}" | Score: ${n.score.toFixed(3)} | Type: ${n.type}\n${n.content.slice(0, 300)}`)
-      .join("\n\n");
-
-    const systemPrompt = personality?.content ?? "You evaluate retrieved context for relevance.";
+    const systemPrompt = personality?.content ?? "You synthesize retrieved context into focused, query-relevant summaries.";
 
     const userPrompt = [
       `## Query`,
       `"${query}"`,
       ``,
-      `## Retrieved Notes`,
-      notesList,
+      `## Retrieved Context`,
+      rawContext,
       ``,
       `## Instructions`,
-      `Evaluate each note for relevance to the query.`,
-      `Return a JSON object with two arrays:`,
-      `- "keep": IDs of notes that are relevant and should be included`,
-      `- "filter": IDs of notes that are NOT relevant and should be removed`,
-      ``,
-      `Respond with JSON only, no markdown wrapping.`,
+      `Rewrite the context above into a focused document that contains ONLY information relevant to the query. Be ruthless:`,
+      `- Cut background, history, and generic descriptions that don't help answer the query`,
+      `- Keep specific facts, patterns, code signatures, warnings, and rules that apply`,
+      `- If a section has nothing relevant, omit it entirely`,
+      `- Preserve code blocks and API signatures verbatim when relevant`,
+      `- Always include warnings, failure modes, and "NEVER" rules that apply to the query`,
+      `- Output markdown. No preamble, no meta-commentary, just the focused context.`,
     ].join("\n");
 
-    // Call Ollama native API
     const response = await axios.post(
       `${ollamaHost}/api/chat`,
       {
@@ -183,7 +181,6 @@ export class ContextReviewer {
           { role: "user", content: userPrompt },
         ],
         stream: false,
-        format: "json",
       },
       {
         timeout: this.config.maxLatencyMs,
@@ -191,33 +188,11 @@ export class ContextReviewer {
       },
     );
 
-    // Parse response
     const content = response.data?.message?.content ?? "";
-    return this.parseReviewResponse(content, notes);
-  }
-
-  /**
-   * Parse the LLM's JSON response to extract filtered note IDs.
-   * Gracefully handles malformed responses by keeping all notes.
-   */
-  private parseReviewResponse(raw: string, notes: RetrievedNote[]): string[] {
-    try {
-      const parsed = JSON.parse(raw.trim()) as { keep?: string[]; filter?: string[] };
-      const validIds = new Set(notes.map((n) => n.noteId));
-
-      if (Array.isArray(parsed.filter)) {
-        return parsed.filter.filter((id) => validIds.has(id));
-      }
-
-      // If only "keep" is provided, filter = all notes not in keep
-      if (Array.isArray(parsed.keep)) {
-        const keepSet = new Set(parsed.keep);
-        return notes.filter((n) => !keepSet.has(n.noteId)).map((n) => n.noteId);
-      }
-
-      return [];
-    } catch {
-      return [];
+    if (!content.trim()) {
+      throw new Error("Empty response from synthesis LLM");
     }
+
+    return content.trim();
   }
 }
