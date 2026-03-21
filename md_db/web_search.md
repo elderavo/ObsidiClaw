@@ -88,5 +88,3 @@ The tool is designed to easily support additional providers:
 Links: 
 
 [[tools]]
-[[research]]
-[[perplexity_api]]

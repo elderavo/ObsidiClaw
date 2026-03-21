@@ -55,6 +55,9 @@ export interface SessionConfig {
    * Use this to print agent output in real time.
    */
   onOutput?: (delta: string) => void;
+
+  /** True for subagent sessions spawned from a parent run. */
+  isSubagent?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,7 +98,7 @@ export type RunEvent =
   | { type: "session_end";         sessionId: SessionId; timestamp: number }
 
   // ── Prompt lifecycle (one per prompt, reused across session) ─────────────
-  | { type: "prompt_received";     sessionId: SessionId; runId: RunId; timestamp: number; text: string }
+  | { type: "prompt_received";     sessionId: SessionId; runId: RunId; timestamp: number; text: string; isSubagent?: boolean }
   | { type: "prompt_complete";     sessionId: SessionId; runId: RunId; timestamp: number; durationMs: number }
   | { type: "prompt_error";        sessionId: SessionId; runId: RunId; timestamp: number; error: string }
 
@@ -118,5 +121,5 @@ export type RunEvent =
   | { type: "agent_turn_start";    sessionId: SessionId; runId: RunId; timestamp: number }
   | { type: "agent_turn_end";      sessionId: SessionId; runId: RunId; timestamp: number }
   | { type: "agent_done";          sessionId: SessionId; runId: RunId; timestamp: number; messageCount: number }
-  | { type: "tool_call";           sessionId: SessionId; runId: RunId; timestamp: number; toolName: string }
-  | { type: "tool_result";         sessionId: SessionId; runId: RunId; timestamp: number; toolName: string; isError: boolean };
+  | { type: "tool_call";           sessionId: SessionId; runId: RunId; timestamp: number; toolName: string; toolCallId?: string; toolArgs?: unknown }
+  | { type: "tool_result";         sessionId: SessionId; runId: RunId; timestamp: number; toolName: string; toolCallId?: string; isError: boolean; toolResult?: unknown };

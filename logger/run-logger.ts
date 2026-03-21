@@ -57,11 +57,12 @@ export class RunLogger {
   private _initSchema(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS runs (
-        run_id     TEXT    PRIMARY KEY,
-        session_id TEXT    NOT NULL,
-        status     TEXT    NOT NULL DEFAULT 'running',
-        start_time INTEGER NOT NULL,
-        end_time   INTEGER
+        run_id       TEXT    PRIMARY KEY,
+        session_id   TEXT    NOT NULL,
+        status       TEXT    NOT NULL DEFAULT 'running',
+        start_time   INTEGER NOT NULL,
+        end_time     INTEGER,
+        is_subagent  INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS trace (
@@ -90,6 +91,17 @@ export class RunLogger {
       CREATE INDEX IF NOT EXISTS trace_run_id        ON trace(run_id);
       CREATE INDEX IF NOT EXISTS synthesis_session   ON synthesis_metrics(session_id);
     `);
+
+    this._ensureRunSchema();
+  }
+
+  private _ensureRunSchema(): void {
+    const columns = this.db.prepare("PRAGMA table_info(runs)").all() as { name: string }[];
+    const columnNames = new Set(columns.map((col) => col.name));
+
+    if (!columnNames.has("is_subagent")) {
+      this.db.exec("ALTER TABLE runs ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0");
+    }
   }
 
   logEvent(event: RunEvent): void {
@@ -99,7 +111,7 @@ export class RunLogger {
     const runId = "runId" in event ? event.runId : null;
 
     if (event.type === "prompt_received") {
-      this._insertRun(event.runId, sessionId, event.timestamp);
+      this._insertRun(event.runId, sessionId, event.timestamp, Boolean(event.isSubagent));
     }
 
     if (event.type === "prompt_complete") {
@@ -139,13 +151,18 @@ export class RunLogger {
 
   // ── Private helpers ────────────────────────────────────────────────────────
 
-  private _insertRun(runId: string, sessionId: string, startTime: number): void {
+  private _insertRun(
+    runId: string,
+    sessionId: string,
+    startTime: number,
+    isSubagent: boolean,
+  ): void {
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO runs (run_id, session_id, status, start_time)
-         VALUES (?, ?, 'running', ?)`,
+        `INSERT OR IGNORE INTO runs (run_id, session_id, status, start_time, is_subagent)
+         VALUES (?, ?, 'running', ?, ?)`,
       )
-      .run(runId, sessionId, startTime);
+      .run(runId, sessionId, startTime, isSubagent ? 1 : 0);
   }
 
   private _finalizeRun(runId: string, status: string, endTime: number): void {

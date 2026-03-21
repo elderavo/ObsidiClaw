@@ -151,6 +151,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
       const childSession = new OrchestratorSession(childLogger, engine, {
         systemPrompt: formattedSystemPrompt,
         onOutput: (delta) => { outputBuffer += delta; },
+        isSubagent: true,
       });
 
       // ── Step 3: run the subagent with timeout + cancellation ─────────────

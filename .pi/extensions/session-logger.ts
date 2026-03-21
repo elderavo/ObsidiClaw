@@ -39,6 +39,13 @@ export default function sessionLoggerExtension(pi: ExtensionAPI) {
 
   const logger = new RunLogger({ dbPath, debugDir });
 
+  // NOTE: Main session trace logging disabled. Only subagent runs are recorded.
+  const LOG_SESSION_TRACE = false;
+  const logEvent = (event: Parameters<RunLogger["logEvent"]>[0]) => {
+    if (!LOG_SESSION_TRACE) return;
+    logger.logEvent(event);
+  };
+
   const sessionId = randomUUID();
 
   // ── RunId state machine ─────────────────────────────────────────────────
@@ -53,7 +60,7 @@ export default function sessionLoggerExtension(pi: ExtensionAPI) {
   // ── Session start ──────────────────────────────────────────────────────
 
   pi.on("session_start", () => {
-    logger.logEvent({ type: "session_start", sessionId, timestamp: Date.now() });
+    logEvent({ type: "session_start", sessionId, timestamp: Date.now() });
   });
 
   // ── Per-turn hook: before_agent_start ──────────────────────────────────
@@ -66,15 +73,16 @@ export default function sessionLoggerExtension(pi: ExtensionAPI) {
       runStartTime = Date.now();
       needsNewRun = false;
 
-      logger.logEvent({
+      logEvent({
         type: "prompt_received",
         sessionId,
         runId: currentRunId,
         timestamp: Date.now(),
         text: "(pi-tui)",
+        isSubagent: false,
       });
 
-      logger.logEvent({
+      logEvent({
         type: "agent_prompt_sent",
         sessionId,
         runId: currentRunId,
@@ -88,7 +96,7 @@ export default function sessionLoggerExtension(pi: ExtensionAPI) {
   // ── Agent loop events ──────────────────────────────────────────────────
 
   pi.on("agent_start", () => {
-    logger.logEvent({
+    logEvent({
       type: "agent_turn_start",
       sessionId,
       runId: currentRunId,
@@ -97,7 +105,7 @@ export default function sessionLoggerExtension(pi: ExtensionAPI) {
   });
 
   pi.on("turn_end", () => {
-    logger.logEvent({
+    logEvent({
       type: "agent_turn_end",
       sessionId,
       runId: currentRunId,
@@ -109,7 +117,7 @@ export default function sessionLoggerExtension(pi: ExtensionAPI) {
     const messages = (event as unknown as { messages?: unknown[] })?.messages;
     const messageCount = Array.isArray(messages) ? messages.length : 0;
 
-    logger.logEvent({
+    logEvent({
       type: "agent_done",
       sessionId,
       runId: currentRunId,
@@ -117,7 +125,7 @@ export default function sessionLoggerExtension(pi: ExtensionAPI) {
       messageCount,
     });
 
-    logger.logEvent({
+    logEvent({
       type: "prompt_complete",
       sessionId,
       runId: currentRunId,
@@ -132,35 +140,38 @@ export default function sessionLoggerExtension(pi: ExtensionAPI) {
   // ── Tool events ────────────────────────────────────────────────────────
 
   pi.on("tool_execution_start", (event) => {
-    const toolName = String(
-      (event as unknown as { toolName?: string })?.toolName ?? "unknown",
-    );
+    const e = event as unknown as { toolName?: string; toolCallId?: string; args?: unknown };
+    const toolName = String(e?.toolName ?? "unknown");
 
-    logger.logEvent({
+    logEvent({
       type: "tool_call",
       sessionId,
       runId: currentRunId,
       timestamp: Date.now(),
       toolName,
+      toolCallId: typeof e?.toolCallId === "string" ? e.toolCallId : undefined,
+      toolArgs: e?.args,
     });
   });
 
   pi.on("tool_execution_end", (event) => {
-    const e = event as unknown as { toolName?: string; isError?: boolean };
-    logger.logEvent({
+    const e = event as unknown as { toolName?: string; toolCallId?: string; isError?: boolean; result?: unknown };
+    logEvent({
       type: "tool_result",
       sessionId,
       runId: currentRunId,
       timestamp: Date.now(),
       toolName: String(e?.toolName ?? "unknown"),
+      toolCallId: typeof e?.toolCallId === "string" ? e.toolCallId : undefined,
       isError: Boolean(e?.isError),
+      toolResult: e?.result,
     });
   });
 
   // ── Session end ────────────────────────────────────────────────────────
 
   pi.on("session_shutdown", () => {
-    logger.logEvent({ type: "session_end", sessionId, timestamp: Date.now() });
+    logEvent({ type: "session_end", sessionId, timestamp: Date.now() });
     logger.close();
   });
 }

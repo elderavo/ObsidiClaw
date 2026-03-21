@@ -54,12 +54,15 @@ export class OrchestratorSession {
    */
   private currentRunId: RunId = "";
 
+  private readonly isSubagent: boolean;
+
   constructor(
     private readonly logger: RunLogger,
     private readonly contextEngine?: ContextEngine,
     private readonly config: SessionConfig = {},
   ) {
     this.sessionId = crypto.randomUUID();
+    this.isSubagent = Boolean(config.isSubagent);
     this.emit({ type: "session_start", sessionId: this.sessionId, timestamp: Date.now() });
   }
 
@@ -77,7 +80,7 @@ export class OrchestratorSession {
     this.currentRunId = runId;
     const startTime = Date.now();
 
-    this.emit({ type: "prompt_received", sessionId: this.sessionId, runId, timestamp: Date.now(), text });
+    this.emit({ type: "prompt_received", sessionId: this.sessionId, runId, timestamp: Date.now(), text, isSubagent: this.isSubagent });
 
     try {
       // ── First prompt: create pi session ───────────────────────────────────
@@ -178,6 +181,8 @@ export class OrchestratorSession {
           runId,
           timestamp: Date.now(),
           toolName: String(event["toolName"] ?? "unknown"),
+          toolCallId: typeof event["toolCallId"] === "string" ? String(event["toolCallId"]) : undefined,
+          toolArgs: event["args"],
         });
         break;
 
@@ -188,7 +193,9 @@ export class OrchestratorSession {
           runId,
           timestamp: Date.now(),
           toolName: String(event["toolName"] ?? "unknown"),
+          toolCallId: typeof event["toolCallId"] === "string" ? String(event["toolCallId"]) : undefined,
           isError: Boolean(event["isError"]),
+          toolResult: event["result"],
         });
         break;
 
