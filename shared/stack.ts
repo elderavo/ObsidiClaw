@@ -21,6 +21,8 @@ import { SubagentRunner } from "./agents/subagent-runner.js";
 import { resolvePaths, type ObsidiClawPaths } from "./config.js";
 import type { RunEvent } from "../orchestrator/types.js";
 import { WindowsTaskSchedulerBackend } from "./os/scheduling-windows.js";
+import { startMdDbLintWatcher } from "./watchers/md-db-lint-watcher.js";
+import { updateDirectory } from "./update-directory-tree.js";
 
 // ---------------------------------------------------------------------------
 // Options
@@ -108,6 +110,9 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     scheduler.register(createNormalizeJob(paths.mdDbPath));
   }
 
+  // ── md_db watcher (lint on change) ───────────────────────────────────────
+  let mdDbWatcher: ReturnType<typeof startMdDbLintWatcher> | undefined;
+
   // ── SubagentRunner ──────────────────────────────────────────────────────
   const runner = new SubagentRunner({
     dbPath: paths.dbPath,
@@ -118,17 +123,28 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
   async function initialize(): Promise<void> {
+    try {
+      updateDirectory(paths.rootDir, paths.mdDbPath);
+    } catch (err) {
+      console.warn("[obsidi-claw] directory tree refresh failed", err);
+    }
+
     await engine.initialize();
     if (scheduler) {
       void scheduler.start();
     }
+    mdDbWatcher = startMdDbLintWatcher(paths.mdDbPath);
   }
 
   async function shutdown(): Promise<void> {
+    if (mdDbWatcher) {
+      await mdDbWatcher.close();
+      mdDbWatcher = undefined;
+    }
     if (scheduler) {
       await scheduler.stop();
     }
-    engine.close();
+    await engine.close();
     logger.close();
   }
 
