@@ -11,7 +11,7 @@
  * New columns added to the `trace` table (via migration):
  *   event_id        TEXT     — UUID for this event (allows parent_event_id references)
  *   seq             INTEGER  — monotonic counter per run_id
- *   source          TEXT     — emitting module (from shared/trace-modules.ts)
+ *   source          TEXT     — emitting module (from logger/trace-modules.ts)
  *   target          TEXT     — receiving module (nullable)
  *   action          TEXT     — operation name (e.g., "retrieve_context", "create_run")
  *   status          TEXT     — lifecycle phase ("started" | "returned" | "failed" | "emitted")
@@ -23,7 +23,7 @@
 
 import { randomUUID } from "crypto";
 import type Database from "better-sqlite3";
-import type { TraceModuleOrTool } from "../shared/trace-modules.js";
+import type { TraceModuleOrTool } from "./trace-modules.js";
 
 // ---------------------------------------------------------------------------
 // Types

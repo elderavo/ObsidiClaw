@@ -2,8 +2,8 @@ import { basename, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { lstatSync } from "fs";
 
-import { resolvePaths } from "./config.js";
-import { fileExists, readText, writeText, listDir } from "./os/fs.js";
+import { resolvePaths } from "../shared/config.js";
+import { fileExists, readText, writeText, listDir } from "../shared/os/fs.js";
 
 const START_MARKER = "<!-- obsidi-claw: directory tree (auto-generated) -->";
 const END_MARKER = "<!-- /obsidi-claw: directory tree -->";

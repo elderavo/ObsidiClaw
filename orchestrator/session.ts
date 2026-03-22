@@ -17,14 +17,20 @@
  *     → agent_done → prompt_complete
  */
 
-import type { AgentSession } from "@mariozechner/pi-coding-agent";
+import {
+  type AgentSession,
+  createAgentSession,
+  DefaultResourceLoader,
+  SessionManager,
+  type ExtensionFactory,
+} from "@mariozechner/pi-coding-agent";
 
 import { RunLogger } from "../logger/index.js";
 import type { ContextEngine } from "../context_engine/index.js";
 import { createContextEngineMcpServer } from "../context_engine/index.js";
 import { createObsidiClawExtension } from "../extension/factory.js";
-import { createPiAgentSession } from "../shared/pi-session-factory.js";
 import { resolvePaths } from "../shared/config.js";
+import { getOllamaConfig } from "../shared/config.js";
 import { extractMessageText } from "../shared/text-utils.js";
 import { mapPiEventToRunEvent } from "../shared/pi-event-mapper.js";
 import { runSessionReview, type ReviewTrigger } from "../insight_engine/session_review.js";
@@ -292,11 +298,42 @@ export class OrchestratorSession {
         })]
       : [];
 
-    return createPiAgentSession({
-      ollama: this.config.model ? { model: this.config.model } : undefined,
-      extensionFactories: contextExtensions,
-      systemPrompt: this.config.systemPrompt,
+    const cfg = getOllamaConfig(this.config.model ? { model: this.config.model } : undefined);
+    const extensionFactories: ExtensionFactory[] = [
+      (pi) => {
+        pi.registerProvider("ollama", {
+          baseUrl: cfg.baseUrl,
+          apiKey: "ollama",
+          api: "openai-completions",
+          models: [{
+            id: cfg.model,
+            name: `Ollama / ${cfg.model}`,
+            reasoning: false,
+            input: ["text"],
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow: cfg.contextWindow,
+            maxTokens: cfg.maxTokens,
+            compat: { supportsDeveloperRole: false, maxTokensField: "max_tokens" },
+          }],
+        });
+      },
+      ...contextExtensions,
+    ];
+
+    const loader = new DefaultResourceLoader({
+      extensionFactories,
+      ...(this.config.systemPrompt
+        ? { systemPromptOverride: () => this.config.systemPrompt! }
+        : {}),
     });
+    await loader.reload();
+
+    const { session } = await createAgentSession({
+      resourceLoader: loader,
+      sessionManager: SessionManager.inMemory(),
+    });
+    await session.bindExtensions({});
+    return session;
   }
 }
 

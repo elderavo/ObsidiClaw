@@ -155,7 +155,7 @@ Over time, this should evolve into an accurate, high‑signal description of how
 
 <!-- obsidi-claw: directory tree (auto-generated) -->
 
-## Project directory tree (auto-generated 2026-03-22 08:56:37.981 UTC)
+## Project directory tree (auto-generated 2026-03-22 09:22:40.467 UTC)
 
 Root: C:\Users\Alex\Desktop\Projects\Coding\ObsidiClaw
 
@@ -178,6 +178,9 @@ ObsidiClaw/
     - store/
   - extension/
   - insight_engine/
+  - jobs/
+    - scheduled/
+    - watchers/
   - knowledge_graph/
     - __pycache__/
   - logger/
@@ -190,6 +193,9 @@ ObsidiClaw/
         - review/
       - extension/
       - insight_engine/
+      - jobs/
+        - scheduled/
+        - watchers/
       - knowledge_graph/
       - logger/
       - orchestrator/
@@ -205,7 +211,6 @@ ObsidiClaw/
       - context_engine/
   - orchestrator/
   - scheduler/
-    - jobs/
   - scripts/
   - shared/
     - agents/
@@ -213,7 +218,6 @@ ObsidiClaw/
     - markdown/
     - md_templates/
     - os/
-    - watchers/
 ```
 
 <!-- /obsidi-claw: directory tree -->

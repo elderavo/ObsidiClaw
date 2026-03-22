@@ -70,3 +70,21 @@ Pending proposals auto-derived from sessions. Review and merge manually.
 ### Signals
 - **[strong imperative]** "use the context_retriever"
   → The user wants to use the context_retriever component.
+
+## Session ea9aec9e (2026-03-22)
+
+### Signals
+- **[moderate preference]** "Here's what I did and verified: ..."
+  → The agent should provide detailed verification steps after making changes, including testing both Python and Node components.
+- **[moderate correction]** "Root cause was the missing Python dependency; installing `pip install llama_index` fixed the crash."
+  → The agent should explicitly identify root causes of issues, especially when they involve missing dependencies.
+- **[moderate preference]** "You should be able to start `pi` now without the 'stdin not writable' error."
+  → The agent should focus on resolving specific errors mentioned by the user, rather than general troubleshooting.
+- **[weak preference]** "If you want to rebuild the TS -> dist artifacts, run `npm run build`, but the current [...truncated]"
+  → The agent should provide optional steps for rebuilding artifacts, while emphasizing that they are not required.
+
+### Synthesized Preferences
+- **[moderate]** Provide detailed verification steps after making changes, including testing both Python and Node components.
+  - Evidence: User requested verification of changes and the agent provided a thorough breakdown with test results.
+- **[moderate]** Focus on resolving specific errors mentioned by the user, rather than general troubleshooting.
+  - Evidence: The agent specifically addressed the 'stdin not writable' error that was mentioned by the user.

@@ -25,7 +25,7 @@ import { startMdDbLintWatcher } from "../jobs/watchers/md-db-lint-watcher.js";
 import { startMirrorWatcher } from "../jobs/watchers/mirror-watcher.js";
 import { runMirrorTs } from "../scripts/mirror-codebase.js";
 import { runMirrorPy } from "../scripts/mirror-codebase-py.js";
-import { updateDirectory } from "./update-directory-tree.js";
+import { updateDirectory } from "../scripts/update-directory-tree.js";
 
 // ---------------------------------------------------------------------------
 // Options
