@@ -414,9 +414,11 @@ export class ContextEngine {
     if (this.subprocess && !this.subprocess.killed) return;
 
     const pythonExe = this.resolvePythonPath();
-    // Run from repo root so `python -m knowledge_graph` can import the package
-    // (the compiled JS lives in dist/, knowledge_graph/ lives at repo root).
-    const cwd = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+    // Run from repo root so `python -m knowledge_graph` can import the package.
+    // Derived from mdDbPath (always at <repoRoot>/md_db) — immune to whether
+    // this file is loaded from source (context_engine/) or dist (dist/context_engine/).
+    // The old `import.meta.url` approach miscounted `..` when run via tsx.
+    const cwd = dirname(this.config.mdDbPath);
     this.debug({ type: "ce_subprocess_log", timestamp: Date.now(), message: `Spawning python in cwd=${cwd}` });
 
     const proc = spawn(pythonExe, ["-m", "knowledge_graph"], {
@@ -430,15 +432,20 @@ export class ContextEngine {
 
     this.subprocess = proc;
 
+    // Collect stderr lines — shown verbatim if the subprocess crashes on startup
+    const stderrLines: string[] = [];
+
     // Read stdout line-by-line for JSON-RPC responses
     this.rl = createInterface({ input: proc.stdout! });
     this.rl.on("line", (line: string) => {
       this.handleResponse(line);
     });
 
-    // Relay stderr (Python logging) through debug callback only
+    // Collect stderr; relay through debug callback
     const stderrRl = createInterface({ input: proc.stderr! });
     stderrRl.on("line", (line: string) => {
+      stderrLines.push(line);
+      if (stderrLines.length > 50) stderrLines.shift(); // keep last 50 lines
       this.debug({ type: "ce_subprocess_log", timestamp: Date.now(), message: line });
     });
 
@@ -449,10 +456,14 @@ export class ContextEngine {
       this.rl = null;
       this.initialized = false;
 
+      const stderrSummary = stderrLines.length > 0
+        ? `\nPython stderr:\n${stderrLines.join("\n")}`
+        : "";
+
       // Reject all pending RPCs
       for (const [id, pending] of this.pendingRpc) {
         clearTimeout(pending.timer);
-        pending.reject(new Error(`Python subprocess exited (code=${code})`));
+        pending.reject(new Error(`Python subprocess exited (code=${code})${stderrSummary}`));
       }
       this.pendingRpc.clear();
 
@@ -461,8 +472,31 @@ export class ContextEngine {
       this.subprocessExitPromise = null;
     });
 
-    // Give the subprocess a moment to start
-    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    // Wait up to 2s for the subprocess to either start or fail.
+    // Check every 50ms; bail early if it exits.
+    const STARTUP_TIMEOUT_MS = 2000;
+    const started = await new Promise<boolean>((resolve) => {
+      let elapsed = 0;
+      const poll = setInterval(() => {
+        elapsed += 50;
+        // Process exited — it crashed
+        if (!this.subprocess) { clearInterval(poll); resolve(false); return; }
+        // stdin writable — ready to receive RPCs
+        if (this.subprocess.stdin?.writable) { clearInterval(poll); resolve(true); return; }
+        if (elapsed >= STARTUP_TIMEOUT_MS) { clearInterval(poll); resolve(false); }
+      }, 50);
+    });
+
+    if (!started) {
+      const stderrSummary = stderrLines.length > 0
+        ? `\nPython stderr:\n${stderrLines.join("\n")}`
+        : "\n(no stderr captured — process may have exited before writing anything)";
+      throw new Error(
+        `Python knowledge_graph subprocess failed to start (exe: ${pythonExe}).` +
+        `\nVerify the conda env exists: conda env create -f knowledge_graph/environment.yml` +
+        stderrSummary,
+      );
+    }
   }
 
   private async waitForSubprocessExit(timeoutMs = 2000): Promise<void> {
@@ -534,7 +568,10 @@ export class ContextEngine {
     await this.ensureSubprocess();
 
     if (!this.subprocess?.stdin?.writable) {
-      throw new Error("Python subprocess stdin not writable");
+      throw new Error(
+        "Python subprocess stdin not writable — subprocess may have crashed. " +
+        "Check ce_subprocess_log debug events or run: conda run -n obsidiclaw python -m knowledge_graph"
+      );
     }
 
     const id = randomUUID();
