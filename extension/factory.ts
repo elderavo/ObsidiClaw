@@ -196,7 +196,7 @@ export function createObsidiClawExtension(
         try {
           const tasks = await stack.persistentBackend.list();
           const specs = await (async () => {
-            try { return (await import("../scheduler/persistent-tasks.js")).listTaskSpecs(paths.rootDir); } catch { return []; }
+            try { return (await import("../jobs/persistent-tasks.js")).listTaskSpecs(paths.rootDir); } catch { return []; }
           })();
           const specNames = specs.map((s: any) => s.name);
           const lines = ["[scheduler] persistent tasks:", ...specNames.map((n: string) => ` - ${n}`)];

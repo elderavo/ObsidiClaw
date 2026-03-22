@@ -149,6 +149,22 @@ Options:
 // File discovery
 // ---------------------------------------------------------------------------
 
+/**
+ * Derive the mirror file stem for a source path.
+ * For `index.ts` files the stem would collide across directories, so we use
+ * `{parentDirName}-index` instead (e.g. `shared/markdown/index.ts` → stem
+ * `markdown-index`, mirror file `markdown-index.md`).
+ */
+function mirrorStem(relPath: string): string {
+  const stem = path.posix.basename(relPath).replace(/\.ts$/, "");
+  if (stem === "index") {
+    const parentDir = path.posix.dirname(relPath);
+    const parent = parentDir === "." ? "" : path.posix.basename(parentDir);
+    return parent ? `${parent}-index` : "root-index";
+  }
+  return stem;
+}
+
 function shouldOmit(relPath: string, patterns: string[]): boolean {
   const parts = relPath.split("/");
   for (const pattern of patterns) {
@@ -186,7 +202,7 @@ function collectFiles(
       if (entry.isDirectory()) {
         walk(absPath);
       } else if (entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts")) {
-        const mirrorRel = relPath.replace(/\.ts$/, ".md");
+        const mirrorRel = path.posix.join(path.posix.dirname(relPath), mirrorStem(relPath) + ".md");
         const mirrorPath = path.join(mirrorDir, mirrorRel);
         results.push({ absolutePath: absPath, relativePath: relPath, mirrorPath });
       }
@@ -484,9 +500,16 @@ function buildCallGraph(files: FileData[]): void {
 
 const MIRROR_PREFIX = "code";
 
-/** Convert a .ts relative path to a wikilink target, e.g. "shared/stack.ts" → "code/shared/stack" */
+/**
+ * Convert a .ts relative path to a wikilink target.
+ * Uses mirrorStem() so index files map to their renamed stems:
+ *   "shared/stack.ts"          → "code/shared/stack"
+ *   "shared/markdown/index.ts" → "code/shared/markdown/markdown-index"
+ */
 function toWikiLink(relPath: string): string {
-  return `${MIRROR_PREFIX}/${relPath.replace(/\.ts$/, "")}`;
+  const dir = path.posix.dirname(relPath);
+  const stem = mirrorStem(relPath);
+  return dir === "." ? `${MIRROR_PREFIX}/${stem}` : `${MIRROR_PREFIX}/${dir}/${stem}`;
 }
 
 /**
@@ -530,7 +553,9 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string): 
   );
 
   // ── Title ────────────────────────────────────────────────────────────────
-  lines.push(`# ${filename}`, "");
+  // For index files the filename alone is meaningless — use the full path as title
+  const title = filename === "index.ts" ? file.relativePath : filename;
+  lines.push(`# ${title}`, "");
   lines.push(`> \`${file.relativePath}\``, "");
 
   // ── Exports ──────────────────────────────────────────────────────────────
@@ -653,74 +678,67 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string): 
 }
 
 // ---------------------------------------------------------------------------
-// Main
+// Public API (used by mirror-watcher and CLI)
 // ---------------------------------------------------------------------------
 
-async function main() {
-  const args = parseArgs();
+export interface MirrorTsOptions {
+  scanDir: string;
+  mirrorDir: string;
+  omitPatterns: string[];
+  force: boolean;
+}
+
+export async function runMirrorTs(
+  opts: MirrorTsOptions,
+): Promise<{ written: number; skipped: number }> {
   const today = new Date().toISOString().slice(0, 10);
+  const discovered = collectFiles(opts.scanDir, opts.mirrorDir, opts.omitPatterns);
 
-  console.log(`Scan dir  : ${args.scanDir}`);
-  console.log(`Mirror dir: ${args.mirrorDir}`);
-  console.log(`Omitting  : ${args.omitPatterns.join(", ")}`);
-  console.log(`Force     : ${args.force}`);
-  console.log("");
-
-  // Discover files
-  const discovered = collectFiles(args.scanDir, args.mirrorDir, args.omitPatterns);
-  console.log(`Found ${discovered.length} TypeScript files`);
-
-  // Pass 1: extract per-file info
-  process.stdout.write("Pass 1: parsing AST...");
   const files: FileData[] = [];
   let parseErrors = 0;
   for (const { absolutePath, relativePath, mirrorPath } of discovered) {
     try {
       files.push(extractFileData(absolutePath, relativePath, mirrorPath));
     } catch (err) {
-      console.warn(`\n  WARN: failed to parse ${relativePath}: ${err}`);
+      console.warn(`[mirror-ts] WARN: failed to parse ${relativePath}: ${err}`);
       parseErrors++;
     }
   }
-  console.log(` done (${files.length} ok, ${parseErrors} errors)`);
 
-  // Pass 2: build call graph
-  process.stdout.write("Pass 2: building call graph...");
   buildCallGraph(files);
-  const totalCalls = files.reduce((n, f) => n + f.inRepoCalls.length, 0);
-  const totalCallIns = files.reduce((n, f) => n + f.callIns.length, 0);
-  console.log(` done (${totalCalls} call edges, ${totalCallIns} call-in edges)`);
 
-  // Pass 3: write markdown
-  console.log("Pass 3: writing notes...");
   let written = 0;
   let skipped = 0;
-
   for (const file of files) {
-    if (!args.force) {
+    if (!opts.force) {
       try {
         const srcStat = fs.statSync(file.absolutePath);
         const mirrorStat = fs.statSync(file.mirrorPath);
-        if (mirrorStat.mtimeMs >= srcStat.mtimeMs) {
-          skipped++;
-          continue;
-        }
-      } catch {
-        // Mirror doesn't exist yet or stat failed — proceed
-      }
+        if (mirrorStat.mtimeMs >= srcStat.mtimeMs) { skipped++; continue; }
+      } catch { /* mirror doesn't exist yet — proceed */ }
     }
-
     const markdown = generateMarkdown(file, files, today);
     fs.mkdirSync(path.dirname(file.mirrorPath), { recursive: true });
     fs.writeFileSync(file.mirrorPath, markdown, "utf8");
     written++;
-    if (process.stdout.isTTY) {
-      process.stdout.write(`  ${file.relativePath}\n`);
-    }
   }
 
-  console.log(`\nDone. Written: ${written}, Skipped (up-to-date): ${skipped}`);
-  if (parseErrors > 0) console.warn(`Warnings: ${parseErrors} files failed to parse`);
+  if (parseErrors > 0) console.warn(`[mirror-ts] ${parseErrors} files failed to parse`);
+  return { written, skipped };
+}
+
+// ---------------------------------------------------------------------------
+// CLI entry point
+// ---------------------------------------------------------------------------
+
+async function main() {
+  const args = parseArgs();
+  console.log(`Scan dir  : ${args.scanDir}`);
+  console.log(`Mirror dir: ${args.mirrorDir}`);
+  console.log(`Omitting  : ${args.omitPatterns.join(", ")}`);
+  console.log(`Force     : ${args.force}\n`);
+  const { written, skipped } = await runMirrorTs(args);
+  console.log(`Done. Written: ${written}, Skipped (up-to-date): ${skipped}`);
 }
 
 main().catch((err) => {

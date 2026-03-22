@@ -19,7 +19,7 @@ import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
 import { getSharedScheduler, getSharedBackend } from "../../extension/factory.js";
 import { resolvePaths } from "../../shared/config.js";
 import { getExecPath } from "../../shared/os/process.js";
-import { writeTaskSpec, listTaskSpecs } from "../../scheduler/persistent-tasks.js";
+import { writeTaskSpec, listTaskSpecs } from "../../jobs/persistent-tasks.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const rootDir = join(__dirname, "../..");

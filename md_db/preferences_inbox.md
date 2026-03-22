@@ -57,3 +57,16 @@ Pending proposals auto-derived from sessions. Review and merge manually.
 ### Signals
 - **[moderate imperative]** "Did you mean '/quit' or something else?"
   → User wants clarification on command, prefers explicit confirmation of intent before proceeding.
+
+## Session cd525c6f (2026-03-22)
+
+### Signals
+- **[moderate imperative]** "please run the reindex job"
+  → User wants the agent to execute specific jobs when requested
+
+# TODO - agent is hallucinating and can't tell difference between user and llm, mis-identifying basic convo as preferences. 
+## Session 97e83ec6 (2026-03-22)
+
+### Signals
+- **[strong imperative]** "use the context_retriever"
+  → The user wants to use the context_retriever component.

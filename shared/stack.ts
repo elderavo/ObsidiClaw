@@ -16,12 +16,12 @@ import { randomUUID } from "crypto";
 
 import { RunLogger } from "../logger/run-logger.js";
 import { ContextEngine } from "../context_engine/context-engine.js";
-import { JobScheduler, createReindexJob, createHealthCheckJob, createNormalizeJob, createMergeInboxJob } from "../scheduler/index.js";
+import { JobScheduler, createReindexJob, createHealthCheckJob, createNormalizeJob, createMergeInboxJob } from "../jobs/index.js";
 import { SubagentRunner } from "./agents/subagent-runner.js";
 import { resolvePaths, type ObsidiClawPaths } from "./config.js";
 import type { RunEvent } from "../orchestrator/types.js";
 import { WindowsTaskSchedulerBackend } from "./os/scheduling-windows.js";
-import { startMdDbLintWatcher } from "./watchers/md-db-lint-watcher.js";
+import { startMdDbLintWatcher } from "../jobs/watchers/md-db-lint-watcher.js";
 import { updateDirectory } from "./update-directory-tree.js";
 
 // ---------------------------------------------------------------------------

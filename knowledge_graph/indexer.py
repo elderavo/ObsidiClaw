@@ -141,6 +141,13 @@ def _relative_path(meta: dict, md_db_path: str) -> str | None:
             candidate = val
             break
 
+    # Fallback: ObsidianReader may provide folder_path + file_name
+    if not candidate:
+        folder = meta.get("folder_path")
+        fname = meta.get("file_name")
+        if isinstance(folder, str) and folder.strip() and isinstance(fname, str) and fname.strip():
+            candidate = os.path.join(folder, fname)
+
     if not candidate:
         return None
 

@@ -3,7 +3,7 @@ id: 650cb65c-8d47-42ac-a2f7-a2dc3637008e
 uuid: 650cb65c-8d47-42ac-a2f7-a2dc3637008e
 type: rule
 created: 2026-03-20T19:11:47.553Z
-updated: 2026-03-22T06:55:59.262Z
+updated: 2026-03-22T08:29:47.144Z
 tags:
 md_db: true
 ---
@@ -155,7 +155,7 @@ Over time, this should evolve into an accurate, high‑signal description of how
 
 <!-- obsidi-claw: directory tree (auto-generated) -->
 
-## Project directory tree (auto-generated 2026-03-22 07:24:52.764 UTC)
+## Project directory tree (auto-generated 2026-03-22 08:56:37.981 UTC)
 
 Root: C:\Users\Alex\Desktop\Projects\Coding\ObsidiClaw
 
@@ -190,6 +190,7 @@ ObsidiClaw/
         - review/
       - extension/
       - insight_engine/
+      - knowledge_graph/
       - logger/
       - orchestrator/
       - scheduler/
@@ -203,7 +204,6 @@ ObsidiClaw/
     - concepts/
       - context_engine/
   - orchestrator/
-  - pi_agent/
   - scheduler/
     - jobs/
   - scripts/
@@ -214,7 +214,6 @@ ObsidiClaw/
     - md_templates/
     - os/
     - watchers/
-  - workspace/
 ```
 
 <!-- /obsidi-claw: directory tree -->

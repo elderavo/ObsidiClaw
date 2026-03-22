@@ -50,7 +50,8 @@
       "Bash(head -20 shared/watchers/*.ts)",
       "Bash(git ls-files:*)",
       "Bash(xargs wc:*)",
-      "Bash(grep -n \"setInterval\\\\|executeJob\\\\|runOnStart\\\\|scriptPath\" scheduler/scheduler.ts scheduler/types.ts scheduler/jobs/*.ts)"
+      "Bash(grep -n \"setInterval\\\\|executeJob\\\\|runOnStart\\\\|scriptPath\" scheduler/scheduler.ts scheduler/types.ts scheduler/jobs/*.ts)",
+      "Bash(grep -r .pi/extensions C:UsersAlexDesktopProjectsCodingObsidiClaw --include=*.ts --include=*.js --include=*.md)"
     ]
   }
 }

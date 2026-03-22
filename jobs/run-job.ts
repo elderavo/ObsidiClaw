@@ -2,19 +2,19 @@
  * OS job runner — entry point for all scheduled jobs.
  *
  * Called by Windows Task Scheduler as:
- *   node dist/scheduler/run-job.js <job-name>
+ *   node dist/jobs/run-job.js <job-name>
  *
  * Working directory is set to project root by the schtasks command wrapper.
- * Job logic lives in scheduler/jobs/<name>.ts — this file is a thin dispatcher.
+ * Job logic lives in jobs/scheduled/<name>.ts — this file is a thin dispatcher.
  */
 
 import { randomUUID } from "crypto";
 import { resolvePaths, type ObsidiClawPaths } from "../shared/config.js";
 import { RunLogger } from "../logger/run-logger.js";
-import * as reindex from "./jobs/reindex.js";
-import * as normalize from "./jobs/normalize.js";
-import * as healthCheck from "./jobs/health-check.js";
-import * as mergeInbox from "./jobs/merge-inbox.js";
+import * as reindex from "./scheduled/reindex.js";
+import * as normalize from "./scheduled/normalize.js";
+import * as healthCheck from "./scheduled/health-check.js";
+import * as mergeInbox from "./scheduled/merge-inbox.js";
 
 type JobModule = { run: (paths: ObsidiClawPaths) => Promise<void> };
 

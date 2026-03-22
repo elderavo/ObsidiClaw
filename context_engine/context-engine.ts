@@ -79,6 +79,8 @@ export class ContextEngine {
   private readonly pendingRpc = new Map<string, RpcPending>();
   private initialized = false;
   private pythonPath: string | null = null;
+  private startupError: Error | null = null;
+  private recentSubprocessStderr: string[] = [];
 
   /** In-memory note cache populated on init/reindex. */
   private noteCache = new Map<string, string>();
@@ -414,7 +416,10 @@ export class ContextEngine {
     if (this.subprocess && !this.subprocess.killed) return;
 
     const pythonExe = this.resolvePythonPath();
-    const cwd = join(dirname(fileURLToPath(import.meta.url)), "..");
+    // Run from repo root so `python -m knowledge_graph` can import the package
+    // (the compiled JS lives in dist/, knowledge_graph/ lives at repo root).
+    const cwd = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+    this.debug({ type: "ce_subprocess_log", timestamp: Date.now(), message: `Spawning python in cwd=${cwd}` });
 
     const proc = spawn(pythonExe, ["-m", "knowledge_graph"], {
       stdio: ["pipe", "pipe", "pipe"],

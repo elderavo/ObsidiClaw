@@ -1,8 +1,8 @@
 import chokidar, { type FSWatcher } from "chokidar";
 import { extname, join, relative } from "path";
 
-import { lintFile } from "../markdown/markdown-linter.js";
-import { listDir } from "../os/fs.js";
+import { lintFile } from "../../shared/markdown/markdown-linter.js";
+import { listDir } from "../../shared/os/fs.js";
 
 export interface MdDbLintWatcherOptions {
   /** Debounce per-path to avoid self-trigger loops (ms). Default: 2500 */
