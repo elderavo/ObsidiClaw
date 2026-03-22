@@ -117,6 +117,20 @@ export class RunLogger {
 
       CREATE INDEX IF NOT EXISTS trace_run_id        ON trace(run_id);
       CREATE INDEX IF NOT EXISTS synthesis_session   ON synthesis_metrics(session_id);
+
+      CREATE TABLE IF NOT EXISTS context_ratings (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id   TEXT    NOT NULL,
+        run_id       TEXT,
+        timestamp    INTEGER NOT NULL,
+        query        TEXT    NOT NULL,
+        score        INTEGER NOT NULL,
+        missing      TEXT    NOT NULL DEFAULT '',
+        helpful      TEXT    NOT NULL DEFAULT ''
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_context_ratings_session ON context_ratings(session_id);
+      CREATE INDEX IF NOT EXISTS idx_context_ratings_score   ON context_ratings(score);
     `);
 
     this._ensureRunSchema();
@@ -276,6 +290,16 @@ export class RunLogger {
           "retrieve_context error",
           errorPayload,
         );
+    }
+
+    // ── Context self-grading ─────────────────────────────────────────────
+    if (event.type === "context_rated") {
+      this.db
+        .prepare(
+          `INSERT INTO context_ratings (session_id, run_id, timestamp, query, score, missing, helpful)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(sessionId, runId, event.timestamp, event.query, event.score, event.missing, event.helpful);
     }
 
     this._insertTrace(runId, sessionId, event.type, event.timestamp, event);

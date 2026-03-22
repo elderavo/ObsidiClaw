@@ -170,6 +170,18 @@ export function createObsidiClawExtension(
             estimatedTokens: pkg.contextPackage.estimatedTokens,
           } as RunEvent);
         },
+        onContextRated: (rating) => {
+          stack!.logger.logEvent({
+            type: "context_rated",
+            sessionId,
+            runId: currentRunId,
+            timestamp: Date.now(),
+            query: rating.query,
+            score: rating.score,
+            missing: rating.missing,
+            helpful: rating.helpful,
+          } as RunEvent);
+        },
       });
     }
 
@@ -236,6 +248,35 @@ export function createObsidiClawExtension(
         return {
           content: [{ type: "text" as const, text }],
           details: { query },
+        };
+      },
+    });
+
+    // ── rate_context tool: model self-grades retrieved context quality ──────
+    pi.registerTool({
+      name: "rate_context",
+      label: "Rate Retrieved Context",
+      description:
+        "Rate how well the last retrieve_context result answered your query. " +
+        "Call this AFTER you've used the retrieved context to answer or act. " +
+        "Your rating helps the knowledge base improve over time.",
+      promptSnippet: "rate_context(query, score, missing, helpful) — rate last retrieval quality",
+      parameters: Type.Object({
+        query: Type.String({ description: "The original query you searched for." }),
+        score: Type.Number({
+          description: "1=irrelevant, 2=mostly unhelpful, 3=partial, 4=good, 5=exactly right.",
+          minimum: 1,
+          maximum: 5,
+        }),
+        missing: Type.String({ description: "What was missing? Empty string if nothing." }),
+        helpful: Type.String({ description: "Which notes/sections helped most? Empty string if none." }),
+      }),
+      execute: async (_toolCallId, args, _signal, _onUpdate, _ctx) => {
+        const result = await client.callTool({ name: "rate_context", arguments: args });
+        const text = extractMcpText(result);
+        return {
+          content: [{ type: "text" as const, text }],
+          details: { query: args.query, score: args.score },
         };
       },
     });

@@ -168,5 +168,8 @@ export type RunEvent =
   | { type: "review_proposal_applied"; sessionId: SessionId; runId: RunId; timestamp: number; notesWritten: number; prefsUpdated: number }
   | { type: "review_failed";           sessionId: SessionId; runId: RunId; timestamp: number; error: string; stage: string }
 
+  // ── Context self-grading (model rates its own retrieved context) ────────
+  | { type: "context_rated"; sessionId: SessionId; runId: RunId; timestamp: number; query: string; score: number; missing: string; helpful: string }
+
   // ── Diagnostic (replaces console.log/warn/error in structured modules) ──
   | { type: "diagnostic"; sessionId: SessionId; runId: RunId; timestamp: number; module: string; level: "info" | "warn" | "error"; message: string };

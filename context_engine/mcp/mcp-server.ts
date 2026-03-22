@@ -22,11 +22,13 @@ import { resolvePaths } from "../../shared/config.js";
 
 export type OnContextBuilt = (pkg: ContextPackage) => void;
 export type OnSubagentPrepared = (pkg: SubagentPackage) => void;
+export type OnContextRated = (rating: { query: string; score: number; missing: string; helpful: string }) => void;
 
 export interface McpServerOptions {
   engine: ContextEngine;
   onContextBuilt?: OnContextBuilt;
   onSubagentPrepared?: OnSubagentPrepared;
+  onContextRated?: OnContextRated;
 }
 
 /**
@@ -46,7 +48,7 @@ export function createContextEngineMcpServer(
 }
 
 function _createMcpServer(opts: McpServerOptions): McpServer {
-  const { engine, onContextBuilt, onSubagentPrepared } = opts;
+  const { engine, onContextBuilt, onSubagentPrepared, onContextRated } = opts;
   const server = new McpServer({ name: "obsidi-claw-context", version: "1.0.0" });
 
   // ── retrieve_context ──────────────────────────────────────────────────────
@@ -71,10 +73,50 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
       const pkg = await engine.build(query);
       onContextBuilt?.(pkg);
       const budget = max_chars ?? DEFAULT_MAX_CHARS;
-      const text = pkg.formattedContext.length <= budget
+      let text = pkg.formattedContext.length <= budget
         ? pkg.formattedContext
         : pkg.formattedContext.slice(0, budget) + "\n\n_(context truncated to fit budget)_\n<!-- End ObsidiClaw Context -->";
+      text += "\n\n<!-- After using this context, call rate_context to report how well it answered your query. -->";
       return { content: [{ type: "text" as const, text }] };
+    },
+  );
+
+  // ── rate_context ─────────────────────────────────────────────────────────
+
+  server.registerTool(
+    "rate_context",
+    {
+      description:
+        "Rate how well the last retrieve_context result answered your query. " +
+        "Call this AFTER you've used the retrieved context to answer or act. " +
+        "Your rating helps the knowledge base improve over time.",
+      inputSchema: {
+        query: z.string().describe("The original query you searched for."),
+        score: z
+          .number()
+          .int()
+          .min(1)
+          .max(5)
+          .describe(
+            "1 = completely irrelevant, 2 = mostly unhelpful, 3 = partially useful, " +
+            "4 = good coverage, 5 = exactly what was needed."
+          ),
+        missing: z
+          .string()
+          .describe("What information was missing or would have been more useful? Empty string if nothing."),
+        helpful: z
+          .string()
+          .describe("Which notes or sections were most useful? Empty string if none."),
+      },
+    },
+    async ({ query, score, missing, helpful }) => {
+      onContextRated?.({ query, score, missing, helpful });
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Rating recorded: ${score}/5. Thank you — this helps the knowledge base improve.`,
+        }],
+      };
     },
   );
 

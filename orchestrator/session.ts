@@ -294,6 +294,16 @@ export class OrchestratorSession {
               expandedCount: pkg.contextPackage.expandedNoteIds?.length ?? 0,
               estimatedTokens: pkg.contextPackage.estimatedTokens,
             }),
+            onContextRated: (rating) => this.emit({
+              type: "context_rated",
+              sessionId: this.sessionId,
+              runId: this.currentRunId,
+              timestamp: Date.now(),
+              query: rating.query,
+              score: rating.score,
+              missing: rating.missing,
+              helpful: rating.helpful,
+            }),
           }),
         })]
       : [];
