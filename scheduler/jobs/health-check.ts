@@ -2,58 +2,19 @@
  * Built-in health check job — verifies Ollama reachability and SQLite connectivity.
  */
 
-import axios from "axios";
-import { getOllamaConfig } from "../../shared/config.js";
-import type { ContextEngine } from "../../context_engine/context-engine.js";
 import type { JobDefinition } from "../types.js";
 
 /**
- * Create a health check job that verifies system dependencies.
+ * Create a health check job definition.
  *
- * @param engine  Initialized ContextEngine (used to check graph store)
- * @param intervalMinutes  How often to check (default: 15)
+ * @param intervalMinutes  How often to check (default: 1440 = once per day)
  */
-export function createHealthCheckJob(
-  engine: ContextEngine,
-  intervalMinutes = 15,
-): JobDefinition {
+export function createHealthCheckJob(intervalMinutes = 24 * 60): JobDefinition {
   return {
     name: "health-check",
-    description: "Check Ollama reachability and SQLite graph store health",
+    description: "Verify Ollama reachability and SQLite connectivity",
     schedule: { minutes: intervalMinutes },
     skipIfRunning: true,
     timeoutMs: 30_000,
-
-    async execute(ctx) {
-      if (ctx.signal.aborted) return;
-
-      const issues: string[] = [];
-
-      // Check Ollama reachability
-      const ollamaConfig = getOllamaConfig();
-      const ollamaHost = ollamaConfig.baseUrl.replace(/\/v1\/?$/, "");
-      try {
-        await axios.get(`${ollamaHost}/api/tags`, {
-          timeout: 10_000,
-          signal: ctx.signal,
-        });
-      } catch (err) {
-        issues.push(`Ollama unreachable at ${ollamaHost}: ${err instanceof Error ? err.message : String(err)}`);
-      }
-
-      // Check knowledge graph subprocess
-      try {
-        const stats = await engine.getGraphStats();
-        if (!stats.indexLoaded) {
-          issues.push("Knowledge graph index not loaded");
-        }
-      } catch (err) {
-        issues.push(`Knowledge graph check failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-
-      if (issues.length > 0) {
-        throw new Error(`Health check failed:\n${issues.join("\n")}`);
-      }
-    },
   };
 }

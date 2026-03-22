@@ -249,14 +249,12 @@ function registerSchedulerTools(
     async () => {
       const lines = ["# Scheduled Jobs", ""];
 
-      // In-process jobs (built-ins)
+      // OS-registered jobs (built-ins)
       if (scheduler) {
         const states = scheduler.getStates();
         for (const s of states) {
           const lastRun = s.lastRunAt ? new Date(s.lastRunAt).toISOString() : "never";
-          const duration = s.lastDurationMs != null ? `${s.lastDurationMs}ms` : "-";
-          const error = s.lastError ? ` | error: ${s.lastError}` : "";
-          lines.push(`- **${s.name}** | ${s.status} | runs: ${s.runCount} | last: ${lastRun} (${duration})${error}`);
+          lines.push(`- **${s.name}** | last run: ${lastRun} | status: ${s.status}${s.lastError ? ` | error: ${s.lastError}` : ""}`);
         }
       }
 
@@ -322,12 +320,10 @@ function registerSchedulerTools(
     },
     async ({ job_name, enabled }) => {
       try {
-        if (scheduler && scheduler.getStates().some((s) => s.name === job_name)) {
-          scheduler.setEnabled(job_name, enabled);
-        } else if (persistentBackend?.setEnabled) {
-          await persistentBackend.setEnabled(job_name, enabled);
+        if (persistentBackend?.setEnabled) {
+          await persistentBackend.setEnabled(`ObsidiClaw\\${job_name}`, enabled);
         } else {
-          throw new Error("Job not found.");
+          throw new Error("Persistent backend does not support enable/disable.");
         }
         return { content: [{ type: "text" as const, text: `Job "${job_name}" is now ${enabled ? "enabled" : "disabled"}.` }] };
       } catch (err) {

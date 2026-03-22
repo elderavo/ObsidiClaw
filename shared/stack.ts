@@ -16,7 +16,7 @@ import { randomUUID } from "crypto";
 
 import { RunLogger } from "../logger/run-logger.js";
 import { ContextEngine } from "../context_engine/context-engine.js";
-import { JobScheduler, createReindexJob, createHealthCheckJob, createNormalizeJob } from "../scheduler/index.js";
+import { JobScheduler, createReindexJob, createHealthCheckJob, createNormalizeJob, createMergeInboxJob } from "../scheduler/index.js";
 import { SubagentRunner } from "./agents/subagent-runner.js";
 import { resolvePaths, type ObsidiClawPaths } from "./config.js";
 import type { RunEvent } from "../orchestrator/types.js";
@@ -103,11 +103,14 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
   const enableScheduler = opts.enableScheduler ?? true;
   let scheduler: JobScheduler | undefined;
 
-  if (enableScheduler) {
-    scheduler = new JobScheduler(logger, sessionId);
-    scheduler.register(createReindexJob(engine));
-    scheduler.register(createHealthCheckJob(engine, 24 * 60)); // run once per day
-    scheduler.register(createNormalizeJob(paths.mdDbPath));
+  if (enableScheduler && persistentBackend) {
+    scheduler = new JobScheduler(logger, persistentBackend, paths.rootDir, sessionId);
+    scheduler.register(createReindexJob());
+    scheduler.register(createHealthCheckJob());
+    scheduler.register(createNormalizeJob());
+    scheduler.register(createMergeInboxJob());
+  } else if (enableScheduler && !persistentBackend) {
+    console.warn("[obsidi-claw] no persistent schedule backend available — scheduler disabled");
   }
 
   // ── md_db watcher (lint on change) ───────────────────────────────────────

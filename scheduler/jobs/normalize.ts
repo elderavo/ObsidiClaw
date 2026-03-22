@@ -3,32 +3,19 @@
  * and auto-fixes safe inconsistencies (frontmatter format, missing type fields).
  */
 
-import { normalizeMdDb } from "../../shared/markdown/normalizer.js";
 import type { JobDefinition } from "../types.js";
 
 /**
- * Create a normalize job that runs normalizeMdDb with fix: true.
+ * Create a normalize job definition.
  *
- * @param mdDbPath  Absolute path to the md_db directory
  * @param intervalHours  How often to normalize (default: 2)
  */
-export function createNormalizeJob(
-  mdDbPath: string,
-  intervalHours = 2,
-): JobDefinition {
+export function createNormalizeJob(intervalHours = 2): JobDefinition {
   return {
     name: "normalize-md-db",
     description: "Scan and auto-fix markdown formatting issues in md_db",
     schedule: { hours: intervalHours },
     skipIfRunning: true,
-    async execute(ctx) {
-      if (ctx.signal.aborted) return;
-      const result = normalizeMdDb(mdDbPath, { fix: true });
-      if (result.fixed > 0 || result.issues.length > 0) {
-        console.log(
-          `[normalize-md-db] scanned=${result.scanned} issues=${result.issues.length} fixed=${result.fixed}`,
-        );
-      }
-    },
+    timeoutMs: 60_000,
   };
 }

@@ -9,34 +9,31 @@
  * After merging, the inbox is cleared (processed items removed).
  */
 
-import { join, dirname } from "path";
+import { join } from "path";
 import axios from "axios";
 import { getOllamaConfig } from "../../shared/config.js";
-import { readText, writeText, fileExists, ensureDir } from "../../shared/os/fs.js";
+import { readText, writeText, fileExists } from "../../shared/os/fs.js";
 import type { JobDefinition } from "../types.js";
 
 // ---------------------------------------------------------------------------
 // Job factory
 // ---------------------------------------------------------------------------
 
-export function createMergeInboxJob(mdDbPath: string): JobDefinition {
+export function createMergeInboxJob(): JobDefinition {
   return {
     name: "merge-preferences-inbox",
     description: "Review preferences inbox and merge strong directives into preferences.md",
     schedule: { hours: 6 },
     skipIfRunning: true,
     timeoutMs: 120_000,
-    async execute() {
-      await mergeInbox(mdDbPath);
-    },
   };
 }
 
 // ---------------------------------------------------------------------------
-// Core logic
+// Core logic (used by the standalone run-merge-inbox.ts script)
 // ---------------------------------------------------------------------------
 
-async function mergeInbox(mdDbPath: string): Promise<void> {
+export async function mergeInbox(mdDbPath: string): Promise<void> {
   const inboxPath = join(mdDbPath, "preferences_inbox.md");
   const prefsPath = join(mdDbPath, "preferences.md");
 

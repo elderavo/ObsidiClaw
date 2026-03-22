@@ -35,7 +35,7 @@ export class WindowsTaskSchedulerBackend implements PersistentScheduleBackend {
     // CSV is easier to parse; /V provides Status.
     const { stdout } = this.execSchtasks(["/Query", "/FO", "CSV", "/V"], true);
     return parseSchtasksCsv(stdout)
-      .filter((row) => row["TaskName"]?.startsWith("\\"))
+      .filter((row) => row["TaskName"]?.startsWith("\\ObsidiClaw\\"))
       .map((row) => {
         const jobName = row["TaskName"].replace(/^\\/, "");
         const status = row["Status"] ?? "";

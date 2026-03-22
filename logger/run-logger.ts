@@ -152,6 +152,9 @@ export class RunLogger {
     if (!columnNames.has("review_feedback")) {
       this.db.exec("ALTER TABLE runs ADD COLUMN review_feedback TEXT");
     }
+    if (!columnNames.has("job_name")) {
+      this.db.exec("ALTER TABLE runs ADD COLUMN job_name TEXT");
+    }
   }
 
   private _ensureSynthesisSchema(): void {
@@ -284,6 +287,39 @@ export class RunLogger {
    */
   insertJobRun(runId: string, sessionId: string, startTime: number, jobName: string): void {
     this._insertRun(runId, sessionId, startTime, "job");
+    this.db.prepare(`UPDATE runs SET job_name = ? WHERE run_id = ?`).run(jobName, runId);
+  }
+
+  /**
+   * Returns the most recent run record per job name, plus a run count.
+   * Used by JobScheduler.getStates() to surface last-run info via MCP list_jobs.
+   */
+  getLastJobRuns(): Map<string, { status: string; startTime: number; durationMs: number | null; error: string | null; runCount: number }> {
+    const rows = this.db.prepare(`
+      SELECT
+        job_name,
+        status,
+        start_time,
+        end_time,
+        (SELECT COUNT(*) FROM runs r2 WHERE r2.job_name = r1.job_name AND r2.run_kind = 'job') AS run_count
+      FROM runs r1
+      WHERE run_kind = 'job'
+        AND job_name IS NOT NULL
+        AND start_time = (SELECT MAX(r3.start_time) FROM runs r3 WHERE r3.job_name = r1.job_name AND r3.run_kind = 'job')
+      GROUP BY job_name
+    `).all() as Array<{ job_name: string; status: string; start_time: number; end_time: number | null; run_count: number }>;
+
+    const result = new Map<string, { status: string; startTime: number; durationMs: number | null; error: string | null; runCount: number }>();
+    for (const row of rows) {
+      result.set(row.job_name, {
+        status: row.status,
+        startTime: row.start_time,
+        durationMs: row.end_time != null ? row.end_time - row.start_time : null,
+        error: row.status === "error" ? row.status : null,
+        runCount: row.run_count,
+      });
+    }
+    return result;
   }
 
   /**
