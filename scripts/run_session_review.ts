@@ -19,7 +19,8 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import axios from "axios";
 
-import { getOllamaConfig } from "../shared/config.js";
+import { getOllamaConfig, resolvePaths } from "../shared/config.js";
+import { loadPersonality } from "../shared/agents/personality-loader.js";
 import { readText, writeText, ensureDir, appendText, fileExists } from "../shared/os/fs.js";
 import { exitProcess } from "../shared/os/process.js";
 
@@ -97,7 +98,8 @@ async function main() {
     }
 
     // ── Step 2: Send to Ollama ────────────────────────────────────────────
-    const findings = await analyzeConversation(conversation.text, log);
+    const personality = loadPersonality("session-reviewer", resolvePaths(spec.rootDir).personalitiesDir);
+    const findings = await analyzeConversation(conversation.text, log, personality?.content, personality?.provider);
 
     if (!findings || (findings.signals.length === 0 && findings.preferences.length === 0)) {
       writeResult(resultPath, { jobId: spec.jobId, sessionId: spec.sessionId, status: "done", reason: "no actionable findings", signalCount: 0, preferenceCount: 0, startedAt, finishedAt: Date.now() });
@@ -196,45 +198,15 @@ function extractText(content: unknown): string {
 // Step 2: Analyze with Ollama
 // ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT = `You analyze conversations between a user and an AI coding agent to extract preferences and behavioral signals.
+const FALLBACK_SYSTEM_PROMPT = `You analyze conversations between a user and an AI coding agent to extract preferences and behavioral signals. Respond with JSON only: { "signals": [...], "preferences": [...] }. If the conversation is purely task execution with no preference signals, return empty lists.`;
 
-Read the conversation and identify:
-
-1. **Signals** — specific moments where the user expressed something the agent should learn from:
-   - **imperative**: "don't do X", "always do Y", "stop doing Z" — explicit instructions
-   - **preference**: "I prefer X", "I like when you Y" — stated preferences
-   - **praise**: "perfect", "yes exactly", "that's what I wanted" — confirms a good approach
-   - **correction**: "no, not that", "that's wrong" — the user corrected the agent
-   - **concession**: the agent said "you're right", "I was wrong", "good point" — agent acknowledged a mistake
-
-   For each signal, include:
-   - A short quote from the conversation (the actual words)
-   - A synthesis of what the agent should learn
-   - Strength: strong (explicit rule), moderate (clear preference), weak (mild signal)
-
-2. **Synthesized preferences** — overarching rules derived from the signals above:
-   - Write each as a concise instruction the agent should follow in future sessions
-   - Only include preferences with real evidence from the signals
-   - If there are no clear preferences, return an empty list
-
-Respond with JSON only:
-{
-  "signals": [
-    { "type": "imperative|preference|praise|correction|concession", "quote": "...", "synthesis": "...", "strength": "strong|moderate|weak" }
-  ],
-  "preferences": [
-    { "rule": "concise instruction for the agent", "reason": "evidence from this session", "strength": "strong|moderate|weak" }
-  ]
-}
-
-Rules:
-- Max 8 signals, max 4 preferences
-- Only extract what's actually in the conversation — don't infer or guess
-- Prefer fewer, higher-quality findings over many weak ones
-- If the conversation is purely task execution with no preference signals, return empty lists`;
-
-async function analyzeConversation(conversation: string, log: (msg: string) => void): Promise<ReviewFindings | null> {
-  const ollama = getOllamaConfig();
+async function analyzeConversation(
+  conversation: string,
+  log: (msg: string) => void,
+  systemPrompt?: string,
+  providerOverride?: { model?: string; baseUrl?: string },
+): Promise<ReviewFindings | null> {
+  const ollama = getOllamaConfig({ model: providerOverride?.model, baseUrl: providerOverride?.baseUrl });
   const host = ollama.baseUrl.replace(/\/v1\/?$/, "");
 
   log(`Calling Ollama (${ollama.model}) at ${host}`);
@@ -244,7 +216,7 @@ async function analyzeConversation(conversation: string, log: (msg: string) => v
     {
       model: ollama.model,
       messages: [
-        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: systemPrompt ?? FALLBACK_SYSTEM_PROMPT },
         { role: "user", content: `## Conversation\n\n${conversation}` },
       ],
       stream: false,

@@ -15,18 +15,13 @@
  *   5. Extract output, dispose, return result
  */
 
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
-
 import { RunLogger } from "../../logger/run-logger.js";
 import { OrchestratorSession } from "../../orchestrator/session.js";
 import { loadPersonality } from "./personality-loader.js";
 import { extractMessageText } from "../text-utils.js";
+import { resolvePaths } from "../config.js";
 import type { ContextEngine } from "../../context_engine/context-engine.js";
 import type { PersonalityConfig, SubagentSpec, SubagentResult } from "./types.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_PERSONALITIES_DIR = join(__dirname, "personalities");
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes
 
 // ---------------------------------------------------------------------------
@@ -60,7 +55,7 @@ export class SubagentRunner {
     this.config = {
       dbPath: config.dbPath,
       contextEngine: config.contextEngine,
-      personalitiesDir: config.personalitiesDir ?? DEFAULT_PERSONALITIES_DIR,
+      personalitiesDir: config.personalitiesDir ?? resolvePaths().personalitiesDir,
     };
   }
 

@@ -16,6 +16,7 @@ import axios from "axios";
 import type { JobDefinition } from "../types.js";
 import type { ObsidiClawPaths } from "../../shared/config.js";
 import { getOllamaConfig } from "../../shared/config.js";
+import { loadPersonality } from "../../shared/agents/personality-loader.js";
 import { readText, writeText, fileExists, listDir } from "../../shared/os/fs.js";
 import { buildDirectoryTree } from "../../scripts/update-directory-tree.js";
 
@@ -56,6 +57,7 @@ export async function run(paths: ObsidiClawPaths): Promise<void> {
 
   console.log(`[summarize-code] summarizing ${unsummarized.length} file(s)`);
 
+  const personality = loadPersonality("code-summarizer", paths.personalitiesDir);
   const directoryTree = buildDirectoryTree(paths.rootDir);
   let done = 0;
   let skipped = 0;
@@ -69,7 +71,7 @@ export async function run(paths: ObsidiClawPaths): Promise<void> {
     const sourceContent = readText(sourcePath);
     const mirrorContent = readText(mirrorPath);
 
-    const summary = await callOllama(sourceContent, mirrorContent, directoryTree);
+    const summary = await callOllama(sourceContent, mirrorContent, directoryTree, personality?.content, personality?.provider);
     if (!summary) {
       skipped++;
       continue;
@@ -158,23 +160,16 @@ function appendSummary(mirrorPath: string, existingContent: string, summary: str
 // Ollama call
 // ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT = `You are a senior software engineer writing internal documentation.
-
-Given a source code file, its structured mirror note (imports, exports, call graph), and the project directory tree, write a concise 2-3 sentence technical description of what this module does and why it exists.
-
-Focus on:
-- The primary responsibility of this module
-- Its architectural role in the project
-- What would be missing if this file didn't exist
-
-Be precise and technical. Write in present tense. Output only the description — no headers, no preamble, no bullet points.`;
+const FALLBACK_SYSTEM_PROMPT = `You are a senior software engineer writing internal documentation. Given a source code file, its structured mirror note (imports, exports, call graph), and the project directory tree, write a concise 2-3 sentence technical description of what this module does and why it exists. Be precise and technical. Write in present tense. Output only the description — no headers, no preamble, no bullet points.`;
 
 async function callOllama(
   sourceContent: string,
   mirrorContent: string,
   directoryTree: string,
+  systemPrompt?: string,
+  providerOverride?: { model?: string; baseUrl?: string },
 ): Promise<string | null> {
-  const ollama = getOllamaConfig();
+  const ollama = getOllamaConfig({ model: providerOverride?.model, baseUrl: providerOverride?.baseUrl });
   const host = ollama.baseUrl.replace(/\/v1\/?$/, "");
 
   const userPrompt = [
@@ -196,7 +191,7 @@ async function callOllama(
       {
         model: ollama.model,
         messages: [
-          { role: "system", content: SYSTEM_PROMPT },
+          { role: "system", content: systemPrompt ?? FALLBACK_SYSTEM_PROMPT },
           { role: "user", content: userPrompt },
         ],
         stream: false,

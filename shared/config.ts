@@ -40,6 +40,8 @@ export interface ObsidiClawPaths {
   dbPath: string;
   /** SQLite graph.db path (knowledge graph store). */
   graphDbPath: string;
+  /** Personality markdown files directory. */
+  personalitiesDir: string;
 }
 
 /**
@@ -53,5 +55,6 @@ export function resolvePaths(rootDir?: string): ObsidiClawPaths {
     mdDbPath: join(root, "md_db"),
     dbPath: join(root, ".obsidi-claw", "runs.db"),
     graphDbPath: join(root, ".obsidi-claw", "graph.db"),
+    personalitiesDir: join(root, "shared", "agents", "personalities"),
   };
 }
