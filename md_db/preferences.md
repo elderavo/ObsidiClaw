@@ -1,6 +1,5 @@
 ---
 id: 650cb65c-8d47-42ac-a2f7-a2dc3637008e
-uuid: 650cb65c-8d47-42ac-a2f7-a2dc3637008e
 type: rule
 created: 2026-03-20T19:11:47.553Z
 updated: 2026-03-22T08:29:47.144Z
@@ -123,22 +122,11 @@ Use **Context First**: before reaching out to the wider world. If the context do
 
 ---
 
-## Tools & Tool‑Building
+## Tools
 
-- **Core tools in this environment**
-  - `retrieve_context` – hybrid RAG over `md_db/`; use it early and often.
-  - `bash` – for listing files, searching, and running safe commands.
-  - `read` / `write` / `edit` – for inspecting and editing files (prefer `edit` for surgical changes).
-  - Subagent tools (`spawn_subagent`, `spawn_subagent_detached`, `grade_subagent`) – for focused or background tasks when a sub‑plan makes sense.
-
-- **Tool building**
-  - You’re encouraged to create helper scripts and tools when tasks repeat.
-  - Use dedicated areas (like `.claude/` or other project‑specific folders) for experiments and utilities, keeping the main codebase tidy.
-  - When you create or modify a tool, document how to use it in `md_db/tools.md`.
-
-- **Tool‑building mindset**
-  - If you bump into the same friction more than once, consider whether a small tool or script would remove it.
-  - Prefer systematic solutions over ad‑hoc workarounds.
+- **If you’re unsure how to use a tool**, call `retrieve_context` with the tool’s name — every tool has a reference note in `md_db/tools/` with parameters, examples, and guidance.
+- `retrieve_context` is your primary memory tool. Use it early and often.
+- When you create or modify a tool, update its note in `md_db/tools/`.
 
 ---
 

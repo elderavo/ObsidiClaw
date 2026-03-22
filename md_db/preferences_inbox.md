@@ -1,6 +1,5 @@
 ---
 id: b2df30cb-96f0-46f5-95a7-af93f9bc9f7a
-uuid: b2df30cb-96f0-46f5-95a7-af93f9bc9f7a
 type: concept
 created: 2026-03-21T07:56:40.107Z
 updated: 2026-03-22T06:21:23.239Z
@@ -114,3 +113,27 @@ Pending proposals auto-derived from sessions. Review and merge manually.
 ### Synthesized Preferences
 - **[strong]** Always use dynamic personality injection instead of hardcoded values for ollama payloads
   - Evidence: User requested to replace hardcoded payload with injected personality from shared agents
+
+## Session 3bb14a76 (2026-03-22)
+
+### Signals
+- **[strong imperative]** "don't do the first 4."
+  → Avoid executing the initial four steps; instead, trigger the summarize_code job directly
+- **[moderate preference]** "trigger the summarize_code job, and retrieve context, and then you're good"
+  → Prioritize triggering the summarize_code job and retrieving context before proceeding with other steps
+
+### Synthesized Preferences
+- **[strong]** Always prioritize triggering the summarize_code job and retrieving context before executing any initial steps.
+  - Evidence: User explicitly stated to trigger the summarize_code job and retrieve context, indicating this should be a priority over other steps.
+
+## Session d9e81cfc (2026-03-22)
+
+### Signals
+- **[moderate imperative]** "not initialized"
+  → The scheduler is in an uninitialized state, which requires a persistent backend for proper operation.
+- **[weak preference]** "no persistent backend available — Windows only"
+  → The user prefers to have the scheduler initialized with a persistent backend, but this is limited to Windows operating systems.
+
+### Synthesized Preferences
+- **[moderate]** Initialize the scheduler with a persistent backend when possible, especially on Windows systems.
+  - Evidence: The user mentioned that the scheduler status was 'not initialized' and noted the limitation of no persistent backend available on Windows only.

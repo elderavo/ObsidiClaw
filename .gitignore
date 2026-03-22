@@ -5,4 +5,4 @@ node_modules
 __pycache__/
 md_db/
 dist/*
-
+notes.txt
