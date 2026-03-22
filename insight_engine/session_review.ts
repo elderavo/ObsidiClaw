@@ -4,6 +4,7 @@ import { resolvePaths } from "../shared/config.js";
 import { extractMessageText } from "../shared/text-utils.js";
 import { ensureDir, fileExists, readText, writeText } from "../shared/os/fs.js";
 import { buildFrontmatter } from "../shared/markdown/frontmatter.js";
+import type { RunEvent } from "../orchestrator/types.js";
 
 export type ReviewTrigger = "session_end" | "pre_compaction";
 
@@ -41,21 +42,34 @@ export interface SessionReviewOptions {
   now?: () => number;
   rootDir?: string;
   createChildSession: (systemPrompt: string) => Promise<ReviewRunner>;
+  /** Optional event callback — routes review events to the caller's RunLogger. */
+  onEvent?: (event: RunEvent) => void;
 }
 
 const MAX_MESSAGES = 40;
 const MAX_TRANSCRIPT_CHARS = 16000;
 
 export async function runSessionReview(opts: SessionReviewOptions): Promise<void> {
-  const { contextEngine } = opts;
+  const { contextEngine, onEvent } = opts;
   if (!contextEngine) return;
 
+  const sessionId = opts.sessionId;
+  const runId = crypto.randomUUID();
   const timestamp = (opts.now ?? Date.now)();
+
+  onEvent?.({ type: "review_started", sessionId, runId, timestamp, trigger: opts.trigger } as RunEvent);
+
   const transcript = formatTranscript(opts.messages);
 
   const { prompt, plan, successCriteria, schemaText } = buildSpec();
 
-  const pkg = await contextEngine.buildSubagentPackage({ prompt, plan, successCriteria });
+  let pkg;
+  try {
+    pkg = await contextEngine.buildSubagentPackage({ prompt, plan, successCriteria });
+  } catch (err) {
+    onEvent?.({ type: "review_failed", sessionId, runId, timestamp: Date.now(), error: String(err), stage: "build_subagent_package" } as RunEvent);
+    return;
+  }
 
   const systemPrompt = [
     pkg.formattedSystemPrompt,
@@ -65,7 +79,13 @@ export async function runSessionReview(opts: SessionReviewOptions): Promise<void
     schemaText,
   ].join("\n");
 
-  const runner = await opts.createChildSession(systemPrompt);
+  let runner: ReviewRunner;
+  try {
+    runner = await opts.createChildSession(systemPrompt);
+  } catch (err) {
+    onEvent?.({ type: "review_failed", sessionId, runId, timestamp: Date.now(), error: String(err), stage: "create_child_session" } as RunEvent);
+    return;
+  }
 
   try {
     const userMessage = buildUserMessage({
@@ -76,10 +96,35 @@ export async function runSessionReview(opts: SessionReviewOptions): Promise<void
     });
 
     const raw = await runner.runReview(userMessage);
-    const proposal = parseProposal(raw, opts.trigger);
-    if (!proposal) return;
 
-    await applyProposal({ proposal, timestamp, rootDir: opts.rootDir ?? resolvePaths().rootDir });
+    const proposal = parseProposal(raw, opts.trigger);
+
+    onEvent?.({
+      type: "review_llm_response",
+      sessionId,
+      runId,
+      timestamp: Date.now(),
+      rawLength: raw.length,
+      parsedOk: proposal !== null,
+    } as RunEvent);
+
+    if (!proposal) {
+      onEvent?.({ type: "review_failed", sessionId, runId, timestamp: Date.now(), error: "parseProposal returned null — LLM output was not valid JSON", stage: "parse_proposal" } as RunEvent);
+      return;
+    }
+
+    const result = await applyProposal({ proposal, timestamp, rootDir: opts.rootDir ?? resolvePaths().rootDir });
+
+    onEvent?.({
+      type: "review_proposal_applied",
+      sessionId,
+      runId,
+      timestamp: Date.now(),
+      notesWritten: result.notesWritten,
+      prefsUpdated: result.prefsUpdated,
+    } as RunEvent);
+  } catch (err) {
+    onEvent?.({ type: "review_failed", sessionId, runId, timestamp: Date.now(), error: String(err), stage: "run_review" } as RunEvent);
   } finally {
     runner.dispose();
   }
@@ -167,20 +212,19 @@ function parseProposal(raw: string, trigger: ReviewTrigger): ReviewProposal | nu
 
 function extractJson(txt: string): string | null {
   if (!txt) return null;
-  // If already valid JSON
   try {
     JSON.parse(txt);
     return txt;
   } catch {}
 
-  // Try to extract first {...} block
   const match = txt.match(/\{[\s\S]*\}/);
   return match ? match[0] : null;
 }
 
-async function applyProposal(opts: { proposal: ReviewProposal; timestamp: number; rootDir: string }) {
+async function applyProposal(opts: { proposal: ReviewProposal; timestamp: number; rootDir: string }): Promise<{ notesWritten: number; prefsUpdated: number }> {
   const { proposal, timestamp, rootDir } = opts;
-  if (!proposal.preferences_updates?.length && !proposal.new_notes?.length) return;
+  let notesWritten = 0;
+  let prefsUpdated = 0;
 
   if (proposal.preferences_updates?.length) {
     appendPreferencesInbox({
@@ -189,13 +233,17 @@ async function applyProposal(opts: { proposal: ReviewProposal; timestamp: number
       timestamp,
       rootDir,
     });
+    prefsUpdated = proposal.preferences_updates.length;
   }
 
   if (proposal.new_notes?.length) {
     for (const note of proposal.new_notes) {
       writeNewNote({ note, trigger: proposal.trigger, timestamp, rootDir });
+      notesWritten++;
     }
   }
+
+  return { notesWritten, prefsUpdated };
 }
 
 function appendPreferencesInbox(opts: { updates: NonNullable<ReviewProposal["preferences_updates"]>; trigger: ReviewTrigger; timestamp: number; rootDir: string }) {
