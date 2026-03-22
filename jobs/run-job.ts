@@ -51,7 +51,7 @@ async function run(): Promise<void> {
   try {
     await JOBS[jobName].run(paths);
     logger.finalizeRun(runId, "done", Date.now());
-    console.log(`[run-job] ${jobName} completed in ${Date.now() - startTime}ms`);
+    // console.log(`[run-job] ${jobName} completed in ${Date.now() - startTime}ms`);
   } catch (err) {
     logger.finalizeRun(runId, "error", Date.now());
     console.error(`[run-job] ${jobName} failed:`, err instanceof Error ? err.message : err);

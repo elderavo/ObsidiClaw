@@ -125,7 +125,6 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
   const runner = new SubagentRunner({
     dbPath: paths.dbPath,
     contextEngine: engine,
-    rootDir: paths.rootDir,
   });
 
   // ── Lifecycle ───────────────────────────────────────────────────────────

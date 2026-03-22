@@ -785,12 +785,12 @@ export async function runMirrorPy(
 
 async function main() {
   const args = parseArgs();
-  console.log(`Scan dir  : ${args.scanDir}`);
-  console.log(`Mirror dir: ${args.mirrorDir}`);
-  console.log(`Omitting  : ${args.omitPatterns.join(", ")}`);
-  console.log(`Force     : ${args.force}\n`);
-  const { written, skipped } = await runMirrorPy(args);
-  console.log(`Done. Written: ${written}, Skipped (up-to-date): ${skipped}`);
+  // console.log(`Scan dir  : ${args.scanDir}`);
+  // console.log(`Mirror dir: ${args.mirrorDir}`);
+  // console.log(`Omitting  : ${args.omitPatterns.join(", ")}`);
+  // console.log(`Force     : ${args.force}\n`);
+  // const { written, skipped } = await runMirrorPy(args);
+  // console.log(`Done. Written: ${written}, Skipped (up-to-date): ${skipped}`);
 }
 
 main().catch((err) => {

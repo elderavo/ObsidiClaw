@@ -8,8 +8,6 @@
  *   list_jobs         — show all jobs + last-run state
  *   run_job           — trigger a built-in job immediately
  *   set_job_enabled   — enable/disable an OS task
- *   schedule_task     — register a new recurring subagent task
- *   unschedule_task   — remove a dynamic task schedule
  */
 
 import { join } from "path";
@@ -17,9 +15,6 @@ import { fileURLToPath } from "url";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
 import { getSharedScheduler, getSharedBackend } from "../../extension/factory.js";
-import { resolvePaths } from "../../shared/config.js";
-import { getExecPath } from "../../shared/os/process.js";
-import { writeTaskSpec, listTaskSpecs } from "../../jobs/persistent-tasks.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const rootDir = join(__dirname, "../..");
@@ -34,7 +29,6 @@ const extension: ExtensionFactory = async (pi) => {
     parameters: Type.Object({}),
     async execute() {
       const scheduler = getSharedScheduler();
-      const backend = getSharedBackend();
       const lines = ["# Scheduled Jobs", ""];
 
       if (scheduler) {
@@ -42,21 +36,6 @@ const extension: ExtensionFactory = async (pi) => {
         for (const s of states) {
           const lastRun = s.lastRunAt ? new Date(s.lastRunAt).toISOString() : "never";
           lines.push(`- **${s.name}** | last run: ${lastRun} | status: ${s.status}${s.lastError ? ` | error: ${s.lastError}` : ""}`);
-        }
-      }
-
-      const paths = resolvePaths(rootDir);
-      const specs = listTaskSpecs(paths.rootDir);
-      const installed = backend ? await backend.list() : [];
-      const installedMap = new Map(installed.map((j) => [j.jobName, j]));
-
-      if (specs.length > 0) {
-        lines.push("", "## Persistent Tasks");
-        for (const spec of specs) {
-          const taskName = spec.name;
-          const job = installedMap.get(taskName);
-          const status = job ? (job.enabled === false ? "disabled" : "enabled") : "not installed";
-          lines.push(`- **${taskName}** | every ${spec.intervalMinutes}m | ${status} | desc: ${spec.description}`);
         }
       }
 
@@ -115,92 +94,6 @@ const extension: ExtensionFactory = async (pi) => {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text" as const, text: `set_job_enabled failed: ${msg}` }], details: { job_name, enabled, error: msg } };
-      }
-    },
-  });
-
-  // ── schedule_task ─────────────────────────────────────────────────────────
-  pi.registerTool({
-    name: "schedule_task",
-    label: "Schedule Persistent Task",
-    description: "Register a new recurring detached subagent task (persistent OS schedule).",
-    promptSnippet: "schedule_task(name, description, prompt, plan, success_criteria, interval_minutes, ...)",
-    parameters: Type.Object({
-      name: Type.String({ description: "Unique task name (no 'task-' prefix)." }),
-      description: Type.String({ description: "What the task does." }),
-      prompt: Type.String({ description: "Prompt/context sent to subagent each run." }),
-      plan: Type.String({ description: "Implementation plan for the subagent." }),
-      success_criteria: Type.String({ description: "How to measure success." }),
-      personality: Type.Optional(Type.String({ description: "Personality name (optional)." })),
-      interval_minutes: Type.Number({ description: "Interval in minutes.", minimum: 1 }),
-      run_immediately: Type.Optional(Type.Boolean({ description: "Run once right now." })),
-    }),
-    async execute(_id, params) {
-      try {
-        const backend = getSharedBackend();
-        if (!backend) return { content: [{ type: "text" as const, text: "Persistent scheduling backend not available on this platform." }], details: { name: params.name } };
-
-        const paths = resolvePaths(rootDir);
-        const taskName = `task-${params.name}`;
-        const spec = {
-          name: taskName,
-          description: params.description,
-          prompt: params.prompt,
-          plan: params.plan,
-          successCriteria: params.success_criteria,
-          personality: params.personality,
-          intervalMinutes: params.interval_minutes,
-          rootDir: paths.rootDir,
-          createdAt: Date.now(),
-          context: params.prompt,
-        };
-
-        const specPath = writeTaskSpec(paths.rootDir, spec);
-        const scriptPath = join(paths.rootDir, "dist", "scripts", "run_detached_subagent.js");
-
-        await backend.install(taskName, params.interval_minutes * 60_000, getExecPath(), [scriptPath, specPath]);
-
-        const lines = [
-          `Scheduled persistent task "${taskName}" — every ${params.interval_minutes} minute(s).`,
-          `Spec: ${specPath}`,
-        ];
-
-        if (params.run_immediately && backend.run) {
-          try {
-            await backend.run(taskName);
-            lines.push("First run triggered.");
-          } catch (err) {
-            lines.push(`First run failed: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
-
-        return { content: [{ type: "text" as const, text: lines.join("\n") }], details: { name: params.name, interval_minutes: params.interval_minutes } };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return { content: [{ type: "text" as const, text: `schedule_task failed: ${msg}` }], details: { name: params.name, error: msg } };
-      }
-    },
-  });
-
-  // ── unschedule_task ───────────────────────────────────────────────────────
-  pi.registerTool({
-    name: "unschedule_task",
-    label: "Unschedule Persistent Task",
-    description: "Remove/disable a persistent task schedule. Spec file is retained.",
-    promptSnippet: "unschedule_task(name) — remove a dynamic task schedule",
-    parameters: Type.Object({
-      name: Type.String({ description: "Task name (without 'task-' prefix)." }),
-    }),
-    async execute(_id, { name }) {
-      try {
-        const backend = getSharedBackend();
-        if (!backend) return { content: [{ type: "text" as const, text: "Persistent backend not available." }], details: { name } };
-        const taskName = `task-${name}`;
-        await backend.uninstall(taskName);
-        return { content: [{ type: "text" as const, text: `Task "${taskName}" unscheduled (spec retained).` }], details: { name } };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return { content: [{ type: "text" as const, text: `unschedule_task failed: ${msg}` }], details: { name, error: msg } };
       }
     },
   });

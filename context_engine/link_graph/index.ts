@@ -94,7 +94,7 @@ export class LinkGraphProcessor {
     // Store in database
     this.storage.storeGraph(this.graph);
     
-    console.log(`[link-graph] Built graph with ${this.graph.getAllNodeIds().length} nodes`);
+    // console.log(`[link-graph] Built graph with ${this.graph.getAllNodeIds().length} nodes`);
     
     const stats = this.graph.getStats();
     if (stats.cycles.length > 0) {

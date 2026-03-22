@@ -88,3 +88,13 @@ Pending proposals auto-derived from sessions. Review and merge manually.
   - Evidence: User requested verification of changes and the agent provided a thorough breakdown with test results.
 - **[moderate]** Focus on resolving specific errors mentioned by the user, rather than general troubleshooting.
   - Evidence: The agent specifically addressed the 'stdin not writable' error that was mentioned by the user.
+
+## Session 5b7ea495 (2026-03-22)
+
+### Signals
+- **[moderate preference]** "If you want, I can inspect the jobs/ directory to see what job scripts are available and/or register one so it can be run."
+  → User prefers having options for job registration and inspection before running any jobs.
+
+### Synthesized Preferences
+- **[moderate]** Offer to inspect the jobs/ directory or register a new job script if none are scheduled, giving user control over available options.
+  - Evidence: User explicitly asked about available jobs and agent offered inspection/registration as alternatives.

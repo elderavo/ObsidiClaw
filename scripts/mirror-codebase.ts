@@ -733,12 +733,12 @@ export async function runMirrorTs(
 
 async function main() {
   const args = parseArgs();
-  console.log(`Scan dir  : ${args.scanDir}`);
-  console.log(`Mirror dir: ${args.mirrorDir}`);
-  console.log(`Omitting  : ${args.omitPatterns.join(", ")}`);
-  console.log(`Force     : ${args.force}\n`);
+  // console.log(`Scan dir  : ${args.scanDir}`);
+  // console.log(`Mirror dir: ${args.mirrorDir}`);
+  // console.log(`Omitting  : ${args.omitPatterns.join(", ")}`);
+  // console.log(`Force     : ${args.force}\n`);
   const { written, skipped } = await runMirrorTs(args);
-  console.log(`Done. Written: ${written}, Skipped (up-to-date): ${skipped}`);
+  // console.log(`Done. Written: ${written}, Skipped (up-to-date): ${skipped}`);
 }
 
 main().catch((err) => {

@@ -15,15 +15,12 @@
  *   5. Extract output, dispose, return result
  */
 
-import { randomUUID } from "crypto";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
 import { RunLogger } from "../../logger/run-logger.js";
 import { OrchestratorSession } from "../../orchestrator/session.js";
 import { loadPersonality } from "./personality-loader.js";
-import { spawnProcess, getExecPath } from "../os/process.js";
-import { ensureDir, writeText } from "../os/fs.js";
 import { extractMessageText } from "../text-utils.js";
 import type { ContextEngine } from "../../context_engine/context-engine.js";
 import type { PersonalityConfig, SubagentSpec, SubagentResult } from "./types.js";
@@ -46,8 +43,6 @@ export interface SubagentRunnerConfig {
   /** Path to personalities directory. Default: shared/agents/personalities/ */
   personalitiesDir?: string;
 
-  /** Root directory for detached subagent work dirs. */
-  rootDir?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -55,8 +50,10 @@ export interface SubagentRunnerConfig {
 // ---------------------------------------------------------------------------
 
 export class SubagentRunner {
-  private readonly config: Required<Omit<SubagentRunnerConfig, "contextEngine">> & {
+  private readonly config: {
+    dbPath: string;
     contextEngine?: ContextEngine;
+    personalitiesDir: string;
   };
 
   constructor(config: SubagentRunnerConfig) {
@@ -64,7 +61,6 @@ export class SubagentRunner {
       dbPath: config.dbPath,
       contextEngine: config.contextEngine,
       personalitiesDir: config.personalitiesDir ?? DEFAULT_PERSONALITIES_DIR,
-      rootDir: config.rootDir ?? process.cwd(),
     };
   }
 
@@ -169,44 +165,6 @@ export class SubagentRunner {
     };
   }
 
-  /**
-   * Run a subagent in a detached child process (fire-and-forget).
-   * Returns immediately with the job ID and result path.
-   */
-  runDetached(spec: SubagentSpec): { jobId: string; resultPath: string } {
-    const jobId = randomUUID();
-    const workDir = join(this.config.rootDir, ".obsidi-claw", "subagents");
-    const specPath = join(workDir, `${jobId}.json`);
-    const resultPath = join(workDir, `${jobId}.result.json`);
-    const logPath = join(workDir, `${jobId}.log`);
-    const scriptPath = join(this.config.rootDir, "dist", "scripts", "run_detached_subagent.js");
-
-    ensureDir(workDir);
-
-    const specJson = {
-      type: "subagent",
-      jobId,
-      rootDir: this.config.rootDir,
-      plan: spec.plan,
-      context: spec.callerContext ?? "",
-      successCriteria: spec.successCriteria,
-      personality: spec.personality,
-      timeoutMinutes: spec.timeoutMs ? spec.timeoutMs / 60_000 : undefined,
-      resultPath,
-      logPath,
-      createdAt: Date.now(),
-    };
-
-    writeText(specPath, JSON.stringify(specJson, null, 2));
-
-    const child = spawnProcess(getExecPath(), [scriptPath, specPath], {
-      detached: true,
-      stdio: "ignore",
-    });
-    child.unref();
-
-    return { jobId, resultPath };
-  }
 }
 
 // ---------------------------------------------------------------------------

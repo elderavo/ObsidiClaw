@@ -286,54 +286,6 @@ export default function subagentExtension(
     },
   });
 
-  // ── spawn_subagent_detached tool — fire-and-forget background run ────────
-  pi.registerTool({
-    name: "spawn_subagent_detached",
-    label: "Spawn Subagent (Detached)",
-    description:
-      "Queue a subagent to run in a detached worker process. The worker packages context, " +
-      "runs the subagent, logs to runs.db, and writes a result JSON to .obsidi-claw/subagents.",
-    promptSnippet: "spawn_subagent_detached(plan, context, success_criteria) — background subagent",
-    promptGuidelines: [
-      "Provide a detailed plan; the worker will run it with packaged context.",
-      "Check the result JSON path to read the output.",
-    ],
-    parameters: Type.Object({
-      plan: Type.String({ description: "Detailed implementation plan for the subagent to execute" }),
-      context: Type.String({ description: "Additional background facts (optional, empty ok)" }),
-      success_criteria: Type.String({ description: "Clear, measurable criteria for success" }),
-      personality: Type.Optional(
-        Type.String({ description: "Named personality profile (e.g., 'deep-researcher')" }),
-      ),
-      timeout_minutes: Type.Optional(
-        Type.Number({ description: "Timeout in minutes (default 5, max 30)", minimum: 1, maximum: 30 }),
-      ),
-    }),
-
-    async execute(_toolCallId, params) {
-      const r = await ensureRunner();
-
-      const { jobId, resultPath } = r.runDetached({
-        prompt: params.context.trim() || params.plan,
-        plan: params.plan,
-        successCriteria: params.success_criteria,
-        personality: params.personality,
-        callerContext: params.context,
-        timeoutMs: params.timeout_minutes ? params.timeout_minutes * 60 * 1000 : undefined,
-      });
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Detached subagent queued.\njob: ${jobId}\nresult: ${resultPath}`,
-          },
-        ],
-        details: { job_id: jobId, result_path: resultPath },
-      };
-    },
-  });
-
   // ── session_shutdown: clean up ────────────────────────────────────────────
   pi.on("session_shutdown", async () => {
     if (ownsEngine) engine?.close();

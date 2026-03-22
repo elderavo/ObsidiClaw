@@ -204,21 +204,6 @@ export function createObsidiClawExtension(
 
       if (stack) await stack.initialize();
 
-      // Show persistent tasks on TUI startup
-      if (stack?.persistentBackend) {
-        try {
-          const tasks = await stack.persistentBackend.list();
-          const specs = await (async () => {
-            try { return (await import("../jobs/persistent-tasks.js")).listTaskSpecs(paths.rootDir); } catch { return []; }
-          })();
-          const specNames = specs.map((s: any) => s.name);
-          const lines = ["[scheduler] persistent tasks:", ...specNames.map((n: string) => ` - ${n}`)];
-          console.log(lines.join("\n"));
-        } catch (err) {
-          console.log("[scheduler] unable to list persistent tasks", err);
-        }
-      }
-
       if (stack) {
         stack.logger.logEvent({
           type: "session_start",

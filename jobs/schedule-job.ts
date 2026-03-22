@@ -58,7 +58,7 @@ export class JobScheduler {
       const taskName = `ObsidiClaw\\${job.name}`;
       try {
         await this.backend.install(taskName, intervalMs, process.execPath, [runnerScript, job.name]);
-        console.log(`[scheduler] installed OS task: ${taskName}`);
+        // console.log(`[scheduler] installed OS task: ${taskName}`);
       } catch (err) {
         console.error(`[scheduler] failed to install "${taskName}":`, err instanceof Error ? err.message : err);
       }
