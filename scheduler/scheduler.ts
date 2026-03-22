@@ -47,7 +47,7 @@ export class JobScheduler {
     if (this.installed) return;
     this.installed = true;
 
-    const runnerScript = join(this.rootDir, "dist", "scripts", "run-job.js");
+    const runnerScript = join(this.rootDir, "dist", "scheduler", "run-job.js");
 
     for (const job of this.jobs.values()) {
       const intervalMs = this.scheduleToMs(job.schedule);
