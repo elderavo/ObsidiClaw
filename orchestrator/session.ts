@@ -26,6 +26,7 @@ import { createObsidiClawExtension } from "../extension/factory.js";
 import { createPiAgentSession } from "../shared/pi-session-factory.js";
 import { resolvePaths } from "../shared/config.js";
 import { extractMessageText } from "../shared/text-utils.js";
+import { mapPiEventToRunEvent } from "../shared/pi-event-mapper.js";
 import { runSessionReview, type ReviewTrigger } from "../insight_engine/session_review.js";
 import type { JobScheduler } from "../scheduler/scheduler.js";
 import type { SubagentRunner } from "../shared/agents/subagent-runner.js";
@@ -153,7 +154,7 @@ export class OrchestratorSession {
     try {
       await this.runReviewHook(trigger);
     } catch (err) {
-      console.error("[session_review] failed:", err);
+      this.emit({ type: "diagnostic", sessionId: this.sessionId, runId: this.currentRunId, timestamp: Date.now(), module: "insight_engine", level: "error", message: `session_review failed: ${err instanceof Error ? err.message : String(err)}` } as RunEvent);
     } finally {
       this.dispose();
     }
@@ -180,50 +181,14 @@ export class OrchestratorSession {
   private handlePiEvent(event: { type: string; [key: string]: unknown }): void {
     const runId = this.currentRunId;
 
+    // Shared mapper handles agent_start, agent_end, turn_end, tool_execution_start/end
+    const mapped = mapPiEventToRunEvent(event, this.sessionId, runId);
+    if (mapped) {
+      this.emit(mapped);
+    }
+
+    // Events that need session-specific handling beyond the shared mapper:
     switch (event.type) {
-      case "agent_start":
-        this.emit({ type: "agent_turn_start", sessionId: this.sessionId, runId, timestamp: Date.now() });
-        break;
-
-      case "agent_end":
-        this.emit({
-          type: "agent_done",
-          sessionId: this.sessionId,
-          runId,
-          timestamp: Date.now(),
-          messageCount: Array.isArray(event["messages"]) ? (event["messages"] as unknown[]).length : 0,
-        });
-        break;
-
-      case "turn_end":
-        this.emit({ type: "agent_turn_end", sessionId: this.sessionId, runId, timestamp: Date.now() });
-        break;
-
-      case "tool_execution_start":
-        this.emit({
-          type: "tool_call",
-          sessionId: this.sessionId,
-          runId,
-          timestamp: Date.now(),
-          toolName: String(event["toolName"] ?? "unknown"),
-          toolCallId: typeof event["toolCallId"] === "string" ? String(event["toolCallId"]) : undefined,
-          toolArgs: event["args"],
-        });
-        break;
-
-      case "tool_execution_end":
-        this.emit({
-          type: "tool_result",
-          sessionId: this.sessionId,
-          runId,
-          timestamp: Date.now(),
-          toolName: String(event["toolName"] ?? "unknown"),
-          toolCallId: typeof event["toolCallId"] === "string" ? String(event["toolCallId"]) : undefined,
-          isError: Boolean(event["isError"]),
-          toolResult: event["result"],
-        });
-        break;
-
       case "message_update": {
         const assistantEvent = event["assistantMessageEvent"] as { type: string; delta?: string } | undefined;
         if (assistantEvent?.type === "text_delta" && this.config.onOutput) {
@@ -257,6 +222,7 @@ export class OrchestratorSession {
       compactionMeta,
       contextEngine: this.contextEngine,
       rootDir: resolvePaths().rootDir,
+      onEvent: (event) => this.emit(event),
       createChildSession: async (systemPrompt: string) => {
         const childLogger = new RunLogger({ dbPath: resolvePaths().dbPath });
         const childSession = new OrchestratorSession(childLogger, this.contextEngine, {
@@ -309,6 +275,12 @@ export class OrchestratorSession {
               estimatedTokens: pkg.estimatedTokens,
               reviewMs: pkg.reviewResult?.reviewMs,
               reviewSkipped: pkg.reviewResult?.skipped,
+              noteHits: pkg.retrievedNotes.map((n) => ({
+                noteId: n.noteId,
+                score: n.score,
+                depth: n.depth ?? 0,
+                source: n.retrievalSource,
+              })),
             }),
             onSubagentPrepared: (pkg) => this.emit({
               type: "subagent_start",

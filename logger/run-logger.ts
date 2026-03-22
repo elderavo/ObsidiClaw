@@ -83,6 +83,20 @@ export class RunLogger {
         payload    TEXT    NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS note_hits (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id   TEXT    NOT NULL,
+        run_id       TEXT,
+        timestamp    INTEGER NOT NULL,
+        note_id      TEXT    NOT NULL,
+        score        REAL    NOT NULL,
+        depth        INTEGER NOT NULL,
+        source       TEXT    NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_note_hits_note    ON note_hits(note_id);
+      CREATE INDEX IF NOT EXISTS idx_note_hits_session ON note_hits(session_id);
+
       CREATE TABLE IF NOT EXISTS synthesis_metrics (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
         session_id       TEXT    NOT NULL,
@@ -196,6 +210,8 @@ export class RunLogger {
       this._finalizeRun(event.runId, "error", event.timestamp);
     }
 
+    // Denormalized retrieval metrics — queryable without JSON parsing.
+    // The same event also goes to `trace` via _insertTrace below.
     if (event.type === "context_retrieved") {
       this.db
         .prepare(
@@ -217,6 +233,20 @@ export class RunLogger {
           event.strippedChars,
           event.estimatedTokens,
         );
+
+      // Per-note retrieval hits — tracks which notes get pulled and how often
+      if (event.noteHits?.length) {
+        const insertHit = this.db.prepare(
+          `INSERT INTO note_hits (session_id, run_id, timestamp, note_id, score, depth, source)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        );
+        const insertMany = this.db.transaction((hits: typeof event.noteHits) => {
+          for (const hit of hits!) {
+            insertHit.run(sessionId, runId, event.timestamp, hit.noteId, hit.score, hit.depth, hit.source);
+          }
+        });
+        insertMany(event.noteHits);
+      }
     }
 
     // Log retrieval failures (tool_result errors for retrieve_context) so gaps are visible in metrics.

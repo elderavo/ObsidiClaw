@@ -132,7 +132,7 @@ export type RunEvent =
   | { type: "pi_session_created";  sessionId: SessionId; runId: RunId; timestamp: number; contextInjected: boolean }
 
   // ── Context retrieval (fired by MCP server via onContextBuilt callback) ──
-  | { type: "context_retrieved"; sessionId: SessionId; runId: RunId; timestamp: number; query: string; seedCount: number; expandedCount: number; toolCount: number; retrievalMs: number; rawChars: number; strippedChars: number; estimatedTokens: number; reviewMs?: number; reviewSkipped?: boolean }
+  | { type: "context_retrieved"; sessionId: SessionId; runId: RunId; timestamp: number; query: string; seedCount: number; expandedCount: number; toolCount: number; retrievalMs: number; rawChars: number; strippedChars: number; estimatedTokens: number; reviewMs?: number; reviewSkipped?: boolean; noteHits?: Array<{ noteId: string; score: number; depth: number; source: string }> }
 
   // ── Subagent preparation (fired by MCP server via onSubagentPrepared callback) ──
   | { type: "subagent_start"; sessionId: SessionId; runId: RunId; timestamp: number; prompt: string; plan: string; seedCount: number; expandedCount: number; estimatedTokens: number }
@@ -160,4 +160,13 @@ export type RunEvent =
   | { type: "ce_review_start";     sessionId: SessionId; runId: RunId; timestamp: number; noteCount: number; avgScore: number }
   | { type: "ce_review_done";      sessionId: SessionId; runId: RunId; timestamp: number; skipped: boolean; skipReason?: string; reviewMs: number; inputChars: number; outputChars?: number }
   | { type: "ce_reindex_start";    sessionId: SessionId; runId: RunId; timestamp: number }
-  | { type: "ce_reindex_done";     sessionId: SessionId; runId: RunId; timestamp: number; durationMs: number; noteCount: number };
+  | { type: "ce_reindex_done";     sessionId: SessionId; runId: RunId; timestamp: number; durationMs: number; noteCount: number }
+
+  // ── Session review pipeline (insight_engine/session_review.ts) ──────────
+  | { type: "review_started";          sessionId: SessionId; runId: RunId; timestamp: number; trigger: string }
+  | { type: "review_llm_response";     sessionId: SessionId; runId: RunId; timestamp: number; rawLength: number; parsedOk: boolean }
+  | { type: "review_proposal_applied"; sessionId: SessionId; runId: RunId; timestamp: number; notesWritten: number; prefsUpdated: number }
+  | { type: "review_failed";           sessionId: SessionId; runId: RunId; timestamp: number; error: string; stage: string }
+
+  // ── Diagnostic (replaces console.log/warn/error in structured modules) ──
+  | { type: "diagnostic"; sessionId: SessionId; runId: RunId; timestamp: number; module: string; level: "info" | "warn" | "error"; message: string };

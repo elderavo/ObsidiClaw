@@ -35,6 +35,7 @@ import { extractMcpText } from "../shared/text-utils.js";
 import { ensureDir, writeText } from "../shared/os/fs.js";
 import { spawnProcess, getExecPath } from "../shared/os/process.js";
 import { createObsidiClawStack, type ObsidiClawStack } from "../shared/stack.js";
+import { mapPiEventToRunEvent } from "../shared/pi-event-mapper.js";
 import type { RunEvent } from "../orchestrator/types.js";
 
 // ---------------------------------------------------------------------------
@@ -143,6 +144,12 @@ export function createObsidiClawExtension(
             estimatedTokens: pkg.estimatedTokens,
             reviewMs: pkg.reviewResult?.reviewMs,
             reviewSkipped: pkg.reviewResult?.skipped,
+            noteHits: pkg.retrievedNotes.map((n) => ({
+              noteId: n.noteId,
+              score: n.score,
+              depth: n.depth ?? 0,
+              source: n.retrievalSource,
+            })),
           } as RunEvent);
         },
         onSubagentPrepared: (pkg) => {
@@ -380,54 +387,21 @@ export function createObsidiClawExtension(
     });
 
     // ── Pi event logging (standalone mode only) ──────────────────────────────
-    // Mirrors OrchestratorSession.handlePiEvent from orchestrator/session.ts.
+    // Uses shared mapper from shared/pi-event-mapper.ts.
     if (stack) {
-      const s = stack; // capture for closures
-
-      pi.on("agent_start", () => {
-        s.logger.logEvent({
-          type: "agent_turn_start",
-          sessionId: s.sessionId,
-          runId: currentRunId,
-          timestamp: Date.now(),
-        } as RunEvent);
-      });
-
-      pi.on("turn_end", () => {
-        s.logger.logEvent({
-          type: "agent_turn_end",
-          sessionId: s.sessionId,
-          runId: currentRunId,
-          timestamp: Date.now(),
-        } as RunEvent);
-      });
-
-      pi.on("tool_execution_start", (event) => {
-        const e = event as unknown as Record<string, unknown>;
-        s.logger.logEvent({
-          type: "tool_call",
-          sessionId: s.sessionId,
-          runId: currentRunId,
-          timestamp: Date.now(),
-          toolName: String(e["toolName"] ?? "unknown"),
-          toolCallId: typeof e["toolCallId"] === "string" ? String(e["toolCallId"]) : undefined,
-          toolArgs: e["args"],
-        } as RunEvent);
-      });
-
-      pi.on("tool_execution_end", (event) => {
-        const e = event as unknown as Record<string, unknown>;
-        s.logger.logEvent({
-          type: "tool_result",
-          sessionId: s.sessionId,
-          runId: currentRunId,
-          timestamp: Date.now(),
-          toolName: String(e["toolName"] ?? "unknown"),
-          toolCallId: typeof e["toolCallId"] === "string" ? String(e["toolCallId"]) : undefined,
-          isError: Boolean(e["isError"]),
-          toolResult: e["result"],
-        } as RunEvent);
-      });
+      const s = stack;
+      const logPiEvent = (event: unknown) => {
+        const mapped = mapPiEventToRunEvent(
+          event as { type: string; [key: string]: unknown },
+          s.sessionId,
+          currentRunId,
+        );
+        if (mapped) s.logger.logEvent(mapped);
+      };
+      pi.on("agent_start", logPiEvent);
+      pi.on("turn_end", logPiEvent);
+      pi.on("tool_execution_start", logPiEvent);
+      pi.on("tool_execution_end", logPiEvent);
     }
 
     // ── agent_end: capture transcript + log event ────────────────────────────
@@ -436,13 +410,12 @@ export function createObsidiClawExtension(
       if (Array.isArray(messages)) latestMessages = messages;
 
       if (stack) {
-        stack.logger.logEvent({
-          type: "agent_done",
-          sessionId: stack.sessionId,
-          runId: currentRunId,
-          timestamp: Date.now(),
-          messageCount: messages?.length ?? 0,
-        } as RunEvent);
+        const mapped = mapPiEventToRunEvent(
+          event as unknown as { type: string; [key: string]: unknown },
+          stack.sessionId,
+          currentRunId,
+        );
+        if (mapped) stack.logger.logEvent(mapped);
       }
     });
 
@@ -457,7 +430,7 @@ export function createObsidiClawExtension(
           const specPath = join(workDir, `${jobId}.json`);
           const resultPath = join(workDir, `${jobId}.result.json`);
           const logPath = join(workDir, `${jobId}.log`);
-          const scriptPath = join(paths.rootDir, "dist", "scripts", "run_detached_subagent.js");
+          const scriptPath = join(paths.rootDir, "dist", "scripts", "run_session_review.js");
 
           ensureDir(workDir);
 
@@ -484,7 +457,9 @@ export function createObsidiClawExtension(
           child.unref();
         }
       } catch (err) {
-        console.error("[session_review] enqueue failed in extension:", err);
+        if (stack) {
+          stack.logger.logEvent({ type: "diagnostic", sessionId: stack.sessionId, runId: currentRunId, timestamp: Date.now(), module: "extension", level: "error", message: `session_review enqueue failed: ${err instanceof Error ? err.message : String(err)}` } as RunEvent);
+        }
       } finally {
         void client.close();
         void mcpServer.close();
