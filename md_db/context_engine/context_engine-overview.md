@@ -5,37 +5,63 @@ type: concept
 
 # Context Engine Overview
 
-The **ContextEngine** coordinates indexing and retrieval for the ObsidiClaw knowledge base.
+The **ContextEngine** coordinates indexing and retrieval for the ObsidiClaw knowledge base. It operates as a TS bridge to a Python subprocess (`knowledge_graph/`) that owns all vector and graph operations.
+
+## Architecture
+
+```
+TS ContextEngine (context_engine/context-engine.ts)
+  ├── JSON-RPC over stdin/stdout
+  └── Python knowledge_graph subprocess
+        ├── VectorStoreIndex (LlamaIndex + OllamaEmbedding)
+        └── SimplePropertyGraphStore (EntityNode + Relation)
+```
 
 ## Responsibilities
 
 - **Initialization**
-  - Configure Ollama embeddings (host + model).
-  - Open the SQLite graph via [[sqlite-graph-store]].
-  - Build or reload the LlamaIndex vector index from graph notes.
-  - Fast-path startup when `md_db` is unchanged; full reindex otherwise.
+  - Spawn Python subprocess (conda env `obsidiclaw`)
+  - Send `initialize` RPC (handles fast/slow path internally)
+  - Populate in-memory note cache from response
 - **Retrieval**
   - Hybrid RAG via [[context_engine-retrieval-workflow]]:
-    - Vector seeds (LlamaIndex) + depth‑1 graph neighbors (SQLite).
-    - Tag-aware scoring and index-note filtering.
-  - Package results into a `ContextPackage` for injection into Pi.
+    - Vector seeds (VectorStoreIndex) + depth-1 graph neighbors (SimplePropertyGraphStore)
+    - Tag-aware scoring and index-note filtering
+  - Optional context synthesis via ContextReviewer (always-on)
+  - Package results into a `ContextPackage` for injection into Pi
 - **Subagents**
   - Build `SubagentPackage`s for child sessions:
-    - Run retrieval against the subagent plan.
-    - Format a ready-to-inject system prompt.
-    - See [[subagent_context_packaging]].
+    - Run retrieval against the subagent plan
+    - Format a ready-to-inject system prompt
+    - See [[subagent_context_packaging]]
 - **Runtime maintenance**
-  - `reindex()` – full sync and re-embed when `md_db` changes at runtime.
-  - `rebuildLinkGraph()` – rebuild enhanced link graph via [[link-graph-infrastructure]].
-  - `close()` – cleanly close the SQLite DB.
+  - `reindex()` — send `reindex` RPC, update note cache if md_db changed
+  - `getGraphStats()` — async stats via Python RPC
+  - `close()` — send `shutdown` RPC, kill subprocess
+
+## What stays in TS
+
+- Context formatting (`formatContext`, `formatSubagentSystemPrompt`)
+- Context synthesis (`ContextReviewer` — direct Ollama `/api/chat`)
+- Debug event emission (`ce_*` events via `onDebug` callback)
+- Prune storage (SQLite via `better-sqlite3` in `prune.db`)
+- MCP server (`context_engine/mcp/mcp-server.ts`)
+
+## What lives in Python
+
+- md_db scanning and parsing (`knowledge_graph/markdown_utils.py`)
+- Vector embeddings (`VectorStoreIndex` + `OllamaEmbedding`)
+- Wikilink graph (`SimplePropertyGraphStore` with `EntityNode` + `Relation`)
+- Hybrid retrieval (`knowledge_graph/retriever.py`)
+- Prune cluster computation (`knowledge_graph/pruner.py`)
+- Hash-based change detection
 
 ## Main collaborators
 
-- [[context_engine-ingest-pipeline]] – parses `.md` files into `ParsedNote`s.
-- [[context_engine-indexing-lifecycle]] – syncs notes to SQLite + builds vector index.
-- [[sqlite-graph-store]] – persistent note + edge graph.
-- [[context_engine-retrieval-workflow]] – hybrid retrieval logic.
-- [[link-graph-infrastructure]] – enhanced wikilink graph & validation.
-- [[context_engine-mcp-interface]] – MCP tools that expose the engine.
+- [[context_engine-indexing-lifecycle]] — syncs notes to vector + graph stores
+- [[sqlite-graph-store]] — `SimplePropertyGraphStore` (now Python, not SQLite)
+- [[context_engine-retrieval-workflow]] — hybrid retrieval logic
+- [[context_engine-mcp-interface]] — MCP tools that expose the engine
+- [[link-graph-infrastructure]] — enhanced wikilink graph & validation (still TS)
 
 See [[context_engine-data-models]] for the data shapes the engine works with.

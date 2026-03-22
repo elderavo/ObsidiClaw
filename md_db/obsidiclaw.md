@@ -15,8 +15,9 @@ Self-knowledge about the ObsidiClaw project I'm currently operating within. This
 ## Architecture Overview
 
 **Core Modules**:
-- `md_db/` - Flat-file markdown knowledge graph (tools, concepts, notes)  
-- `context_engine/` - Hybrid retrieval: LlamaIndex vector + SQLite BFS graph expansion
+- `md_db/` - Flat-file markdown knowledge graph (tools, concepts, notes)
+- `knowledge_graph/` - Python subprocess: VectorStoreIndex + SimplePropertyGraphStore, JSON-RPC stdio server
+- `context_engine/` - TS bridge to Python knowledge_graph, context formatting, reviewer, MCP boundary
 - `orchestrator/` - Wraps Pi runs, manages lifecycle, event logging
 - `logger/` - SQLite run logging (`sessions`, `runs`, `trace`, `synthesis_metrics` tables; `TraceEmitter` for structured trace events)
 - `extension/` - Pi extension factory, pure MCP client
@@ -26,7 +27,7 @@ Self-knowledge about the ObsidiClaw project I'm currently operating within. This
 
 **MCP Boundary**: `ContextEngine` only accessible through `context_engine/mcp/mcp-server.ts`. Extensions are pure MCP clients using `InMemoryTransport` pairs.
 
-**Hybrid Retrieval**: Vector seeds (LlamaIndex/Ollama embeddings) + depth-1 BFS graph expansion (SQLite). Index-type notes filtered out (navigation/TOC only).
+**Hybrid Retrieval**: Vector seeds (LlamaIndex Python VectorStoreIndex) + depth-1 graph expansion (SimplePropertyGraphStore). Python subprocess via JSON-RPC. Index-type notes filtered out (navigation/TOC only).
 
 **Startup Behavior**: `before_agent_start` injects `preferences.md` only. Pi uses `retrieve_context` tool for on-demand project knowledge.
 
@@ -36,17 +37,17 @@ Self-knowledge about the ObsidiClaw project I'm currently operating within. This
 
 ## Current Status
 
-**Completed Phases**: 1-6.5 (foundation, orchestrator, logging, hybrid retrieval, tools, infrastructure hardening)
-**Active Work**: Phase 7-11 (subagent reliability, review pipeline, graph refactor, scheduler validation, visualizer)
+**Completed Phases**: 1-6.5, 9 (foundation through infrastructure hardening + Python graph migration)
+**Active Work**: Phase 7-8, 10-11 (subagent reliability, review pipeline, scheduler validation, visualizer)
 **Entry Points**: `pi` (interactive, full stack via extension) or `npx tsx orchestrator/run.ts` (headless/scripting)
 
 ## Common Patterns
 
-**Indexing Lifecycle**: Happens on startup via `contextEngine.initialize()` (fast path if md_db unchanged). Periodic re-sync via `reindex-md-db` scheduled job (30min).
+**Indexing Lifecycle**: Happens on startup via `contextEngine.initialize()` which sends `initialize` RPC to Python subprocess (fast path if md_db unchanged, ~570ms; slow path ~1350ms with embedding). Periodic re-sync via `reindex-md-db` scheduled job (30min).
 
 **Note Types**: `tool` (executable), `concept` (insights), `index` (filtered navigation). Frontmatter `type:` field controls categorization.
 
-**Context Retrieval**: Use `retrieve_context` tool frequently for project-specific knowledge. Queries vector index + graph expansion.
+**Context Retrieval**: Use `retrieve_context` tool frequently for project-specific knowledge. Queries Python VectorStoreIndex + SimplePropertyGraphStore graph expansion.
 
 **Extension Changes**: After editing any file in `.pi/extensions/`, Alex must run `/reload` to implement the changes. Extensions are not auto-reloaded on file changes.
 

@@ -51,7 +51,7 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **Debug events**: `ContextEngine` emits `ce_*` events via `onDebug` callback at every internal state transition (init, vector retrieval, graph expansion, review, reindex). Debug JSONL is **ON by default** (`OBSIDI_CLAW_DEBUG=0` to disable). All events land in `trace` table + `.obsidi-claw/debug/{sessionId}.jsonl`.
 - **Startup injection**: `before_agent_start` calls MCP `get_preferences` and injects `preferences.md` only — no RAG on startup. Pi uses `retrieve_context` for on-demand project knowledge.
 - **Index notes filtered**: `note_type === "index"` notes (TOC/nav files) are excluded from hybrid retrieval results and do not act as graph expansion origins.
-- **LlamaIndex owns embeddings only**: wikilink graph lives in SQLite (`better-sqlite3`); LlamaIndex handles vector seeds. *(Planned: migrate graph to Python LlamaIndex for property graph support — see Build Order Phase 9.)*
+- **Python owns retrieval**: `knowledge_graph/` module runs as subprocess. `VectorStoreIndex` (LlamaIndex Python) for vector embeddings, `SimplePropertyGraphStore` for wikilink graph (EntityNode + Relation). TS bridge communicates via JSON-RPC over stdin/stdout. TS retains context formatting, reviewer, debug events, prune storage.
 - **Subagents are first-class entities**: `SubagentRunner` in `shared/agents/` can be spawned from Pi tools, scheduler, or standalone scripts — no parent Pi session required.
 - **Personalities**: Stored in `shared/agents/personalities/` (outside `md_db/`) with frontmatter provider config. Injected into system prompt before task section.
 - **OS compat layer**: All code uses `shared/os/` abstractions for process spawning, filesystem, signal handling. No `process.platform` or Windows-specific code.
@@ -85,12 +85,12 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
   - [ ] 8d. Add logging/debug events to `session_review.ts` so the review pipeline is visible in JSONL (proposal received, notes written, errors)
   - [ ] 8e. End-to-end test: session with a clear learnable pattern → review fires → new concept note appears in md_db
 
-- [ ] **Phase 9 — Graph system refactor to Python** *(LlamaIndex property graph only in Python)*
-  - [ ] 9a. Evaluate: what does LlamaIndex Python property graph give us that SQLite BFS doesn't? (typed edges, graph queries, community detection, better retrieval strategies)
-  - [ ] 9b. Design the bridge: Python graph service (FastAPI or stdio subprocess) that the TS context engine calls. The MCP boundary means only the engine internals change — extension/orchestrator untouched.
-  - [ ] 9c. Implement Python graph service: LlamaIndex PropertyGraphIndex with Ollama embeddings, expose build/query/sync endpoints
-  - [ ] 9d. Migrate TS `context_engine/store/` and `context_engine/retrieval/` to call the Python service instead of direct SQLite BFS
-  - [ ] 9e. Validate: same retrieval quality or better, with richer graph capabilities (typed edges for "is-tool-for", "contradicts", "supersedes")
+- [x] **Phase 9 — Graph system refactor to Python** *(LlamaIndex Python VectorStoreIndex + SimplePropertyGraphStore)*
+  - [x] 9a. Evaluate: LlamaIndex Python gives native OllamaEmbedding + SimplePropertyGraphStore for typed entity/relation storage
+  - [x] 9b. Design the bridge: Python subprocess with JSON-RPC over stdin/stdout. TS spawns conda env Python directly.
+  - [x] 9c. Implement Python knowledge_graph module: VectorStoreIndex + SimplePropertyGraphStore with Ollama embeddings, 7 RPC methods
+  - [x] 9d. Migrate TS context-engine.ts to subprocess bridge, remove LlamaIndex TS deps, move old TS files to _legacy/
+  - [x] 9e. Validate: vector retrieval + graph expansion working (43 notes, 90 edges, scores verified, fast/slow paths, JSON-RPC confirmed)
 
 - [ ] **Phase 10 — Scheduler validation** *(depends on Phase 7 — if agents are flaky, scheduled jobs may silently fail)*
   - [ ] 10a. Verify all scheduled jobs run: `reindex-md-db`, `health-check`, `normalize-md-db` — check `job_start`/`job_complete` events in runs.db
@@ -104,6 +104,16 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
   - [ ] 11c. Add tool call inspection: for `tool_call`/`tool_result` events, show tool name, args, and result preview
   - [ ] 11d. Add filtering: by session ID, by event type prefix (`ce_*`, `tool_*`), by time range
   - [ ] 11e. Consider a web UI (simple HTML + SQLite query API) for richer visualization — but CLI-first
+
+## Learning Loops (0 of 3 closed)
+
+Three self-improvement loops are in flight. None are closed end-to-end yet.
+
+1. **Domain learning (md_db)** — The system learns about its domain by improving markdown notes. Session review proposes new concept notes and preference updates; the reindex job picks them up. *Status: pipeline built, not yet producing output (Phase 8).*
+2. **User learning (session logging)** — The system learns about the user by analyzing session-level conversations. Session transcripts are reviewed for patterns, corrections, and preferences. *Status: logging works, review fires on shutdown but proposals not validated (Phase 8).*
+3. **Self learning (subagent call logging)** — The system learns about itself by analyzing failure modes of subagent calls. Run lineage (parent/child) and run_kind tracking are in the schema. *Status: schema ready, no analysis or feedback loop implemented yet (Phase 7/12).*
+
+See `.claude/learning-loops-plan.md` for the detailed closure plan.
 
 ## Future
 - [ ] **Phase 12** — Comparison engine (compare logged runs, diff outcomes)
@@ -281,6 +291,22 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **Decision**: Deferred instrumentation (wiring `logger.trace.emit()` at module boundaries) until a consumer (visualizer) drives which events need it. Schema is forward-compatible.
 - `tsc --noEmit` clean.
 - **Next**: Build Phase 11 visualizer to drive targeted instrumentation. Or rebuild and test the new schema populates correctly.
+
+**2026-03-21 — Session 14 (Phase 9 — Python Graph Migration Complete)**
+- **Architecture pivot**: `PropertyGraphIndex` doesn't properly persist vector embeddings for manually-upserted `EntityNode`s. Switched to **separate** `VectorStoreIndex` (vector search) + `SimplePropertyGraphStore` (wikilink graph) — same dual-store pattern as the old TS code, implemented in Python.
+- **Python `knowledge_graph/` module** (10 files): `__init__.py`, `__main__.py`, `engine.py`, `indexer.py`, `retriever.py`, `pruner.py`, `server.py`, `protocol.py`, `markdown_utils.py`, `models.py`
+  - `indexer.py`: Scans md_db → creates `EntityNode` + `Relation` in graph store → creates `TextNode` in `VectorStoreIndex` → persists both separately
+  - `retriever.py`: `VectorStoreIndex.as_retriever()` for seeds + `graph_store.get_triplets()` for BFS depth-1 expansion. Tag boost (+10%/tag, max +30%). Index notes filtered.
+  - `pruner.py`: `VectorStoreIndex.as_retriever()` for pairwise similarity → DFS connected components
+  - `server.py`: JSON-RPC stdio loop (stdin/stdout) with 7 RPC methods
+  - `engine.py`: Hash-based fast/slow path, note cache, lifecycle management
+- **TS bridge** (`context_engine/context-engine.ts`): All LlamaIndex/SQLite imports removed. Subprocess spawns direct conda Python (`C:\...\envs\obsidiclaw\python.exe`, **not** `conda run` which doesn't forward stdin on Windows). JSON-RPC with UUID-based request IDs, 120s timeout, crash recovery.
+- **Lesson: `conda run` doesn't forward stdin** — `conda run -n env python` receives empty stdin from pipes. Must use the conda env's Python executable directly. `resolvePythonPath()` checks common conda paths, falls back to `execSync` discovery.
+- **Lesson: `SimplePropertyGraphStore.supports_vector_queries` is False** — can't use `VectorContextRetriever` with it. Must use `VectorStoreIndex.as_retriever()` separately.
+- **Validation results**: Slow path 1350ms (43 notes), fast path 570ms. Vector retrieval returns scored results (e.g., `web_search.md` → 0.94 for "web search tool"). Graph expansion finds 4-11 neighbors. 43 nodes, 90 edges. JSON-RPC subprocess works end-to-end. `tsc --noEmit` clean.
+- **Consumers updated**: `mcp-server.ts` (prune storage opens `prune.db` directly), `health-check.ts` (`getGraphStats()` instead of `getGraphStore()`), `package.json` (removed LlamaIndex TS deps)
+- **Deleted TS files** → `context_engine/_legacy/`: `graph-store.ts`, `graph-indexer.ts`, `hybrid-retrieval.ts`, `note-parser.ts`, `note-models.ts`, `prune-builder.ts`
+- **Next**: Commit Phase 9 work. Then Phase 7 (subagent reliability) or Phase 8 (post-session review) or Phase 10 (scheduler validation).
 
 # End-of-Run Protocol
 Every agent session MUST close by doing all three:

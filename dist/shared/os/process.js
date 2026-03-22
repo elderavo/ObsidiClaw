@@ -19,6 +19,7 @@ export function spawnProcess(command, args, opts) {
         stdio: (opts?.stdio ?? "pipe"),
         cwd: opts?.cwd,
         env: opts?.env ? { ...process.env, ...opts.env } : undefined,
+        windowsHide: true,
     });
     return {
         get pid() {

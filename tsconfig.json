@@ -23,5 +23,5 @@
     "scripts/**/*.ts",
     "scheduler/**/*.ts"
   ],
-  "exclude": ["node_modules", "dist"]
+  "exclude": ["node_modules", "dist", "context_engine/_legacy"]
 }

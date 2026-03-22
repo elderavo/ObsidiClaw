@@ -19,6 +19,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { join } from "path";
+import Database from "better-sqlite3";
 import { PruneClusterStorage } from "../prune/prune-storage.js";
 import { resolvePaths } from "../../shared/config.js";
 import { getExecPath } from "../../shared/os/process.js";
@@ -327,11 +328,11 @@ function registerSchedulerTools(server, scheduler, subagentRunner, persistentBac
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-function getPruneStorage(engine) {
-    const graph = engine.getGraphStore();
-    if (!graph)
-        throw new Error("ContextEngine not initialized. Call initialize() first.");
-    return new PruneClusterStorage(graph.getDatabase());
+function getPruneStorage(_engine) {
+    const paths = resolvePaths();
+    const pruneDbPath = join(paths.rootDir, ".obsidi-claw", "prune.db");
+    const db = new Database(pruneDbPath);
+    return new PruneClusterStorage(db);
 }
 function formatClusterListMarkdown(clusters) {
     if (clusters.length === 0)

@@ -32,10 +32,15 @@ export function createHealthCheckJob(engine, intervalMinutes = 15) {
             catch (err) {
                 issues.push(`Ollama unreachable at ${ollamaHost}: ${err instanceof Error ? err.message : String(err)}`);
             }
-            // Check graph store
-            const graphStore = engine.getGraphStore();
-            if (!graphStore) {
-                issues.push("Graph store not initialized");
+            // Check knowledge graph subprocess
+            try {
+                const stats = await engine.getGraphStats();
+                if (!stats.indexLoaded) {
+                    issues.push("Knowledge graph index not loaded");
+                }
+            }
+            catch (err) {
+                issues.push(`Knowledge graph check failed: ${err instanceof Error ? err.message : String(err)}`);
             }
             if (issues.length > 0) {
                 throw new Error(`Health check failed:\n${issues.join("\n")}`);

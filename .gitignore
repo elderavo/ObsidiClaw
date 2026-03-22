@@ -1,11 +1,10 @@
 .*
 !.pi
 !.pi/**
-!.claude
-!.claude/**
 node_modules
+__pycache__/
 md_db/
-# Stale compiled JS in source dirs (outDir is dist/, not source)
+dist/
 context_engine/**/*.js
 extension/**/*.js
 logger/**/*.js

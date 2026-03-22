@@ -138,41 +138,34 @@ export class ContextReviewer {
 
     const systemPrompt = personality?.content ?? "You synthesize retrieved context into focused, query-relevant summaries.";
 
-    const userPrompt = [
-      `## Query`,
-      `"${query}"`,
-      ``,
-      `## Retrieved Context`,
-      rawContext,
-      ``,
-      `## Instructions`,
-      `Rewrite the context above into a focused document that contains ONLY information relevant to the query. Be ruthless:`,
-      `- Cut background, history, and generic descriptions that don't help answer the query`,
-      `- Keep specific facts, patterns, code signatures, warnings, and rules that apply`,
-      `- If a section has nothing relevant, omit it entirely`,
-      `- Preserve code blocks and API signatures verbatim when relevant`,
-      `- Always include warnings, failure modes, and "NEVER" rules that apply to the query`,
-      `- Output markdown. No preamble, no meta-commentary, just the focused context.`,
-    ].join("\n");
-
-    const response = await axios.post(
-      `${ollamaHost}/api/chat`,
-      {
-        model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        stream: false,
-        options: {
-          num_ctx: 131072,
-        },
-      },
-      {
-        timeout: this.config.maxLatencyMs,
-        signal: AbortSignal.timeout(this.config.maxLatencyMs),
-      },
-    );
+const userPrompt = [
+  `## Query`,
+  `"${query}"`,
+  ``,
+  `## Retrieved Context`,
+  rawContext,
+].join("\n");
+const response = await axios.post(
+  `${ollamaHost}/api/chat`,
+  {
+    model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+    stream: false,
+    options: {
+      num_ctx: 16384,
+      temperature: 0.1,
+      top_p: 0.9,
+      repeat_penalty: 1.1,
+    },
+  },
+  {
+    timeout: this.config.maxLatencyMs,
+    signal: AbortSignal.timeout(this.config.maxLatencyMs),
+  },
+);
 
     const content = response.data?.message?.content ?? "";
     if (!content.trim()) {

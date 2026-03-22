@@ -5,66 +5,48 @@ type: concept
 
 # Context Engine Indexing Lifecycle
 
-Describes how `md_db/` is synchronized into SQLite and the vector index.
+Describes how `md_db/` is scanned, parsed, embedded, and persisted by the Python `knowledge_graph/` subprocess.
 
 ## High-level phases
 
-1. **Initialize embeddings and DB**
-   - `ContextEngine.initialize()`:
-     - Creates `.obsidi-claw/` directory if needed.
-     - Configures `Settings.embedModel` with `OllamaEmbedding` (host + model from config/env).
-     - Opens [[sqlite-graph-store]] (`SqliteGraphStore` with schema migration).
+1. **TS bridge spawns Python subprocess**
+   - `ContextEngine.initialize()` in TS:
+     - Resolves the conda env Python path (`obsidiclaw` environment)
+     - Spawns `python -m knowledge_graph` as a long-lived subprocess
+     - Sends `initialize` JSON-RPC with `md_db_path`, `db_dir`, `ollama_host`
 
 2. **Change detection (fast vs slow path)**
-   - `computeMdDbHash(mdDbPath)`:
-     - Hash of all `*.md` paths and `mtimeMs`.
-     - Same hash → `md_db` unchanged since last run.
-   - Stored in SQLite `index_state` as `md_db_hash`.
+   - `compute_md_db_hash(md_db_path)` in Python:
+     - MD5 of sorted `relative_path:mtime_ms` entries for all `.md` files
+     - Stored in `.obsidi-claw/knowledge_graph/.md_db_hash`
    - Fast path:
-     - If hash unchanged **and** `vector-index/vector_store.json` exists:
-       - Build `storageContextFromDefaults({ persistDir })`.
-       - `VectorStoreIndex.init({ storageContext })` – reload embeddings, no re-embedding.
+     - Hash unchanged **and** `property_graph_store.json` + `docstore.json` exist
+     - Loads `VectorStoreIndex` from storage + `SimplePropertyGraphStore` from JSON
+     - Re-scans md_db for note bodies (no embedding, just file reads)
    - Slow path:
-     - If first run or any file changed:
-       - Full sync + re-embedding.
+     - First run or any file changed → full rebuild
 
-3. **Slow path: sync md_db → SQLite graph**
-   - `syncMdDbToGraph(mdDbPath, graphStore)`:
-     - Collect `filePaths` via `collectMarkdownFiles`.
-     - **Pass 1 – notes**
-       - For each file: `parseMarkdownFile(...)` → `ParsedNote` (see [[context_engine-ingest-pipeline]]).
-       - `graphStore.upsertNote(note)` populates `notes` table.
-     - **Pass 2 – edges**
-       - For each parsed note:
-         - Resolve each `linksOut` target via `graphStore.resolveLink(linkText)`.
-         - Filter unresolved links.
-         - `graphStore.replaceEdges(note.noteId, resolvedIds)` updates `edges` table.
+3. **Slow path: scan md_db → build stores**
+   - `build_index(md_db_path, db_dir, embed_model)` in `knowledge_graph/indexer.py`:
+     - **Scan**: Recursively collect `.md` files (skip `.obsidian`)
+     - **Parse**: For each file → frontmatter, body, wikilinks, note type, title, tags
+     - **Graph store**: Create `EntityNode` per note (label, properties), `Relation` per resolved wikilink → `SimplePropertyGraphStore`
+     - **Vector index**: Create `TextNode` per note (title + body, metadata) → `VectorStoreIndex` with `OllamaEmbedding`
+     - **Persist**: Graph store to `property_graph_store.json`, vector index to `docstore.json` + `default__vector_store.json` + `index_store.json`
 
-4. **Slow path: build vector index from graph**
-   - `buildVectorIndexFromGraph(graphStore, storageContext?)`:
-     - Reads all notes from SQLite via `listAllNotes()`.
-     - Builds `Document`s with:
-       - `text`: stored `body` (frontmatter already stripped).
-       - `metadata`: `file_path`, `note_type`, `tool_id`.
-     - `VectorStoreIndex.fromDocuments(docs, { storageContext })`:
-       - Embeds all documents, persists to `vector-index/` if `storageContext` passed.
-
-5. **Persist state**
-   - `graphStore.setState("md_db_hash", currentHash)` so next startup can fast-path.
+4. **Note cache**
+   - `initialize` and `reindex` responses include `note_cache: {path: body}`
+   - TS caches all note bodies in-memory for synchronous `getNoteContent()` calls
 
 ## Runtime reindexing
 
-- `ContextEngine.reindex()`:
-  - Re-runs `syncMdDbToGraph` and `buildVectorIndexFromGraph` with persistence.
-  - Updates `md_db_hash`.
-  - For use when `md_db/` changes while the process is running.
-
-- `ContextEngine.rebuildLinkGraph()`:
-  - Uses [[link-graph-infrastructure]] (`LinkGraphProcessor`) with the same SQLite DB and `mdDbPath`.
-  - Rebuilds enhanced `wikilinks` / `detected_cycles` tables and validates them.
+- `ContextEngine.reindex()` in TS sends `reindex` RPC to Python
+- Python computes hash — if unchanged, returns `{skipped: true}`
+- If changed: full rebuild, returns updated note cache
+- Triggered by `reindex-md-db` scheduled job (30min) or manual `run_job`
 
 ## Dependencies
 
-- [[context_engine-ingest-pipeline]] – parsing.
-- [[sqlite-graph-store]] – persistence & graph traversal.
-- [[context_engine-retrieval-workflow]] – assumes this lifecycle has run before retrieval.
+- [[context_engine-ingest-pipeline]] — parsing (now in `knowledge_graph/markdown_utils.py`)
+- [[sqlite-graph-store]] — `SimplePropertyGraphStore` (now Python, not SQLite)
+- [[context_engine-retrieval-workflow]] — assumes indexing has run before retrieval

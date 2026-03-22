@@ -43,6 +43,7 @@ export function spawnProcess(
     stdio: (opts?.stdio ?? "pipe") as StdioOptions,
     cwd: opts?.cwd,
     env: opts?.env ? { ...process.env, ...opts.env } : undefined,
+    windowsHide: true,
   });
 
   return {
