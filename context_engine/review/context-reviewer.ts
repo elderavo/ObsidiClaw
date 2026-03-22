@@ -106,9 +106,9 @@ export class ContextReviewer {
         reviewMs: Date.now() - t0,
         skipped: false,
       };
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      console.warn(`[context_review] Review failed (${errMsg}), using raw context`);
+    } catch {
+      // Error details surface via ce_review_done event (skipped=true, skipReason="error")
+      // emitted by the ContextEngine caller. No console output needed.
       return {
         synthesizedContext: null,
         reviewMs: Date.now() - t0,

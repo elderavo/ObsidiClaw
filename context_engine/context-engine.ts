@@ -74,6 +74,8 @@ interface RpcPending {
 export class ContextEngine {
   private subprocess: ChildProcess | null = null;
   private rl: ReadlineInterface | null = null;
+  private subprocessExitPromise: Promise<void> | null = null;
+  private resolveSubprocessExit: (() => void) | null = null;
   private readonly pendingRpc = new Map<string, RpcPending>();
   private initialized = false;
   private pythonPath: string | null = null;
@@ -369,7 +371,9 @@ export class ContextEngine {
   /**
    * Close the subprocess and clean up resources.
    */
-  close(): void {
+  async close(): Promise<void> {
+    const waitForExit = this.waitForSubprocessExit();
+
     if (this.subprocess) {
       try {
         // Send shutdown RPC (fire-and-forget)
@@ -380,19 +384,24 @@ export class ContextEngine {
         // Subprocess may already be dead
       }
 
-      // Kill the subprocess
-      this.subprocess.kill("SIGTERM");
-      this.subprocess = null;
-      this.rl = null;
+      try {
+        this.subprocess.kill("SIGTERM");
+      } catch {
+        // Already dead
+      }
     }
 
-    // Reject all pending RPCs
+    await waitForExit;
+
+    // Reject all pending RPCs (if any remain)
     for (const [id, pending] of this.pendingRpc) {
       clearTimeout(pending.timer);
       pending.reject(new Error("ContextEngine closed"));
     }
     this.pendingRpc.clear();
 
+    this.subprocess = null;
+    this.rl = null;
     this.initialized = false;
     this.noteCache.clear();
   }
@@ -410,6 +419,10 @@ export class ContextEngine {
     const proc = spawn(pythonExe, ["-m", "knowledge_graph"], {
       stdio: ["pipe", "pipe", "pipe"],
       cwd,
+    });
+
+    this.subprocessExitPromise = new Promise<void>((resolve) => {
+      this.resolveSubprocessExit = resolve;
     });
 
     this.subprocess = proc;
@@ -439,10 +452,24 @@ export class ContextEngine {
         pending.reject(new Error(`Python subprocess exited (code=${code})`));
       }
       this.pendingRpc.clear();
+
+      this.resolveSubprocessExit?.();
+      this.resolveSubprocessExit = null;
+      this.subprocessExitPromise = null;
     });
 
     // Give the subprocess a moment to start
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  }
+
+  private async waitForSubprocessExit(timeoutMs = 2000): Promise<void> {
+    const exitPromise = this.subprocessExitPromise;
+    if (!exitPromise) return;
+
+    await Promise.race([
+      exitPromise.catch(() => {}),
+      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+    ]);
   }
 
   /**
