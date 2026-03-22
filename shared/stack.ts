@@ -142,7 +142,7 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     try {
       const ts = await runMirrorTs({ scanDir: paths.rootDir, mirrorDir, omitPatterns: ["dist", "node_modules", "_legacy", ".pi", ".claude", "*.d.ts"], force: false });
       const py = await runMirrorPy({ scanDir: join(paths.rootDir, "knowledge_graph"), mirrorDir, omitPatterns: ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist"], force: false });
-      console.log(`[obsidi-claw] mirror: ts ${ts.written} written / ${ts.skipped} skipped — py ${py.written} written / ${py.skipped} skipped`);
+      // console.log(`[obsidi-claw] mirror: ts ${ts.written} written / ${ts.skipped} skipped — py ${py.written} written / ${py.skipped} skipped`);
     } catch (err) {
       console.warn("[obsidi-claw] initial mirror run failed", err);
     }

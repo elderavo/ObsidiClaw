@@ -104,3 +104,13 @@ Pending proposals auto-derived from sessions. Review and merge manually.
 ### Signals
 - **[weak imperative]** "you are IN a pi session"
   → The user wants the agent to be aware that they are in a Pi session context.
+
+## Session 678f49c0 (2026-03-22)
+
+### Signals
+- **[moderate preference]** "instead of harcoding the ollama payload, it inserts the code-reviewer personality from /shared/agents/personalities?"
+  → Use dynamic personality injection instead of hardcoded values
+
+### Synthesized Preferences
+- **[strong]** Always use dynamic personality injection instead of hardcoded values for ollama payloads
+  - Evidence: User requested to replace hardcoded payload with injected personality from shared agents

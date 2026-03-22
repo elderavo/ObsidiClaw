@@ -29,18 +29,43 @@ const extension: ExtensionFactory = async (pi) => {
     parameters: Type.Object({}),
     async execute() {
       const scheduler = getSharedScheduler();
-      const lines = ["# Scheduled Jobs", ""];
+      const backend = getSharedBackend();
+      const sections: string[] = [];
 
+      // ── Section 1: scheduler init status ──────────────────────────────────
       if (scheduler) {
         const states = scheduler.getStates();
-        for (const s of states) {
+        sections.push(`## Scheduler Status\nIn-process scheduler: initialized (${states.length} job${states.length !== 1 ? "s" : ""} registered)`);
+
+        // ── Section 2: in-process jobs ──────────────────────────────────────
+        const jobLines = states.map((s) => {
           const lastRun = s.lastRunAt ? new Date(s.lastRunAt).toISOString() : "never";
-          lines.push(`- **${s.name}** | last run: ${lastRun} | status: ${s.status}${s.lastError ? ` | error: ${s.lastError}` : ""}`);
-        }
+          const dur = s.lastDurationMs != null ? ` (${s.lastDurationMs}ms)` : "";
+          const err = s.lastError ? ` ⚠ ${s.lastError}` : "";
+          const installErr = s.installError ? ` ⛔ install failed: ${s.installError}` : "";
+          return `- **${s.name}** | status: ${s.status} | last run: ${lastRun}${dur}${err}${installErr}`;
+        });
+        sections.push(`## In-Process Jobs\n${jobLines.length ? jobLines.join("\n") : "(none)"}`);
+      } else {
+        sections.push(`## Scheduler Status\nIn-process scheduler: NOT initialized (no persistent backend available — Windows only)`);
       }
 
-      const text = lines.length === 2 ? "No scheduled jobs registered." : lines.join("\n");
-      return { content: [{ type: "text" as const, text }], details: {} };
+      // ── Section 3: OS-level tasks ──────────────────────────────────────────
+      if (backend) {
+        try {
+          const tasks = await backend.list();
+          const taskLines = tasks.length
+            ? tasks.map((t) => `- **${t.jobName}** | enabled: ${t.enabled} | status: ${t.status || "unknown"}`)
+            : ["(no ObsidiClaw tasks found in Windows Task Scheduler)"];
+          sections.push(`## OS Tasks (Windows Task Scheduler)\n${taskLines.join("\n")}`);
+        } catch (err) {
+          sections.push(`## OS Tasks (Windows Task Scheduler)\nFailed to query: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      } else {
+        sections.push(`## OS Tasks\nBackend not available (non-Windows or not yet initialized).`);
+      }
+
+      return { content: [{ type: "text" as const, text: sections.join("\n\n") }], details: {} };
     },
   });
 

@@ -21,7 +21,7 @@
     "pi_agent/**/*.ts",
     "shared/**/*.ts",
     "scripts/**/*.ts",
-    "scheduler/**/*.ts"
+    "jobs/**/*.ts"
   ],
   "exclude": ["node_modules", "dist", "context_engine/_legacy"]
 }

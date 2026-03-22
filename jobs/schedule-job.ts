@@ -14,6 +14,7 @@ import type { JobDefinition, JobState } from "./types.js";
 
 export class JobScheduler {
   private readonly jobs = new Map<string, JobDefinition>();
+  private readonly installErrors = new Map<string, string>();
   private readonly logger: RunLogger;
   private readonly backend: PersistentScheduleBackend;
   private readonly rootDir: string;
@@ -60,7 +61,9 @@ export class JobScheduler {
         await this.backend.install(taskName, intervalMs, process.execPath, [runnerScript, job.name]);
         // console.log(`[scheduler] installed OS task: ${taskName}`);
       } catch (err) {
-        console.error(`[scheduler] failed to install "${taskName}":`, err instanceof Error ? err.message : err);
+        const msg = err instanceof Error ? err.message : String(err);
+        this.installErrors.set(job.name, msg);
+        console.error(`[scheduler] failed to install "${taskName}":`, msg);
       }
     }
   }
@@ -86,6 +89,7 @@ export class JobScheduler {
         lastDurationMs: last?.durationMs ?? null,
         lastError: last?.error ?? null,
         runCount: last?.runCount ?? 0,
+        installError: this.installErrors.get(job.name),
       };
     });
   }

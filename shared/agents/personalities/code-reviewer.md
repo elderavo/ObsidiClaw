@@ -2,7 +2,7 @@
 type: personality
 title: Code Reviewer
 provider:
-  model: qwen3.5:4b
+  model: qwen3.5:8b
 ---
 # Code Reviewer
 

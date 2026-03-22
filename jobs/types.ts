@@ -62,4 +62,6 @@ export interface JobState {
   lastDurationMs: number | null;
   lastError: string | null;
   runCount: number;
+  /** Set when start() failed to install the OS task via the persistent backend. */
+  installError?: string;
 }
