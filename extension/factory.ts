@@ -36,6 +36,7 @@ import { ensureDir, writeText } from "../shared/os/fs.js";
 import { spawnProcess, getExecPath } from "../shared/os/process.js";
 import { createObsidiClawStack, type ObsidiClawStack } from "../shared/stack.js";
 import { mapPiEventToRunEvent } from "../shared/pi-event-mapper.js";
+import { buildDirectoryTree, stripDirectoryBlock } from "../scripts/update-directory-tree.js";
 import type { RunEvent } from "../orchestrator/types.js";
 
 // ---------------------------------------------------------------------------
@@ -188,6 +189,9 @@ export function createObsidiClawExtension(
     pi.on("session_start", async () => {
       ensureDir(join(paths.rootDir, ".obsidi-claw"));
       if (stack) await stack.initialize();
+
+      // One-time migration: strip directory tree block from preferences.md if present.
+      try { stripDirectoryBlock(join(mdDbPath, "preferences.md")); } catch { /* ignore */ }
       await mcpServer.connect(serverTransport);
       await client.connect(clientTransport);
 
@@ -261,14 +265,18 @@ export function createObsidiClawExtension(
         const result = await client.callTool({ name: "get_preferences", arguments: {} });
         const prefsContent = extractMcpText(result);
 
-        const contextBlock = prefsContent
+        const prefsBlock = prefsContent
           ? `<!-- ObsidiClaw: Preferences -->\n\n${prefsContent}\n\n<!-- End ObsidiClaw Preferences -->`
           : "";
+
+        const treeContent = buildDirectoryTree(paths.rootDir);
+        const treeBlock = `<!-- ObsidiClaw: Project Structure -->\n\n## Project directory structure\n\n${treeContent}\n\n<!-- End ObsidiClaw Project Structure -->`;
 
         return {
           systemPrompt:
             event.systemPrompt +
-            (contextBlock ? "\n\n" + contextBlock : "") +
+            (prefsBlock ? "\n\n" + prefsBlock : "") +
+            "\n\n" + treeBlock +
             "\n\n" +
             TOOL_REMINDER,
         };

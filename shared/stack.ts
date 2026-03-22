@@ -25,7 +25,6 @@ import { startMdDbLintWatcher } from "../jobs/watchers/md-db-lint-watcher.js";
 import { startMirrorWatcher } from "../jobs/watchers/mirror-watcher.js";
 import { runMirrorTs } from "../scripts/mirror-codebase.js";
 import { runMirrorPy } from "../scripts/mirror-codebase-py.js";
-import { updateDirectory } from "../scripts/update-directory-tree.js";
 
 // ---------------------------------------------------------------------------
 // Options
@@ -132,12 +131,6 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
   async function initialize(): Promise<void> {
-    try {
-      updateDirectory(paths.rootDir, paths.mdDbPath);
-    } catch (err) {
-      console.warn("[obsidi-claw] directory tree refresh failed", err);
-    }
-
     await engine.initialize();
     if (scheduler) {
       void scheduler.start();

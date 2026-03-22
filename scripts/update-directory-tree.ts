@@ -53,6 +53,46 @@ function buildDirectoryTreeLines(rootDir: string, ignoreNames: Set<string>): str
 }
 
 /**
+ * Build a formatted directory tree string for injection as ephemeral startup context.
+ * Pure function — no file I/O.
+ */
+export function buildDirectoryTree(rootDir: string): string {
+  const treeLines = buildDirectoryTreeLines(rootDir, DEFAULT_IGNORES);
+  const rootLabel = basename(rootDir) || rootDir;
+  return ["```", `${rootLabel}/`, ...treeLines, "```"].join("\n");
+}
+
+/**
+ * Strip the auto-generated directory tree block from a markdown file (one-time migration).
+ * No-op if the block is not present. Returns true if the file was rewritten.
+ */
+export function stripDirectoryBlock(filePath: string): boolean {
+  let current: string;
+  try {
+    current = readText(filePath);
+  } catch {
+    return false;
+  }
+  const startIdx = current.indexOf(START_MARKER);
+  const endIdx = current.indexOf(END_MARKER);
+  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return false;
+
+  const stripped = (
+    current.slice(0, startIdx) +
+    current.slice(endIdx + END_MARKER.length)
+  ).replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+
+  if (stripped === current) return false;
+  try {
+    writeText(filePath, stripped);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * @deprecated Use buildDirectoryTree() for ephemeral context injection instead.
  * Update md_db/preferences.md with the latest project directory tree.
  * Returns true if the file was written.
  */
