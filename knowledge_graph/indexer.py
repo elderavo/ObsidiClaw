@@ -5,6 +5,9 @@ Architecture (mirrors the old TS code):
   - SimplePropertyGraphStore: owns wikilink graph (EntityNode + Relation edges)
 
 Both persist to .obsidi-claw/knowledge_graph/.
+
+This version leans on LlamaIndex's ObsidianReader for ingestion to avoid
+bespoke frontmatter/wikilink parsing.
 """
 
 from __future__ import annotations
@@ -22,15 +25,8 @@ from llama_index.core.graph_stores import (
 )
 from llama_index.core.schema import TextNode
 from llama_index.embeddings.ollama import OllamaEmbedding
+from llama_index.readers.obsidian import ObsidianReader
 
-from .markdown_utils import (
-    collect_markdown_files,
-    extract_tags,
-    extract_title,
-    extract_wikilinks,
-    infer_note_type,
-    parse_frontmatter,
-)
 from .models import NoteType, ParsedNote
 
 log = logging.getLogger(__name__)
@@ -48,32 +44,64 @@ _LABEL_MAP: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
-# Scan + parse
+# Scan + parse (via ObsidianReader)
 # ---------------------------------------------------------------------------
 
 
 def _scan_md_db(md_db_path: str) -> list[ParsedNote]:
-    """Recursively scan md_db and parse each .md file."""
-    file_paths = collect_markdown_files(md_db_path)
+    """Use ObsidianReader to ingest markdown files with frontmatter + wikilinks."""
+    # TODO: ObsidianReader metadata uses `file_name` + `folder_path` keys —
+    #       update _relative_path() to construct path from those when
+    #       `file_path`/`path`/`source` are missing.
+    # TODO: ObsidianReader may flatten frontmatter fields directly into metadata
+    #       instead of nesting under meta["frontmatter"]. Make _extract_tags(),
+    #       _infer_note_type(), and frontmatter access robust to both layouts.
+    reader = ObsidianReader(
+        input_dir=md_db_path,
+    )
+
+    try:
+        docs = reader.load_data()
+    except Exception as exc:
+        log.error("ObsidianReader failed: %s", exc)
+        return []
+
     notes: list[ParsedNote] = []
 
-    for fpath in file_paths:
-        try:
-            content = Path(fpath).read_text(encoding="utf-8")
-        except Exception as exc:
-            log.warning("Cannot read %s: %s", fpath, exc)
+    for doc in docs:
+        meta = doc.metadata or {}
+        frontmatter = meta.get("frontmatter", {})
+        if not isinstance(frontmatter, dict):
+            frontmatter = {}
+
+        rel_path = _relative_path(meta, md_db_path)
+        if not rel_path:
+            log.warning("Skipping doc with unknown path metadata: %s", meta)
             continue
 
-        rel_path = os.path.relpath(fpath, md_db_path).replace("\\", "/")
-        fm, body = parse_frontmatter(content)
-        note_type = infer_note_type(fm, rel_path)
-        title = extract_title(fm, body, rel_path)
-        links = extract_wikilinks(body)
-        tags = extract_tags(fm)
+        title = _pick_title(meta, rel_path)
+        note_type = _infer_note_type(frontmatter, rel_path)
+        tags = _extract_tags(frontmatter, meta)
+
+        raw_links = meta.get("wikilinks", []) or []
+        links = _dedupe_links(raw_links)
 
         tool_id: Optional[str] = None
         if note_type == "tool":
-            tool_id = str(fm.get("tool_id") or Path(rel_path).stem)
+            tool_id = str(frontmatter.get("tool_id") or Path(rel_path).stem)
+
+        time_created = _first_non_empty(
+            frontmatter.get("time_created"),
+            frontmatter.get("created"),
+            meta.get("time_created"),
+            meta.get("created"),
+        )
+        last_edited = _first_non_empty(
+            frontmatter.get("last_edited"),
+            frontmatter.get("updated"),
+            meta.get("last_edited"),
+            meta.get("updated"),
+        )
 
         notes.append(
             ParsedNote(
@@ -81,18 +109,109 @@ def _scan_md_db(md_db_path: str) -> list[ParsedNote]:
                 path=rel_path,
                 title=title,
                 note_type=note_type,
-                body=body,
-                frontmatter=fm,
+                body=doc.text or "",
+                frontmatter=frontmatter,
                 links_out=links,
                 tool_id=tool_id,
-                time_created=_str_or_none(fm.get("time_created") or fm.get("created")),
-                last_edited=_str_or_none(fm.get("last_edited") or fm.get("updated")),
+                time_created=_str_or_none(time_created),
+                last_edited=_str_or_none(last_edited),
                 tags=tags,
             )
         )
 
-    log.info("Scanned %d notes from %s", len(notes), md_db_path)
+    log.info("Scanned %d notes from %s via ObsidianReader", len(notes), md_db_path)
     return notes
+
+
+def _relative_path(meta: dict, md_db_path: str) -> str | None:
+    """Derive a vault-relative path from ObsidianReader metadata."""
+    candidate = None
+    for key in ("file_path", "path", "source"):
+        val = meta.get(key)
+        if isinstance(val, str) and val.strip():
+            candidate = val
+            break
+
+    if not candidate:
+        return None
+
+    candidate = candidate.replace("\\", "/")
+    # If absolute, rebase to md_db
+    try:
+        if os.path.isabs(candidate):
+            rel = os.path.relpath(candidate, md_db_path)
+        else:
+            rel = candidate
+    except Exception:
+        rel = candidate
+
+    return rel.replace("\\", "/")
+
+
+def _pick_title(meta: dict, rel_path: str) -> str:
+    title = meta.get("title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    stem = Path(rel_path).stem
+    return stem.replace("_", " ").replace("-", " ").title()
+
+
+def _infer_note_type(frontmatter: dict, rel_path: str) -> NoteType:
+    val = frontmatter.get("type") or frontmatter.get("note_type")
+    if isinstance(val, str) and val.strip():
+        normalized = val.strip().lower()
+        if normalized in ("tool", "concept", "index", "codebase"):
+            return normalized  # type: ignore[return-value]
+
+    norm_path = rel_path.replace("\\", "/")
+    if norm_path.startswith("tools/"):
+        return "tool"  # type: ignore[return-value]
+    if norm_path.startswith("concepts/"):
+        return "concept"  # type: ignore[return-value]
+
+    if Path(rel_path).stem.lower() == "index":
+        return "index"  # type: ignore[return-value]
+
+    return "concept"  # type: ignore[return-value]
+
+
+def _extract_tags(frontmatter: dict, meta: dict) -> list[str]:
+    raw = frontmatter.get("tags") or meta.get("tags") or []
+    tags: list[str] = []
+    if isinstance(raw, list):
+        tags = [str(t).strip() for t in raw if str(t).strip()]
+    elif isinstance(raw, str):
+        parts = [t.strip() for t in raw.replace("\n", ",").split(",") if t.strip()]
+        tags = parts
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for t in tags:
+        key = t.lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(t)
+    return deduped
+
+
+def _dedupe_links(raw_links: Any) -> list[str]:
+    links: list[str] = []
+    if isinstance(raw_links, list):
+        links = [str(l).strip() for l in raw_links if str(l).strip()]
+    seen: set[str] = set()
+    result: list[str] = []
+    for link in links:
+        cleaned = link.split("|", 1)[0].strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            result.append(cleaned)
+    return result
+
+
+def _first_non_empty(*values: Any) -> Optional[str]:
+    for v in values:
+        if isinstance(v, str) and v.strip():
+            return v
+    return None
 
 
 def _str_or_none(val: Any) -> Optional[str]:
