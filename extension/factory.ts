@@ -258,22 +258,11 @@ export function createObsidiClawExtension(
       }
 
       try {
-        // Run preferences fetch and auto-retrieval in parallel.
-        const query = event.prompt.slice(0, 500);
-        const [prefsResult, contextResult] = await Promise.all([
-          client.callTool({ name: "get_preferences", arguments: {} }),
-          client.callTool({ name: "retrieve_context", arguments: { query, max_chars: 2000 } }),
-        ]);
-
-        const prefsContent = extractMcpText(prefsResult);
-        const contextContent = extractMcpText(contextResult);
+        const result = await client.callTool({ name: "get_preferences", arguments: {} });
+        const prefsContent = extractMcpText(result);
 
         const prefsBlock = prefsContent
           ? `<!-- ObsidiClaw: Preferences -->\n\n${prefsContent}\n\n<!-- End ObsidiClaw Preferences -->`
-          : "";
-
-        const contextBlock = contextContent
-          ? `<!-- ObsidiClaw: Retrieved Context -->\n\n${contextContent}\n\n<!-- End ObsidiClaw Context -->`
           : "";
 
         const treeContent = buildDirectoryTree(paths.rootDir);
@@ -283,7 +272,6 @@ export function createObsidiClawExtension(
           systemPrompt:
             event.systemPrompt +
             (prefsBlock ? "\n\n" + prefsBlock : "") +
-            (contextBlock ? "\n\n" + contextBlock : "") +
             "\n\n" + treeBlock +
             "\n\n" +
             TOOL_REMINDER,
