@@ -40,6 +40,15 @@ _LABEL_MAP: dict[str, str] = {
     "concept": "CONCEPT",
     "index": "INDEX",
     "codebase": "CODEBASE",
+    "codeUnit": "CODEUNIT",
+}
+
+CANONICAL_NOTE_TYPES: dict[str, str] = {
+    "tool": "tool",
+    "concept": "concept",
+    "index": "index",
+    "codebase": "codebase",
+    "codeunit": "codeUnit",
 }
 
 
@@ -160,8 +169,8 @@ def _infer_note_type(frontmatter: dict, rel_path: str) -> NoteType:
     val = frontmatter.get("type") or frontmatter.get("note_type")
     if isinstance(val, str) and val.strip():
         normalized = val.strip().lower()
-        if normalized in ("tool", "concept", "index", "codebase"):
-            return normalized  # type: ignore[return-value]
+        if normalized in CANONICAL_NOTE_TYPES:
+            return CANONICAL_NOTE_TYPES[normalized]  # type: ignore[return-value]
 
     norm_path = rel_path.replace("\\", "/")
     if norm_path.startswith("tools/"):
@@ -262,7 +271,7 @@ def _resolve_link(target: str, notes_by_id: dict[str, ParsedNote]) -> Optional[s
     if len(candidates) == 1:
         return candidates[0].note_id
 
-    type_priority = {"tool": 0, "concept": 1, "index": 2, "codebase": 3}
+    type_priority = {"tool": 0, "concept": 1, "codeUnit": 2, "index": 3, "codebase": 4}
     candidates.sort(key=lambda n: type_priority.get(n.note_type, 99))
     return candidates[0].note_id
 

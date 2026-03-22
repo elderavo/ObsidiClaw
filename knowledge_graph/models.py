@@ -9,7 +9,7 @@ from typing import Literal, Optional
 # Note types
 # ---------------------------------------------------------------------------
 
-NoteType = Literal["tool", "concept", "index", "codebase"]
+NoteType = Literal["tool", "concept", "index", "codebase", "codeUnit"]
 
 # ---------------------------------------------------------------------------
 # Parsed note (output of markdown ingestion)

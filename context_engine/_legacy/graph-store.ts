@@ -64,7 +64,7 @@ export class SqliteGraphStore {
    * Current schema version. Bump this whenever a breaking schema change is made.
    * On mismatch, notes + edges are dropped and recreated (they are pure caches of md_db).
    */
-  private static readonly SCHEMA_VERSION = 2;
+  private static readonly SCHEMA_VERSION = 3;
 
   private initSchema(): void {
     // Bootstrap index_state first (it holds the version and is never dropped)
@@ -95,7 +95,7 @@ export class SqliteGraphStore {
         note_id          TEXT PRIMARY KEY,
         path             TEXT NOT NULL UNIQUE,
         title            TEXT NOT NULL,
-        note_type        TEXT NOT NULL CHECK(note_type IN ('tool','concept','index','codebase')),
+        note_type        TEXT NOT NULL CHECK(note_type IN ('tool','concept','index','codebase','codeUnit')),
         body             TEXT NOT NULL,
         tool_id          TEXT,
         frontmatter_json TEXT NOT NULL DEFAULT '{}',

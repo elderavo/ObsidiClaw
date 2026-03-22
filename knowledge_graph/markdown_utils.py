@@ -184,6 +184,14 @@ def extract_tags(frontmatter: dict | None) -> list[str]:
 # Note type inference
 # ---------------------------------------------------------------------------
 
+CANONICAL_NOTE_TYPES = {
+    "tool": "tool",
+    "concept": "concept",
+    "index": "index",
+    "codebase": "codebase",
+    "codeunit": "codeUnit",
+}
+
 
 def infer_note_type(
     frontmatter: dict, relative_path: str
@@ -193,8 +201,8 @@ def infer_note_type(
         val = frontmatter.get(key)
         if val and isinstance(val, str):
             normalized = val.lower().strip()
-            if normalized in ("tool", "concept", "index", "codebase"):
-                return normalized
+            if normalized in CANONICAL_NOTE_TYPES:
+                return CANONICAL_NOTE_TYPES[normalized]
 
     # Normalise slashes for path prefix checks
     norm_path = relative_path.replace("\\", "/")

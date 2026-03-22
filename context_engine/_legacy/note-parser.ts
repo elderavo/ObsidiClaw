@@ -56,9 +56,12 @@ function inferNoteType(
   for (const key of ["type", "note_type"]) {
     const val = frontmatter[key];
     if (val && typeof val === "string") {
-      const normalized = val.toLowerCase().trim() as NoteType;
-      if (normalized === "tool" || normalized === "concept" || normalized === "index") {
-        return normalized;
+      const normalized = val.toLowerCase().trim();
+      if (normalized === "tool" || normalized === "concept" || normalized === "index" || normalized === "codebase") {
+        return normalized as NoteType;
+      }
+      if (normalized === "codeunit") {
+        return "codeUnit";
       }
     }
   }

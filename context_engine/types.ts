@@ -6,7 +6,7 @@
 // Note types
 // ---------------------------------------------------------------------------
 
-export type NoteType = "tool" | "concept" | "index" | "codebase";
+export type NoteType = "tool" | "concept" | "index" | "codebase" | "codeUnit";
 
 // ---------------------------------------------------------------------------
 // RetrievedNote — a note that has entered the result set
