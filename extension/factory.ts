@@ -99,9 +99,7 @@ export interface ObsidiClawExtensionConfig {
 const TOOL_REMINDER = `
 ## ObsidiClaw Knowledge Base
 
-You have access to a \`retrieve_context\` tool that searches this project's knowledge base (notes, tools, concepts, best practices).
-
-**Always call \`retrieve_context\` before relying on your own knowledge** for any project-specific question — tools, architecture, patterns, or concepts. The context above was auto-retrieved for this prompt; use the tool with a more targeted query if you need different or deeper information.
+The context block above was automatically retrieved from the knowledge base for your prompt. If it doesn't cover what you need, call \`retrieve_context\` again with a more specific query.
 `.trim();
 
 // ---------------------------------------------------------------------------
@@ -223,6 +221,10 @@ export function createObsidiClawExtension(
         "md_db knowledge graph. Call this before relying on your own knowledge for " +
         "any project-specific question.",
       promptSnippet: "retrieve_context(query) — search the project knowledge base",
+      promptGuidelines: [
+        "Always call retrieve_context before answering questions about this project's tools, architecture, or patterns.",
+        "When you need to know how to do something in this codebase, call retrieve_context first.",
+      ],
       parameters: Type.Object({
         query: Type.String({
           description: "What to search for in the knowledge base.",
@@ -256,11 +258,22 @@ export function createObsidiClawExtension(
       }
 
       try {
-        const result = await client.callTool({ name: "get_preferences", arguments: {} });
-        const prefsContent = extractMcpText(result);
+        // Run preferences fetch and auto-retrieval in parallel.
+        const query = event.prompt.slice(0, 500);
+        const [prefsResult, contextResult] = await Promise.all([
+          client.callTool({ name: "get_preferences", arguments: {} }),
+          client.callTool({ name: "retrieve_context", arguments: { query, max_chars: 2000 } }),
+        ]);
+
+        const prefsContent = extractMcpText(prefsResult);
+        const contextContent = extractMcpText(contextResult);
 
         const prefsBlock = prefsContent
           ? `<!-- ObsidiClaw: Preferences -->\n\n${prefsContent}\n\n<!-- End ObsidiClaw Preferences -->`
+          : "";
+
+        const contextBlock = contextContent
+          ? `<!-- ObsidiClaw: Retrieved Context -->\n\n${contextContent}\n\n<!-- End ObsidiClaw Context -->`
           : "";
 
         const treeContent = buildDirectoryTree(paths.rootDir);
@@ -270,6 +283,7 @@ export function createObsidiClawExtension(
           systemPrompt:
             event.systemPrompt +
             (prefsBlock ? "\n\n" + prefsBlock : "") +
+            (contextBlock ? "\n\n" + contextBlock : "") +
             "\n\n" + treeBlock +
             "\n\n" +
             TOOL_REMINDER,
