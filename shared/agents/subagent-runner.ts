@@ -116,9 +116,6 @@ export class SubagentRunner {
         parentRunId: spec.parentRunId,
         parentSessionId: spec.parentSessionId,
       },
-      undefined,
-      undefined,
-      undefined,
     );
 
     // ── Run with timeout + cancellation ────────────────────────────────

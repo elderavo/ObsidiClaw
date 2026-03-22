@@ -10,8 +10,6 @@
 
 import type { RunLogger } from "../logger/index.js";
 import type { ContextEngine } from "../context_engine/index.js";
-import type { JobScheduler } from "../scheduler/scheduler.js";
-import type { SubagentRunner } from "../shared/agents/subagent-runner.js";
 import type { RunConfig, RunResult, SessionConfig } from "./types.js";
 import { OrchestratorSession } from "./session.js";
 
@@ -19,9 +17,6 @@ export class Orchestrator {
   constructor(
     private readonly logger: RunLogger,
     private readonly contextEngine?: ContextEngine,
-    private readonly scheduler?: JobScheduler,
-    private readonly subagentRunner?: SubagentRunner,
-    private readonly persistentBackend?: import("../shared/os/scheduling.js").PersistentScheduleBackend,
   ) {}
 
   /**
@@ -29,7 +24,7 @@ export class Orchestrator {
    * First prompt triggers context injection; subsequent prompts go straight to pi.
    */
   createSession(config: SessionConfig = {}): OrchestratorSession {
-    return new OrchestratorSession(this.logger, this.contextEngine, config, this.scheduler, this.subagentRunner, this.persistentBackend);
+    return new OrchestratorSession(this.logger, this.contextEngine, config);
   }
 
   /**

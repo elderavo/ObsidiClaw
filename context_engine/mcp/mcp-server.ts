@@ -1,5 +1,5 @@
 /**
- * ObsidiClaw MCP server — wraps ContextEngine + JobScheduler behind MCP.
+ * ObsidiClaw MCP server — wraps ContextEngine behind MCP.
  *
  * Context tools:
  *   retrieve_context     — hybrid RAG query
@@ -7,14 +7,8 @@
  *   prepare_subagent     — build context-enriched system prompt for subagents
  *   build/list/get/update_prune_* — note deduplication management
  *
- * Scheduler tools (when scheduler is provided):
- *   list_jobs            — show all scheduled jobs with state
- *   run_job              — trigger a job immediately
- *   set_job_enabled      — enable/disable a job
- *   schedule_task        — register a new recurring subagent task
- *   unschedule_task      — remove a dynamically scheduled task
- *
  * Transport-agnostic: wire via InMemoryTransport or StdioServerTransport.
+ * Scheduler tools live in .pi/extensions/scheduler.ts — not here.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -24,11 +18,7 @@ import Database from "better-sqlite3";
 import type { ContextEngine } from "../context-engine.js";
 import type { ContextPackage, SubagentPackage, PruneMemberStatus } from "../types.js";
 import { PruneClusterStorage } from "../prune/prune-storage.js";
-import type { JobScheduler } from "../../scheduler/scheduler.js";
-import type { SubagentRunner } from "../../shared/agents/subagent-runner.js";
 import { resolvePaths } from "../../shared/config.js";
-import { getExecPath } from "../../shared/os/process.js";
-import { writeTaskSpec, listTaskSpecs } from "../../scheduler/persistent-tasks.js";
 
 export type OnContextBuilt = (pkg: ContextPackage) => void;
 export type OnSubagentPrepared = (pkg: SubagentPackage) => void;
@@ -37,10 +27,6 @@ export interface McpServerOptions {
   engine: ContextEngine;
   onContextBuilt?: OnContextBuilt;
   onSubagentPrepared?: OnSubagentPrepared;
-  scheduler?: JobScheduler;
-  subagentRunner?: SubagentRunner;
-  persistentBackend?: import("../../shared/os/scheduling.js").PersistentScheduleBackend;
-  rootDir?: string;
 }
 
 /**
@@ -60,7 +46,7 @@ export function createContextEngineMcpServer(
 }
 
 function _createMcpServer(opts: McpServerOptions): McpServer {
-  const { engine, onContextBuilt, onSubagentPrepared, scheduler, subagentRunner, persistentBackend, rootDir } = opts;
+  const { engine, onContextBuilt, onSubagentPrepared } = opts;
   const server = new McpServer({ name: "obsidi-claw-context", version: "1.0.0" });
 
   // ── retrieve_context ──────────────────────────────────────────────────────
@@ -219,213 +205,7 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
     },
   );
 
-  // ── Scheduler tools (Layer 1 — inspect & control existing jobs) ─────────
-  if (scheduler || persistentBackend) {
-    registerSchedulerTools(server, scheduler, subagentRunner, persistentBackend, rootDir);
-  }
-
   return server;
-}
-
-// ---------------------------------------------------------------------------
-// Scheduler MCP tools
-// ---------------------------------------------------------------------------
-
-function registerSchedulerTools(
-  server: McpServer,
-  scheduler: JobScheduler | undefined,
-  subagentRunner?: SubagentRunner,
-  persistentBackend?: import("../../shared/os/scheduling.js").PersistentScheduleBackend,
-  rootDir?: string,
-): void {
-  // ── list_jobs ───────────────────────────────────────────────────────────
-  server.registerTool(
-    "list_jobs",
-    {
-      description:
-        "List all scheduled jobs with their current state, including persistent tasks.",
-      inputSchema: {},
-    },
-    async () => {
-      const lines = ["# Scheduled Jobs", ""];
-
-      // OS-registered jobs (built-ins)
-      if (scheduler) {
-        const states = scheduler.getStates();
-        for (const s of states) {
-          const lastRun = s.lastRunAt ? new Date(s.lastRunAt).toISOString() : "never";
-          lines.push(`- **${s.name}** | last run: ${lastRun} | status: ${s.status}${s.lastError ? ` | error: ${s.lastError}` : ""}`);
-        }
-      }
-
-      // Persistent tasks (specs + backend state)
-      const root = rootDir ?? resolvePaths().rootDir;
-      const specs = listTaskSpecs(root);
-      const installed = persistentBackend ? await persistentBackend.list() : [];
-      const installedMap = new Map(installed.map((j) => [j.jobName, j]));
-
-      if (specs.length > 0) {
-        lines.push("", "## Persistent Tasks");
-        for (const spec of specs) {
-          const taskName = spec.name;
-          const job = installedMap.get(taskName);
-          const status = job ? (job.enabled === false ? "disabled" : "enabled") : "not installed";
-          lines.push(`- **${taskName}** | every ${spec.intervalMinutes}m | ${status} | desc: ${spec.description}`);
-        }
-      }
-
-      if (lines.length === 2) {
-        return { content: [{ type: "text" as const, text: "No scheduled jobs registered." }] };
-      }
-
-      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
-    },
-  );
-
-  // ── run_job ─────────────────────────────────────────────────────────────
-  server.registerTool(
-    "run_job",
-    {
-      description: "Trigger a scheduled job to run immediately (outside its normal interval).",
-      inputSchema: {
-        job_name: z.string().describe("Name of the job to run (e.g., 'reindex-md-db', 'task-foo')."),
-      },
-    },
-    async ({ job_name }) => {
-      try {
-        if (scheduler && scheduler.getStates().some((s) => s.name === job_name)) {
-          await scheduler.runNow(job_name);
-        } else if (persistentBackend?.run) {
-          await persistentBackend.run(job_name);
-        } else {
-          throw new Error("Job not found.");
-        }
-        return { content: [{ type: "text" as const, text: `Job "${job_name}" triggered successfully.` }] };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return { content: [{ type: "text" as const, text: `Job "${job_name}" failed: ${msg}` }] };
-      }
-    },
-  );
-
-  // ── set_job_enabled ─────────────────────────────────────────────────────
-  server.registerTool(
-    "set_job_enabled",
-    {
-      description: "Enable or disable a scheduled job. Disabled jobs skip their interval.",
-      inputSchema: {
-        job_name: z.string().describe("Name of the job."),
-        enabled: z.boolean().describe("True to enable, false to disable."),
-      },
-    },
-    async ({ job_name, enabled }) => {
-      try {
-        if (persistentBackend?.setEnabled) {
-          await persistentBackend.setEnabled(`ObsidiClaw\\${job_name}`, enabled);
-        } else {
-          throw new Error("Persistent backend does not support enable/disable.");
-        }
-        return { content: [{ type: "text" as const, text: `Job "${job_name}" is now ${enabled ? "enabled" : "disabled"}.` }] };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return { content: [{ type: "text" as const, text: `Failed: ${msg}` }] };
-      }
-    },
-  );
-
-  // ── schedule_task (Layer 2 — agent-initiated dynamic scheduling) ───────
-  server.registerTool(
-    "schedule_task",
-    {
-      description:
-        "Register a new recurring task (persistent). Runs a detached subagent on the given interval.",
-      inputSchema: {
-        name: z.string().describe("Unique task name (e.g., 'monitor-ollama-releases')."),
-        description: z.string().describe("What this task does."),
-        prompt: z.string().describe("The prompt to send to the subagent on each run."),
-        plan: z.string().describe("Implementation plan for the subagent."),
-        success_criteria: z.string().describe("How to know the task succeeded."),
-        personality: z.string().optional().describe("Personality to use (e.g., 'deep-researcher')."),
-        interval_minutes: z.number().min(1).describe("How often to run, in minutes."),
-        run_immediately: z.boolean().optional().describe("Run once right now in addition to scheduling. Default: false."),
-      },
-    },
-    async ({ name, description, prompt, plan, success_criteria, personality, interval_minutes, run_immediately }) => {
-      if (!persistentBackend) {
-        return { content: [{ type: "text" as const, text: "Persistent scheduling backend not available on this platform." }] };
-      }
-
-      const paths = resolvePaths(rootDir);
-      const taskName = `task-${name}`;
-      const spec = {
-        name: taskName,
-        description,
-        prompt,
-        plan,
-        successCriteria: success_criteria,
-        personality,
-        intervalMinutes: interval_minutes,
-        rootDir: paths.rootDir,
-        createdAt: Date.now(),
-        context: prompt,
-      };
-
-      const specPath = writeTaskSpec(paths.rootDir, spec);
-      const scriptPath = join(paths.rootDir, "dist", "scripts", "run_detached_subagent.js");
-      const nodePath = getExecPath();
-
-      try {
-        await persistentBackend.install(taskName, interval_minutes * 60_000, nodePath, [scriptPath, specPath]);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return { content: [{ type: "text" as const, text: `Failed to install task: ${msg}` }] };
-      }
-
-      const lines = [
-        `Scheduled persistent task "${taskName}" — every ${interval_minutes} minute(s).`,
-        `Spec: ${specPath}`,
-      ];
-
-      if (run_immediately) {
-        try {
-          if (persistentBackend.run) {
-            await persistentBackend.run(taskName);
-          }
-          lines.push("First run triggered.");
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          lines.push(`First run failed: ${msg}`);
-        }
-      }
-
-      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
-    },
-  );
-
-  // ── unschedule_task ─────────────────────────────────────────────────────
-  server.registerTool(
-    "unschedule_task",
-    {
-      description:
-        "Disable/remove a persistent task schedule. Keeps the spec file for re-enabling later.",
-      inputSchema: {
-        name: z.string().describe("Task name (without the 'task-' prefix)."),
-      },
-    },
-    async ({ name }) => {
-      const taskName = `task-${name}`;
-      try {
-        if (!persistentBackend) {
-          return { content: [{ type: "text" as const, text: "Persistent backend not available." }] };
-        }
-        await persistentBackend.uninstall(taskName);
-        return { content: [{ type: "text" as const, text: `Task "${taskName}" unscheduled (spec retained).` }] };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return { content: [{ type: "text" as const, text: `No task named "${taskName}" found or uninstall failed: ${msg}` }] };
-      }
-    },
-  );
 }
 
 // ---------------------------------------------------------------------------

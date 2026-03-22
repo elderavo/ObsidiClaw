@@ -28,8 +28,6 @@ import { resolvePaths } from "../shared/config.js";
 import { extractMessageText } from "../shared/text-utils.js";
 import { mapPiEventToRunEvent } from "../shared/pi-event-mapper.js";
 import { runSessionReview, type ReviewTrigger } from "../insight_engine/session_review.js";
-import type { JobScheduler } from "../scheduler/scheduler.js";
-import type { SubagentRunner } from "../shared/agents/subagent-runner.js";
 import type { RunEvent, RunId, RunKind, RunStage, SessionConfig, SessionId } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -57,9 +55,6 @@ export class OrchestratorSession {
     private readonly logger: RunLogger,
     private readonly contextEngine?: ContextEngine,
     private readonly config: SessionConfig = {},
-    private readonly scheduler?: JobScheduler,
-    private readonly subagentRunner?: SubagentRunner,
-    private readonly persistentBackend?: import("../shared/os/scheduling.js").PersistentScheduleBackend,
   ) {
     this.sessionId = crypto.randomUUID();
     // runKind takes precedence; fall back to isSubagent for backward compat
@@ -293,10 +288,6 @@ export class OrchestratorSession {
               expandedCount: pkg.contextPackage.expandedNoteIds?.length ?? 0,
               estimatedTokens: pkg.contextPackage.estimatedTokens,
             }),
-            scheduler: this.scheduler,
-            subagentRunner: this.subagentRunner,
-            persistentBackend: this.persistentBackend,
-            rootDir: resolvePaths().rootDir,
           }),
         })]
       : [];
