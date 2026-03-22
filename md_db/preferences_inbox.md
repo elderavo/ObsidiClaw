@@ -51,3 +51,9 @@ Pending proposals auto-derived from sessions. Review and merge manually.
 ### Synthesized Preferences
 - **[strong]** Implement asynchronous shutdown with explicit timeout handling for subprocesses, including a helper function to wait for exit before proceeding.
   - Evidence: User confirmed acceptance of changes and agent provided detailed implementation notes showing new approach ensures proper cleanup sequence.
+
+## Session aac98e07 (2026-03-22)
+
+### Signals
+- **[moderate imperative]** "Did you mean '/quit' or something else?"
+  → User wants clarification on command, prefers explicit confirmation of intent before proceeding.

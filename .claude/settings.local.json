@@ -48,7 +48,9 @@
       "Bash(node -e \"require\\(''fast-glob''\\); console.log\\(''fast-glob ok''\\)\")",
       "Bash(node -e \"const ts = require\\(''typescript''\\); console.log\\(ts.version\\)\")",
       "Bash(head -20 shared/watchers/*.ts)",
-      "Bash(git ls-files:*)"
+      "Bash(git ls-files:*)",
+      "Bash(xargs wc:*)",
+      "Bash(grep -n \"setInterval\\\\|executeJob\\\\|runOnStart\\\\|scriptPath\" scheduler/scheduler.ts scheduler/types.ts scheduler/jobs/*.ts)"
     ]
   }
 }
