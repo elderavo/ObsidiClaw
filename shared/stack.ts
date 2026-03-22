@@ -131,21 +131,37 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
   async function initialize(): Promise<void> {
-    await engine.initialize();
-    if (scheduler) {
-      void scheduler.start();
-    }
-    mdDbWatcher = startMdDbLintWatcher(paths.mdDbPath);
-
-    // Initial incremental mirror pass — catches files changed while process was down
     const mirrorDir = join(paths.mdDbPath, "code");
-    try {
-      const ts = await runMirrorTs({ scanDir: paths.rootDir, mirrorDir, omitPatterns: ["dist", "node_modules", "_legacy", ".pi", ".claude", "*.d.ts"], force: false });
-      const py = await runMirrorPy({ scanDir: join(paths.rootDir, "knowledge_graph"), mirrorDir, omitPatterns: ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist"], force: false });
-      // console.log(`[obsidi-claw] mirror: ts ${ts.written} written / ${ts.skipped} skipped — py ${py.written} written / ${py.skipped} skipped`);
-    } catch (err) {
-      console.warn("[obsidi-claw] initial mirror run failed", err);
-    }
+
+    // Engine is the only thing that must finish before accepting prompts.
+    // Scheduler install and mirror pass are independent — run in parallel,
+    // fire-and-forget so they don't block prompt readiness.
+    const schedulerReady = scheduler
+      ? scheduler.start().catch((err: unknown) => {
+          console.warn("[obsidi-claw] scheduler.start() failed:", err);
+        })
+      : Promise.resolve();
+
+    const mirrorReady = (async () => {
+      try {
+        await Promise.all([
+          runMirrorTs({ scanDir: paths.rootDir, mirrorDir, omitPatterns: ["dist", "node_modules", "_legacy", ".claude", "*.d.ts"], force: false }),
+          runMirrorPy({ scanDir: join(paths.rootDir, "knowledge_graph"), mirrorDir, omitPatterns: ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist"], force: false }),
+        ]);
+      } catch (err) {
+        console.warn("[obsidi-claw] initial mirror run failed", err);
+      }
+    })();
+
+    // All three run concurrently; we only await the engine.
+    await Promise.all([
+      engine.initialize(),
+      schedulerReady,
+      mirrorReady,
+    ]);
+
+    // Watchers are cheap — start after everything else is up.
+    mdDbWatcher = startMdDbLintWatcher(paths.mdDbPath);
     mirrorWatcher = startMirrorWatcher(paths.rootDir, mirrorDir);
   }
 

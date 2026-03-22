@@ -24,7 +24,7 @@ import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
 import { spawn, execSync, type ChildProcess } from "child_process";
 import { createInterface, type Interface as ReadlineInterface } from "readline";
-import { existsSync } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
 import { ensureDir } from "../shared/os/fs.js";
 import { stripFrontmatter, estimateTokens } from "./frontmatter-utils.js";
 import { loadPersonality } from "../shared/agents/personality-loader.js";
@@ -512,10 +512,39 @@ export class ContextEngine {
   /**
    * Resolve the Python executable path for the obsidiclaw conda environment.
    * Uses direct path (no conda run — conda run doesn't forward stdin on Windows).
+   *
+   * Caches the resolved path to `.obsidi-claw/.python_path` so subsequent
+   * startups skip the filesystem search and execSync fallback (~200ms saved).
    */
   private resolvePythonPath(): string {
     if (this.pythonPath) return this.pythonPath;
 
+    // Check cache file first
+    const cacheFile = join(this.config.dbPath, "..", ".python_path");
+    try {
+      const cached = readFileSync(cacheFile, "utf-8").trim();
+      if (cached && existsSync(cached)) {
+        this.pythonPath = cached;
+        return cached;
+      }
+    } catch {
+      // No cache or stale — fall through to search
+    }
+
+    const resolved = this.searchPythonPath();
+
+    // Persist for next startup
+    try {
+      writeFileSync(cacheFile, resolved, "utf-8");
+    } catch {
+      // Non-fatal — next startup will re-search
+    }
+
+    this.pythonPath = resolved;
+    return resolved;
+  }
+
+  private searchPythonPath(): string {
     // Check common conda env locations
     const home = process.env["USERPROFILE"] ?? process.env["HOME"] ?? "";
     const condaDirs = [
@@ -528,16 +557,10 @@ export class ContextEngine {
     for (const base of condaDirs) {
       // Windows
       const winPath = join(base, "obsidiclaw", "python.exe");
-      if (existsSync(winPath)) {
-        this.pythonPath = winPath;
-        return winPath;
-      }
+      if (existsSync(winPath)) return winPath;
       // Unix
       const unixPath = join(base, "obsidiclaw", "bin", "python");
-      if (existsSync(unixPath)) {
-        this.pythonPath = unixPath;
-        return unixPath;
-      }
+      if (existsSync(unixPath)) return unixPath;
     }
 
     // Fall back: ask conda for the path
@@ -546,10 +569,7 @@ export class ContextEngine {
         'conda run -n obsidiclaw python -c "import sys; print(sys.executable)"',
         { encoding: "utf-8", timeout: 15_000 },
       ).trim();
-      if (result && existsSync(result)) {
-        this.pythonPath = result;
-        return result;
-      }
+      if (result && existsSync(result)) return result;
     } catch {
       // conda not available or env not found
     }
