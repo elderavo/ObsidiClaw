@@ -58,6 +58,7 @@ export class OrchestratorSession {
     private readonly config: SessionConfig = {},
     private readonly scheduler?: JobScheduler,
     private readonly subagentRunner?: SubagentRunner,
+    private readonly persistentBackend?: import("../shared/os/scheduling.js").PersistentScheduleBackend,
   ) {
     this.sessionId = crypto.randomUUID();
     // runKind takes precedence; fall back to isSubagent for backward compat
@@ -322,6 +323,8 @@ export class OrchestratorSession {
             }),
             scheduler: this.scheduler,
             subagentRunner: this.subagentRunner,
+            persistentBackend: this.persistentBackend,
+            rootDir: resolvePaths().rootDir,
           }),
         })]
       : [];

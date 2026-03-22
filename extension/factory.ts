@@ -160,6 +160,8 @@ export function createObsidiClawExtension(
         },
         scheduler: stack.scheduler,
         subagentRunner: stack.runner,
+        persistentBackend: stack.persistentBackend,
+        rootDir: paths.rootDir,
       });
     }
 
@@ -179,6 +181,21 @@ export function createObsidiClawExtension(
       if (stack) await stack.initialize();
       await mcpServer.connect(serverTransport);
       await client.connect(clientTransport);
+
+      // Show persistent tasks on TUI startup
+      if (stack?.persistentBackend) {
+        try {
+          const tasks = await stack.persistentBackend.list();
+          const specs = await (async () => {
+            try { return (await import("../scheduler/persistent-tasks.js")).listTaskSpecs(paths.rootDir); } catch { return []; }
+          })();
+          const specNames = specs.map((s: any) => s.name);
+          const lines = ["[scheduler] persistent tasks:", ...specNames.map((n: string) => ` - ${n}`)];
+          console.log(lines.join("\n"));
+        } catch (err) {
+          console.log("[scheduler] unable to list persistent tasks", err);
+        }
+      }
 
       if (stack) {
         stack.logger.logEvent({
@@ -211,6 +228,115 @@ export function createObsidiClawExtension(
           content: [{ type: "text" as const, text }],
           details: { query },
         };
+      },
+    });
+
+    // ── Scheduler tools: forward MCP scheduler/persistent-task tools ────────
+    // These tools are available when the MCP server was created with a scheduler
+    // or persistent backend. We forward directly to the MCP server.
+    pi.registerTool({
+      name: "list_jobs",
+      label: "List Scheduled Jobs",
+      description: "List all scheduled jobs (in-process + persistent).",
+      promptSnippet: "list_jobs() — show scheduler state",
+      parameters: Type.Object({}),
+      async execute() {
+        try {
+          const result = await client.callTool({ name: "list_jobs", arguments: {} });
+          const text = extractMcpText(result);
+          return { content: [{ type: "text" as const, text }], details: { tool: "list_jobs", error: "" } };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return { content: [{ type: "text" as const, text: `list_jobs failed: ${msg}` }], details: { tool: "list_jobs", error: msg } };
+        }
+      },
+    });
+
+    pi.registerTool({
+      name: "run_job",
+      label: "Run Job Now",
+      description: "Trigger a scheduled job immediately.",
+      promptSnippet: "run_job(job_name) — run a scheduler job now",
+      parameters: Type.Object({
+        job_name: Type.String({ description: "Job name (e.g., reindex-md-db)." }),
+      }),
+      async execute(_id, { job_name }) {
+        try {
+          const result = await client.callTool({ name: "run_job", arguments: { job_name } });
+          const text = extractMcpText(result);
+          return { content: [{ type: "text" as const, text }], details: { job_name, error: "" } };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return { content: [{ type: "text" as const, text: `run_job failed: ${msg}` }], details: { job_name, error: msg } };
+        }
+      },
+    });
+
+    pi.registerTool({
+      name: "set_job_enabled",
+      label: "Enable/Disable Job",
+      description: "Enable or disable a scheduled job.",
+      promptSnippet: "set_job_enabled(job_name, enabled)",
+      parameters: Type.Object({
+        job_name: Type.String({ description: "Job name." }),
+        enabled: Type.Boolean({ description: "True to enable, false to disable." }),
+      }),
+      async execute(_id, { job_name, enabled }) {
+        try {
+          const result = await client.callTool({ name: "set_job_enabled", arguments: { job_name, enabled } });
+          const text = extractMcpText(result);
+          return { content: [{ type: "text" as const, text }], details: { job_name, enabled, error: "" } };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return { content: [{ type: "text" as const, text: `set_job_enabled failed: ${msg}` }], details: { job_name, enabled, error: msg } };
+        }
+      },
+    });
+
+    pi.registerTool({
+      name: "schedule_task",
+      label: "Schedule Persistent Task",
+      description: "Register a recurring detached subagent task (persistent backend).",
+      promptSnippet: "schedule_task(name, description, prompt, plan, success_criteria, interval_minutes, ...)",
+      parameters: Type.Object({
+        name: Type.String({ description: "Unique task name (no 'task-' prefix)." }),
+        description: Type.String({ description: "What the task does." }),
+        prompt: Type.String({ description: "Prompt/context sent each run." }),
+        plan: Type.String({ description: "Implementation plan for the subagent." }),
+        success_criteria: Type.String({ description: "How to measure success." }),
+        personality: Type.Optional(Type.String({ description: "Personality name (optional)." })),
+        interval_minutes: Type.Number({ description: "Interval in minutes.", minimum: 1 }),
+        run_immediately: Type.Optional(Type.Boolean({ description: "Run once right now." })),
+      }),
+      async execute(_id, params) {
+        try {
+          const result = await client.callTool({ name: "schedule_task", arguments: params });
+          const text = extractMcpText(result);
+          return { content: [{ type: "text" as const, text }], details: { name: params.name, interval_minutes: params.interval_minutes, error: "" } };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return { content: [{ type: "text" as const, text: `schedule_task failed: ${msg}` }], details: { name: params.name, interval_minutes: params.interval_minutes, error: msg } };
+        }
+      },
+    });
+
+    pi.registerTool({
+      name: "unschedule_task",
+      label: "Unschedule Persistent Task",
+      description: "Remove/disable a persistent task schedule (spec retained).",
+      promptSnippet: "unschedule_task(name)",
+      parameters: Type.Object({
+        name: Type.String({ description: "Task name (without 'task-' prefix)." }),
+      }),
+      async execute(_id, { name }) {
+        try {
+          const result = await client.callTool({ name: "unschedule_task", arguments: { name } });
+          const text = extractMcpText(result);
+          return { content: [{ type: "text" as const, text }], details: { name, error: "" } };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return { content: [{ type: "text" as const, text: `unschedule_task failed: ${msg}` }], details: { name, error: msg } };
+        }
       },
     });
 

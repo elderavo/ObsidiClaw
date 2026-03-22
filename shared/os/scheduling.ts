@@ -18,6 +18,8 @@ export interface ScheduledJob {
   intervalMs: number;
   command: string;
   args: string[];
+  enabled?: boolean;
+  status?: string;
 }
 
 export interface PersistentScheduleBackend {
@@ -41,4 +43,10 @@ export interface PersistentScheduleBackend {
    * List all installed persistent schedules managed by ObsidiClaw.
    */
   list(): Promise<ScheduledJob[]>;
+
+  /** Enable or disable a schedule (if supported). */
+  setEnabled?(jobName: string, enabled: boolean): Promise<void>;
+
+  /** Trigger a run immediately (if supported). */
+  run?(jobName: string): Promise<void>;
 }

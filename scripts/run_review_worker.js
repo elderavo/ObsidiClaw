@@ -18,7 +18,7 @@ import { RunLogger } from "../dist/logger/run-logger.js";
 import { runSessionReview } from "../dist/insight_engine/session_review.js";
 
 const OLLAMA_BASE_URL = process.env["OLLAMA_BASE_URL"] ?? "http://10.0.132.100/v1";
-const OLLAMA_MODEL = process.env["OLLAMA_MODEL"] ?? "llama3";
+const OLLAMA_MODEL = process.env["OLLAMA_MODEL"] ?? "cogito:8b";
 
 async function main() {
   const specPath = process.argv[2];

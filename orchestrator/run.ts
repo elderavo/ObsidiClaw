@@ -14,7 +14,7 @@
  *
  * Environment variables:
  *   OLLAMA_BASE_URL      — LLM endpoint   (default: http://10.0.132.100/v1)
- *   OLLAMA_MODEL         — LLM model      (default: llama3)
+ *   OLLAMA_MODEL         — LLM model      (default: cogito:8b)
  *   OLLAMA_HOST          — embeddings host (default: 10.0.132.100)
  *   OLLAMA_EMBED_MODEL   — embeddings model (default: nomic-embed-text:v1.5)
  *   OBSIDI_CLAW_DEBUG    — set to 0/false to disable debug JSONL (ON by default)
@@ -39,7 +39,7 @@ const paths = resolvePaths(resolve(__dirname, __dirname.includes("dist") ? "../.
 const stack = createObsidiClawStack({ rootDir: paths.rootDir });
 await stack.initialize();
 
-const orchestrator = new Orchestrator(stack.logger, stack.engine, stack.scheduler, stack.runner);
+const orchestrator = new Orchestrator(stack.logger, stack.engine, stack.scheduler, stack.runner, stack.persistentBackend);
 
 // ── Start session ─────────────────────────────────────────────────────────
 

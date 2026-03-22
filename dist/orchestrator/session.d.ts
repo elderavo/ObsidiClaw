@@ -19,11 +19,16 @@
 import { RunLogger } from "../logger/index.js";
 import type { ContextEngine } from "../context_engine/index.js";
 import { type ReviewTrigger } from "../insight_engine/session_review.js";
-import type { RunStage, SessionConfig, SessionId } from "./types.js";
+import type { JobScheduler } from "../scheduler/scheduler.js";
+import type { SubagentRunner } from "../shared/agents/subagent-runner.js";
+import type { RunId, RunStage, SessionConfig, SessionId } from "./types.js";
 export declare class OrchestratorSession {
     private readonly logger;
     private readonly contextEngine?;
     private readonly config;
+    private readonly scheduler?;
+    private readonly subagentRunner?;
+    private readonly persistentBackend?;
     readonly sessionId: SessionId;
     /** pi SDK session — null until first prompt is received. */
     private piSession;
@@ -33,8 +38,10 @@ export declare class OrchestratorSession {
      * Used by the pi event subscription (subscribed once, references this field).
      */
     private currentRunId;
-    private readonly isSubagent;
-    constructor(logger: RunLogger, contextEngine?: ContextEngine | undefined, config?: SessionConfig);
+    private readonly runKind;
+    private readonly parentRunId?;
+    private readonly parentSessionId?;
+    constructor(logger: RunLogger, contextEngine?: ContextEngine | undefined, config?: SessionConfig, scheduler?: JobScheduler | undefined, subagentRunner?: SubagentRunner | undefined, persistentBackend?: import("../shared/os/scheduling.js").PersistentScheduleBackend | undefined);
     /**
      * Send a prompt to the pi agent.
      *
@@ -45,6 +52,8 @@ export declare class OrchestratorSession {
     prompt(text: string): Promise<void>;
     /** Full message history from the pi session (undefined if session not started). */
     get messages(): import("@mariozechner/pi-agent-core").AgentMessage[];
+    /** Run ID from the most recent prompt() call. Empty string if none yet. */
+    get lastRunId(): RunId;
     /** Current stage of the last prompt round-trip (for single-shot compat). */
     getLastStage(): RunStage;
     /**
@@ -70,8 +79,6 @@ export declare class OrchestratorSession {
      * context-injection extension wired in.
      *
      * Called ONCE per OrchestratorSession (lazy, on first prompt).
-     *
-     * TODO: Phase 1 — pull Ollama config from shared/config.ts
      */
     private createPiSession;
 }

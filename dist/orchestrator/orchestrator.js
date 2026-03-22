@@ -11,16 +11,22 @@ import { OrchestratorSession } from "./session.js";
 export class Orchestrator {
     logger;
     contextEngine;
-    constructor(logger, contextEngine) {
+    scheduler;
+    subagentRunner;
+    persistentBackend;
+    constructor(logger, contextEngine, scheduler, subagentRunner, persistentBackend) {
         this.logger = logger;
         this.contextEngine = contextEngine;
+        this.scheduler = scheduler;
+        this.subagentRunner = subagentRunner;
+        this.persistentBackend = persistentBackend;
     }
     /**
      * Create a new long-lived session.
      * First prompt triggers context injection; subsequent prompts go straight to pi.
      */
     createSession(config = {}) {
-        return new OrchestratorSession(this.logger, this.contextEngine, config);
+        return new OrchestratorSession(this.logger, this.contextEngine, config, this.scheduler, this.subagentRunner, this.persistentBackend);
     }
     /**
      * Single-shot: create a session, send one prompt, dispose, return result.

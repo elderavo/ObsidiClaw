@@ -19,11 +19,15 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { join } from "path";
 import type { ContextEngine } from "../context-engine.js";
 import type { ContextPackage, SubagentPackage, PruneMemberStatus } from "../types.js";
 import { PruneClusterStorage } from "../prune/prune-storage.js";
 import type { JobScheduler } from "../../scheduler/scheduler.js";
 import type { SubagentRunner } from "../../shared/agents/subagent-runner.js";
+import { resolvePaths } from "../../shared/config.js";
+import { getExecPath } from "../../shared/os/process.js";
+import { writeTaskSpec, listTaskSpecs } from "../../scheduler/persistent-tasks.js";
 
 export type OnContextBuilt = (pkg: ContextPackage) => void;
 export type OnSubagentPrepared = (pkg: SubagentPackage) => void;
@@ -34,6 +38,8 @@ export interface McpServerOptions {
   onSubagentPrepared?: OnSubagentPrepared;
   scheduler?: JobScheduler;
   subagentRunner?: SubagentRunner;
+  persistentBackend?: import("../../shared/os/scheduling.js").PersistentScheduleBackend;
+  rootDir?: string;
 }
 
 /**
@@ -53,10 +59,13 @@ export function createContextEngineMcpServer(
 }
 
 function _createMcpServer(opts: McpServerOptions): McpServer {
-  const { engine, onContextBuilt, onSubagentPrepared, scheduler, subagentRunner } = opts;
+  const { engine, onContextBuilt, onSubagentPrepared, scheduler, subagentRunner, persistentBackend, rootDir } = opts;
   const server = new McpServer({ name: "obsidi-claw-context", version: "1.0.0" });
 
   // ── retrieve_context ──────────────────────────────────────────────────────
+
+  // Default budget: ~750 tokens. Keeps total prompt well under 4k context models.
+  const DEFAULT_MAX_CHARS = 3000;
 
   server.registerTool(
     "retrieve_context",
@@ -67,12 +76,17 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
         "Call this before relying on your own knowledge for any project-specific question.",
       inputSchema: {
         query: z.string().describe("What to search for in the knowledge base."),
+        max_chars: z.number().optional().describe("Maximum characters to return (default: 3000). Use a smaller value for tighter context."),
       },
     },
-    async ({ query }) => {
+    async ({ query, max_chars }) => {
       const pkg = await engine.build(query);
       onContextBuilt?.(pkg);
-      return { content: [{ type: "text" as const, text: pkg.formattedContext }] };
+      const budget = max_chars ?? DEFAULT_MAX_CHARS;
+      const text = pkg.formattedContext.length <= budget
+        ? pkg.formattedContext
+        : pkg.formattedContext.slice(0, budget) + "\n\n_(context truncated to fit budget)_\n<!-- End ObsidiClaw Context -->";
+      return { content: [{ type: "text" as const, text }] };
     },
   );
 
@@ -205,8 +219,8 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
   );
 
   // ── Scheduler tools (Layer 1 — inspect & control existing jobs) ─────────
-  if (scheduler) {
-    registerSchedulerTools(server, scheduler, subagentRunner);
+  if (scheduler || persistentBackend) {
+    registerSchedulerTools(server, scheduler, subagentRunner, persistentBackend, rootDir);
   }
 
   return server;
@@ -218,30 +232,53 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
 
 function registerSchedulerTools(
   server: McpServer,
-  scheduler: JobScheduler,
+  scheduler: JobScheduler | undefined,
   subagentRunner?: SubagentRunner,
+  persistentBackend?: import("../../shared/os/scheduling.js").PersistentScheduleBackend,
+  rootDir?: string,
 ): void {
   // ── list_jobs ───────────────────────────────────────────────────────────
   server.registerTool(
     "list_jobs",
     {
       description:
-        "List all scheduled jobs with their current state: status, last run time, " +
-        "duration, error, and run count.",
+        "List all scheduled jobs with their current state, including persistent tasks.",
       inputSchema: {},
     },
     async () => {
-      const states = scheduler.getStates();
-      if (states.length === 0) {
+      const lines = ["# Scheduled Jobs", ""];
+
+      // In-process jobs (built-ins)
+      if (scheduler) {
+        const states = scheduler.getStates();
+        for (const s of states) {
+          const lastRun = s.lastRunAt ? new Date(s.lastRunAt).toISOString() : "never";
+          const duration = s.lastDurationMs != null ? `${s.lastDurationMs}ms` : "-";
+          const error = s.lastError ? ` | error: ${s.lastError}` : "";
+          lines.push(`- **${s.name}** | ${s.status} | runs: ${s.runCount} | last: ${lastRun} (${duration})${error}`);
+        }
+      }
+
+      // Persistent tasks (specs + backend state)
+      const root = rootDir ?? resolvePaths().rootDir;
+      const specs = listTaskSpecs(root);
+      const installed = persistentBackend ? await persistentBackend.list() : [];
+      const installedMap = new Map(installed.map((j) => [j.jobName, j]));
+
+      if (specs.length > 0) {
+        lines.push("", "## Persistent Tasks");
+        for (const spec of specs) {
+          const taskName = spec.name;
+          const job = installedMap.get(taskName);
+          const status = job ? (job.enabled === false ? "disabled" : "enabled") : "not installed";
+          lines.push(`- **${taskName}** | every ${spec.intervalMinutes}m | ${status} | desc: ${spec.description}`);
+        }
+      }
+
+      if (lines.length === 2) {
         return { content: [{ type: "text" as const, text: "No scheduled jobs registered." }] };
       }
-      const lines = ["# Scheduled Jobs", ""];
-      for (const s of states) {
-        const lastRun = s.lastRunAt ? new Date(s.lastRunAt).toISOString() : "never";
-        const duration = s.lastDurationMs != null ? `${s.lastDurationMs}ms` : "-";
-        const error = s.lastError ? ` | error: ${s.lastError}` : "";
-        lines.push(`- **${s.name}** | ${s.status} | runs: ${s.runCount} | last: ${lastRun} (${duration})${error}`);
-      }
+
       return { content: [{ type: "text" as const, text: lines.join("\n") }] };
     },
   );
@@ -252,13 +289,19 @@ function registerSchedulerTools(
     {
       description: "Trigger a scheduled job to run immediately (outside its normal interval).",
       inputSchema: {
-        job_name: z.string().describe("Name of the job to run (e.g., 'reindex-md-db', 'health-check')."),
+        job_name: z.string().describe("Name of the job to run (e.g., 'reindex-md-db', 'task-foo')."),
       },
     },
     async ({ job_name }) => {
       try {
-        await scheduler.runNow(job_name);
-        return { content: [{ type: "text" as const, text: `Job "${job_name}" completed successfully.` }] };
+        if (scheduler && scheduler.getStates().some((s) => s.name === job_name)) {
+          await scheduler.runNow(job_name);
+        } else if (persistentBackend?.run) {
+          await persistentBackend.run(job_name);
+        } else {
+          throw new Error("Job not found.");
+        }
+        return { content: [{ type: "text" as const, text: `Job "${job_name}" triggered successfully.` }] };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text" as const, text: `Job "${job_name}" failed: ${msg}` }] };
@@ -278,7 +321,13 @@ function registerSchedulerTools(
     },
     async ({ job_name, enabled }) => {
       try {
-        scheduler.setEnabled(job_name, enabled);
+        if (scheduler && scheduler.getStates().some((s) => s.name === job_name)) {
+          scheduler.setEnabled(job_name, enabled);
+        } else if (persistentBackend?.setEnabled) {
+          await persistentBackend.setEnabled(job_name, enabled);
+        } else {
+          throw new Error("Job not found.");
+        }
         return { content: [{ type: "text" as const, text: `Job "${job_name}" is now ${enabled ? "enabled" : "disabled"}.` }] };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -292,9 +341,7 @@ function registerSchedulerTools(
     "schedule_task",
     {
       description:
-        "Register a new recurring task on the scheduler. The task runs a subagent with " +
-        "the given prompt and personality on the specified interval. Use this to set up " +
-        "recurring maintenance, research, or monitoring tasks.",
+        "Register a new recurring task (persistent). Runs a detached subagent on the given interval.",
       inputSchema: {
         name: z.string().describe("Unique task name (e.g., 'monitor-ollama-releases')."),
         description: z.string().describe("What this task does."),
@@ -307,45 +354,47 @@ function registerSchedulerTools(
       },
     },
     async ({ name, description, prompt, plan, success_criteria, personality, interval_minutes, run_immediately }) => {
-      if (!subagentRunner) {
-        return { content: [{ type: "text" as const, text: "Cannot schedule tasks: subagent runner not available." }] };
+      if (!persistentBackend) {
+        return { content: [{ type: "text" as const, text: "Persistent scheduling backend not available on this platform." }] };
       }
 
-      const taskName = `dynamic:${name}`;
-
-      // Check for duplicates
-      const existing = scheduler.getStates().find((s) => s.name === taskName);
-      if (existing) {
-        return { content: [{ type: "text" as const, text: `Task "${taskName}" already exists. Unschedule it first to replace.` }] };
-      }
-
-      const runner = subagentRunner;
-      scheduler.registerAndStart({
+      const paths = resolvePaths(rootDir);
+      const taskName = `task-${name}`;
+      const spec = {
         name: taskName,
         description,
-        schedule: { minutes: interval_minutes },
-        skipIfRunning: true,
-        timeoutMs: 600_000, // 10 min default for dynamic tasks
-        async execute(ctx) {
-          const result = await runner.run(
-            { prompt, plan, successCriteria: success_criteria, personality },
-            ctx.signal,
-          );
-          if (result.outcome === "error") {
-            throw new Error(result.output);
-          }
-        },
-      });
+        prompt,
+        plan,
+        successCriteria: success_criteria,
+        personality,
+        intervalMinutes: interval_minutes,
+        rootDir: paths.rootDir,
+        createdAt: Date.now(),
+        context: prompt,
+      };
+
+      const specPath = writeTaskSpec(paths.rootDir, spec);
+      const scriptPath = join(paths.rootDir, "dist", "scripts", "run_detached_subagent.js");
+      const nodePath = getExecPath();
+
+      try {
+        await persistentBackend.install(taskName, interval_minutes * 60_000, nodePath, [scriptPath, specPath]);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text" as const, text: `Failed to install task: ${msg}` }] };
+      }
 
       const lines = [
-        `Scheduled task "${taskName}" — runs every ${interval_minutes} minute(s).`,
-        `Subagent: ${personality ?? "(default)"} | timeout: 10m`,
+        `Scheduled persistent task "${taskName}" — every ${interval_minutes} minute(s).`,
+        `Spec: ${specPath}`,
       ];
 
       if (run_immediately) {
         try {
-          await scheduler.runNow(taskName);
-          lines.push("First run completed successfully.");
+          if (persistentBackend.run) {
+            await persistentBackend.run(taskName);
+          }
+          lines.push("First run triggered.");
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           lines.push(`First run failed: ${msg}`);
@@ -361,19 +410,23 @@ function registerSchedulerTools(
     "unschedule_task",
     {
       description:
-        "Remove a dynamically scheduled task. Only tasks created via schedule_task " +
-        "(prefixed with 'dynamic:') can be removed. Built-in jobs cannot be unscheduled.",
+        "Disable/remove a persistent task schedule. Keeps the spec file for re-enabling later.",
       inputSchema: {
-        name: z.string().describe("Task name (without the 'dynamic:' prefix)."),
+        name: z.string().describe("Task name (without the 'task-' prefix)."),
       },
     },
     async ({ name }) => {
-      const taskName = `dynamic:${name}`;
-      const removed = scheduler.unregister(taskName);
-      if (removed) {
-        return { content: [{ type: "text" as const, text: `Task "${taskName}" unscheduled and removed.` }] };
+      const taskName = `task-${name}`;
+      try {
+        if (!persistentBackend) {
+          return { content: [{ type: "text" as const, text: "Persistent backend not available." }] };
+        }
+        await persistentBackend.uninstall(taskName);
+        return { content: [{ type: "text" as const, text: `Task "${taskName}" unscheduled (spec retained).` }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text" as const, text: `No task named "${taskName}" found or uninstall failed: ${msg}` }] };
       }
-      return { content: [{ type: "text" as const, text: `No task named "${taskName}" found.` }] };
     },
   );
 }

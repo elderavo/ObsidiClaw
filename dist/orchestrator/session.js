@@ -16,16 +16,13 @@
  *     → agent_prompt_sent → [agent_turn_start/end, tool_call/result]
  *     → agent_done → prompt_complete
  */
-import { createAgentSession, DefaultResourceLoader, SessionManager, } from "@mariozechner/pi-coding-agent";
 import { RunLogger } from "../logger/index.js";
 import { createContextEngineMcpServer } from "../context_engine/index.js";
 import { createObsidiClawExtension } from "../extension/factory.js";
+import { createPiAgentSession } from "../shared/pi-session-factory.js";
+import { resolvePaths } from "../shared/config.js";
+import { extractMessageText } from "../shared/text-utils.js";
 import { runSessionReview } from "../insight_engine/session_review.js";
-// ---------------------------------------------------------------------------
-// Provider constants — TODO: Phase 1 move to shared/config.ts
-// ---------------------------------------------------------------------------
-const OLLAMA_BASE_URL = process.env["OLLAMA_BASE_URL"] ?? "http://10.0.132.100/v1";
-const OLLAMA_MODEL = process.env["OLLAMA_MODEL"] ?? "llama3";
 // ---------------------------------------------------------------------------
 // OrchestratorSession
 // ---------------------------------------------------------------------------
@@ -33,6 +30,9 @@ export class OrchestratorSession {
     logger;
     contextEngine;
     config;
+    scheduler;
+    subagentRunner;
+    persistentBackend;
     sessionId;
     /** pi SDK session — null until first prompt is received. */
     piSession = null;
@@ -42,13 +42,21 @@ export class OrchestratorSession {
      * Used by the pi event subscription (subscribed once, references this field).
      */
     currentRunId = "";
-    isSubagent;
-    constructor(logger, contextEngine, config = {}) {
+    runKind;
+    parentRunId;
+    parentSessionId;
+    constructor(logger, contextEngine, config = {}, scheduler, subagentRunner, persistentBackend) {
         this.logger = logger;
         this.contextEngine = contextEngine;
         this.config = config;
+        this.scheduler = scheduler;
+        this.subagentRunner = subagentRunner;
+        this.persistentBackend = persistentBackend;
         this.sessionId = crypto.randomUUID();
-        this.isSubagent = Boolean(config.isSubagent);
+        // runKind takes precedence; fall back to isSubagent for backward compat
+        this.runKind = config.runKind ?? (config.isSubagent ? "subagent" : "core");
+        this.parentRunId = config.parentRunId;
+        this.parentSessionId = config.parentSessionId;
         this.emit({ type: "session_start", sessionId: this.sessionId, timestamp: Date.now() });
     }
     // ── Public API ────────────────────────────────────────────────────────────
@@ -63,7 +71,7 @@ export class OrchestratorSession {
         const runId = crypto.randomUUID();
         this.currentRunId = runId;
         const startTime = Date.now();
-        this.emit({ type: "prompt_received", sessionId: this.sessionId, runId, timestamp: Date.now(), text, isSubagent: this.isSubagent });
+        this.emit({ type: "prompt_received", sessionId: this.sessionId, runId, timestamp: Date.now(), text, isSubagent: this.runKind !== "core", runKind: this.runKind, parentRunId: this.parentRunId, parentSessionId: this.parentSessionId });
         try {
             // ── First prompt: create pi session ───────────────────────────────────
             if (!this.piSessionReady) {
@@ -104,6 +112,10 @@ export class OrchestratorSession {
     get messages() {
         return this.piSession?.messages ?? [];
     }
+    /** Run ID from the most recent prompt() call. Empty string if none yet. */
+    get lastRunId() {
+        return this.currentRunId;
+    }
     /** Current stage of the last prompt round-trip (for single-shot compat). */
     getLastStage() {
         return this.piSessionReady ? "done" : "prompt_received";
@@ -113,7 +125,7 @@ export class OrchestratorSession {
      * Falls back to dispose() if review is skipped.
      */
     async finalize(trigger = "session_end") {
-        if (this.isSubagent) {
+        if (this.runKind !== "core") {
             this.dispose();
             return;
         }
@@ -203,7 +215,7 @@ export class OrchestratorSession {
      * is unavailable or if this session is already a subagent.
      */
     async runReviewHook(trigger, compactionMeta) {
-        if (this.isSubagent)
+        if (this.runKind !== "core")
             return;
         if (!this.contextEngine)
             return;
@@ -213,19 +225,21 @@ export class OrchestratorSession {
             messages: this.messages ?? [],
             compactionMeta,
             contextEngine: this.contextEngine,
-            rootDir: process.cwd(),
+            rootDir: resolvePaths().rootDir,
             createChildSession: async (systemPrompt) => {
-                const childLogger = new RunLogger();
+                const childLogger = new RunLogger({ dbPath: resolvePaths().dbPath });
                 const childSession = new OrchestratorSession(childLogger, this.contextEngine, {
                     systemPrompt,
-                    isSubagent: true,
+                    runKind: "reviewer",
+                    parentRunId: this.currentRunId,
+                    parentSessionId: this.sessionId,
                 });
                 return {
                     runReview: async (userMessage) => {
                         await childSession.prompt(userMessage);
                         const msgs = (childSession.messages ?? []);
                         const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
-                        return extractTextFromContent(lastAssistant?.content) ?? "";
+                        return extractMessageText(lastAssistant?.content) || "";
                     },
                     dispose: () => {
                         childSession.dispose();
@@ -240,98 +254,52 @@ export class OrchestratorSession {
      * context-injection extension wired in.
      *
      * Called ONCE per OrchestratorSession (lazy, on first prompt).
-     *
-     * TODO: Phase 1 — pull Ollama config from shared/config.ts
      */
     async createPiSession() {
-        const model = this.config.model ?? OLLAMA_MODEL;
-        const loader = new DefaultResourceLoader({
-            extensionFactories: [
-                // Register Ollama as the LLM provider
-                (pi) => {
-                    pi.registerProvider("ollama", {
-                        baseUrl: OLLAMA_BASE_URL,
-                        apiKey: "ollama",
-                        api: "openai-completions",
-                        models: [
-                            {
-                                id: model,
-                                name: `Ollama / ${model}`,
-                                reasoning: false,
-                                input: ["text"],
-                                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                                contextWindow: 32768,
-                                maxTokens: 4096,
-                                compat: {
-                                    supportsDeveloperRole: false,
-                                    maxTokensField: "max_tokens",
-                                },
-                            },
-                        ],
-                    });
-                },
-                // ObsidiClaw context injection via MCP.
-                // The MCP server wraps the context engine; the onContextBuilt callback routes
-                // full ContextPackage metrics to the orchestrator event log (context_retrieved).
-                ...(this.contextEngine
-                    ? [createObsidiClawExtension({
-                            mcpServer: createContextEngineMcpServer(this.contextEngine, (pkg) => this.emit({
-                                type: "context_retrieved",
-                                sessionId: this.sessionId,
-                                runId: this.currentRunId,
-                                timestamp: Date.now(),
-                                query: pkg.query,
-                                seedCount: pkg.seedNoteIds?.length ?? 0,
-                                expandedCount: pkg.expandedNoteIds?.length ?? 0,
-                                toolCount: pkg.suggestedTools.length,
-                                retrievalMs: pkg.retrievalMs,
-                                rawChars: pkg.rawChars,
-                                strippedChars: pkg.strippedChars,
-                                estimatedTokens: pkg.estimatedTokens,
-                            }), (pkg) => this.emit({
-                                type: "subagent_start",
-                                sessionId: this.sessionId,
-                                runId: this.currentRunId,
-                                timestamp: Date.now(),
-                                prompt: pkg.input.prompt,
-                                plan: pkg.input.plan,
-                                seedCount: pkg.contextPackage.seedNoteIds?.length ?? 0,
-                                expandedCount: pkg.contextPackage.expandedNoteIds?.length ?? 0,
-                                estimatedTokens: pkg.contextPackage.estimatedTokens,
-                            })),
-                        })]
-                    : []),
-            ],
-            ...(this.config.systemPrompt
-                ? { systemPromptOverride: () => this.config.systemPrompt }
-                : {}),
+        // Build extension factories for context injection (when engine is available)
+        const contextExtensions = this.contextEngine
+            ? [createObsidiClawExtension({
+                    mcpServer: createContextEngineMcpServer({
+                        engine: this.contextEngine,
+                        onContextBuilt: (pkg) => this.emit({
+                            type: "context_retrieved",
+                            sessionId: this.sessionId,
+                            runId: this.currentRunId,
+                            timestamp: Date.now(),
+                            query: pkg.query,
+                            seedCount: pkg.seedNoteIds?.length ?? 0,
+                            expandedCount: pkg.expandedNoteIds?.length ?? 0,
+                            toolCount: pkg.suggestedTools.length,
+                            retrievalMs: pkg.retrievalMs,
+                            rawChars: pkg.rawChars,
+                            strippedChars: pkg.strippedChars,
+                            estimatedTokens: pkg.estimatedTokens,
+                            reviewMs: pkg.reviewResult?.reviewMs,
+                            reviewSkipped: pkg.reviewResult?.skipped,
+                        }),
+                        onSubagentPrepared: (pkg) => this.emit({
+                            type: "subagent_start",
+                            sessionId: this.sessionId,
+                            runId: this.currentRunId,
+                            timestamp: Date.now(),
+                            prompt: pkg.input.prompt,
+                            plan: pkg.input.plan,
+                            seedCount: pkg.contextPackage.seedNoteIds?.length ?? 0,
+                            expandedCount: pkg.contextPackage.expandedNoteIds?.length ?? 0,
+                            estimatedTokens: pkg.contextPackage.estimatedTokens,
+                        }),
+                        scheduler: this.scheduler,
+                        subagentRunner: this.subagentRunner,
+                        persistentBackend: this.persistentBackend,
+                        rootDir: resolvePaths().rootDir,
+                    }),
+                })]
+            : [];
+        return createPiAgentSession({
+            ollama: this.config.model ? { model: this.config.model } : undefined,
+            extensionFactories: contextExtensions,
+            systemPrompt: this.config.systemPrompt,
         });
-        await loader.reload();
-        const { session } = await createAgentSession({
-            resourceLoader: loader,
-            sessionManager: SessionManager.inMemory(),
-        });
-        return session;
     }
-}
-function extractTextFromContent(content) {
-    if (typeof content === "string")
-        return content;
-    if (Array.isArray(content)) {
-        const parts = content
-            .map((c) => {
-            if (typeof c === "string")
-                return c;
-            if (c && typeof c === "object" && "text" in c)
-                return String(c.text);
-            return null;
-        })
-            .filter(Boolean);
-        return parts.join("\n") || null;
-    }
-    if (content && typeof content === "object" && "text" in content) {
-        return String(content.text);
-    }
-    return null;
 }
 //# sourceMappingURL=session.js.map

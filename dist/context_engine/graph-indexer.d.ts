@@ -16,7 +16,11 @@
 import { VectorStoreIndex } from "llamaindex";
 import type { StorageContext } from "llamaindex";
 import type { SqliteGraphStore } from "./store/graph-store.js";
-export declare function collectMarkdownFiles(dir: string): Promise<string[]>;
+type CollectOptions = {
+    /** Directory basenames to skip (non-recursive into them). */
+    ignoredDirs?: string[];
+};
+export declare function collectMarkdownFiles(dir: string, options?: CollectOptions): Promise<string[]>;
 /**
  * Compute a fingerprint of all .md files in mdDbPath based on their
  * modification times. Returns the same hash for the same set of files
@@ -44,4 +48,5 @@ export declare function syncMdDbToGraph(mdDbPath: string, graphStore: SqliteGrap
  * Metadata includes file_path (= noteId) and note_type for downstream filtering.
  */
 export declare function buildVectorIndexFromGraph(graphStore: SqliteGraphStore, storageContext?: StorageContext): Promise<VectorStoreIndex>;
+export {};
 //# sourceMappingURL=graph-indexer.d.ts.map

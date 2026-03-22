@@ -9,12 +9,17 @@
  */
 import type { RunLogger } from "../logger/index.js";
 import type { ContextEngine } from "../context_engine/index.js";
+import type { JobScheduler } from "../scheduler/scheduler.js";
+import type { SubagentRunner } from "../shared/agents/subagent-runner.js";
 import type { RunConfig, RunResult, SessionConfig } from "./types.js";
 import { OrchestratorSession } from "./session.js";
 export declare class Orchestrator {
     private readonly logger;
     private readonly contextEngine?;
-    constructor(logger: RunLogger, contextEngine?: ContextEngine | undefined);
+    private readonly scheduler?;
+    private readonly subagentRunner?;
+    private readonly persistentBackend?;
+    constructor(logger: RunLogger, contextEngine?: ContextEngine | undefined, scheduler?: JobScheduler | undefined, subagentRunner?: SubagentRunner | undefined, persistentBackend?: import("../shared/os/scheduling.js").PersistentScheduleBackend | undefined);
     /**
      * Create a new long-lived session.
      * First prompt triggers context injection; subsequent prompts go straight to pi.

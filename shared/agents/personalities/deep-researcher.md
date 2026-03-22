@@ -2,7 +2,7 @@
 type: personality
 title: Deep Researcher
 provider:
-  model: llama3
+  model: cogito:8b
 ---
 # Deep Researcher
 

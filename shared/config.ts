@@ -20,8 +20,8 @@ export interface OllamaConfig {
 
 export function getOllamaConfig(overrides?: Partial<OllamaConfig>): OllamaConfig {
   return {
-    baseUrl: overrides?.baseUrl ?? process.env["OLLAMA_BASE_URL"] ?? "http://10.0.132.100/v1",
-    model: overrides?.model ?? process.env["OLLAMA_MODEL"] ?? "llama3",
+    baseUrl: overrides?.baseUrl ?? process.env["OLLAMA_BASE_URL"] ?? "http://10.0.132.100:11434/v1",
+    model: overrides?.model ?? process.env["OLLAMA_MODEL"] ?? "cogito:8b",
     contextWindow: overrides?.contextWindow ?? 32768,
     maxTokens: overrides?.maxTokens ?? 4096,
   };

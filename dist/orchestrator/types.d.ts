@@ -6,6 +6,14 @@
 /** Unique ID for a single pi agent session. UUIDv4. */
 export type SessionId = string;
 /**
+ * Discriminates run type in the runs table.
+ *   core      — interactive user prompt via OrchestratorSession
+ *   subagent  — child agent spawned by SubagentRunner
+ *   reviewer  — post-session review subagent (insight_engine)
+ *   job       — scheduler job execution
+ */
+export type RunKind = "core" | "subagent" | "reviewer" | "job";
+/**
  * Unique ID for a single prompt/response round-trip within a session.
  * A session has one or more runs (one per prompt).
  */
@@ -24,15 +32,24 @@ export type RunStage = "prompt_received" | "context_inject" | "pi_ready" | "agen
 export interface SessionConfig {
     /** System prompt override for the pi agent. */
     systemPrompt?: string;
-    /** Ollama model override. Defaults to OLLAMA_MODEL env / "llama3". */
+    /** Ollama model override. Defaults to OLLAMA_MODEL env / "cogito:8b". */
     model?: string;
     /**
      * Called with streaming text delta from the agent.
      * Use this to print agent output in real time.
      */
     onOutput?: (delta: string) => void;
-    /** True for subagent sessions spawned from a parent run. */
+    /**
+     * What kind of run this session produces. Defaults to "core".
+     * @deprecated Use runKind instead of isSubagent.
+     */
     isSubagent?: boolean;
+    /** Discriminates run type. Defaults to "core". Takes precedence over isSubagent. */
+    runKind?: RunKind;
+    /** Run ID of the parent that spawned this session (for subagent/reviewer linking). */
+    parentRunId?: RunId;
+    /** Session ID of the parent session (for cross-session parent/child trees). */
+    parentSessionId?: SessionId;
 }
 export interface RunConfig extends SessionConfig {
     prompt: string;
@@ -60,6 +77,9 @@ export type RunEvent = {
     timestamp: number;
     text: string;
     isSubagent?: boolean;
+    runKind?: RunKind;
+    parentRunId?: RunId;
+    parentSessionId?: SessionId;
 } | {
     type: "prompt_complete";
     sessionId: SessionId;
@@ -109,6 +129,8 @@ export type RunEvent = {
     rawChars: number;
     strippedChars: number;
     estimatedTokens: number;
+    reviewMs?: number;
+    reviewSkipped?: boolean;
 } | {
     type: "subagent_start";
     sessionId: SessionId;
@@ -157,5 +179,89 @@ export type RunEvent = {
     toolCallId?: string;
     isError: boolean;
     toolResult?: unknown;
+} | {
+    type: "job_start";
+    sessionId: SessionId;
+    timestamp: number;
+    jobName: string;
+    runId: string;
+} | {
+    type: "job_complete";
+    sessionId: SessionId;
+    timestamp: number;
+    jobName: string;
+    runId: string;
+    durationMs: number;
+} | {
+    type: "job_error";
+    sessionId: SessionId;
+    timestamp: number;
+    jobName: string;
+    runId: string;
+    error: string;
+} | {
+    type: "ce_init_start";
+    sessionId: SessionId;
+    runId: RunId;
+    timestamp: number;
+    path: "fast" | "slow";
+} | {
+    type: "ce_init_end";
+    sessionId: SessionId;
+    runId: RunId;
+    timestamp: number;
+    path: "fast" | "slow";
+    durationMs: number;
+    noteCount?: number;
+} | {
+    type: "ce_retrieval_start";
+    sessionId: SessionId;
+    runId: RunId;
+    timestamp: number;
+    query: string;
+    topK: number;
+} | {
+    type: "ce_vector_done";
+    sessionId: SessionId;
+    runId: RunId;
+    timestamp: number;
+    seedCount: number;
+    durationMs: number;
+} | {
+    type: "ce_graph_done";
+    sessionId: SessionId;
+    runId: RunId;
+    timestamp: number;
+    expandedCount: number;
+    durationMs: number;
+} | {
+    type: "ce_review_start";
+    sessionId: SessionId;
+    runId: RunId;
+    timestamp: number;
+    noteCount: number;
+    avgScore: number;
+} | {
+    type: "ce_review_done";
+    sessionId: SessionId;
+    runId: RunId;
+    timestamp: number;
+    skipped: boolean;
+    skipReason?: string;
+    reviewMs: number;
+    inputChars: number;
+    outputChars?: number;
+} | {
+    type: "ce_reindex_start";
+    sessionId: SessionId;
+    runId: RunId;
+    timestamp: number;
+} | {
+    type: "ce_reindex_done";
+    sessionId: SessionId;
+    runId: RunId;
+    timestamp: number;
+    durationMs: number;
+    noteCount: number;
 };
 //# sourceMappingURL=types.d.ts.map

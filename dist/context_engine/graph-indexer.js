@@ -20,16 +20,16 @@ import { join, relative, extname } from "path";
 import { createHash } from "crypto";
 import { Document, VectorStoreIndex } from "llamaindex";
 import { parseMarkdownFile } from "./ingest/note-parser.js";
-// ---------------------------------------------------------------------------
-// File collection (shared by sync + hash)
-// ---------------------------------------------------------------------------
-export async function collectMarkdownFiles(dir) {
+export async function collectMarkdownFiles(dir, options) {
+    const ignoredDirs = new Set(options?.ignoredDirs ?? [".obsidian"]);
     const entries = await readdir(dir, { withFileTypes: true });
     const paths = [];
     for (const entry of entries) {
         const fullPath = join(dir, entry.name);
         if (entry.isDirectory()) {
-            paths.push(...(await collectMarkdownFiles(fullPath)));
+            if (ignoredDirs.has(entry.name))
+                continue;
+            paths.push(...(await collectMarkdownFiles(fullPath, { ignoredDirs: [...ignoredDirs] })));
         }
         else if (entry.isFile() && extname(entry.name) === ".md") {
             paths.push(fullPath);

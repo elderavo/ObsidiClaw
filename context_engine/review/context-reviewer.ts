@@ -60,7 +60,7 @@ export interface ReviewResult {
 const DEFAULTS: ContextReviewConfig = {
   enabled: true,
   personality: "context-gardener",
-  maxLatencyMs: 15_000,
+  maxLatencyMs: 120_000,
   personalitiesDir: "",
 };
 
@@ -164,6 +164,9 @@ export class ContextReviewer {
           { role: "user", content: userPrompt },
         ],
         stream: false,
+        options: {
+          num_ctx: 131072,
+        },
       },
       {
         timeout: this.config.maxLatencyMs,

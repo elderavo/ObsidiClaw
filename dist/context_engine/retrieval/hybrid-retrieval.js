@@ -9,6 +9,7 @@
  * Seed notes always take precedence; duplicate noteIds are not returned twice.
  */
 import { MetadataMode } from "llamaindex";
+import { normalizeToken, normalizeTokens, extractTags } from "../../shared/markdown/tokens.js";
 const GRAPH_SCORE_DECAY = 0.7;
 const TAG_BOOST_PER_MATCH = 0.1;
 const MAX_TAG_BOOST = 0.3;
@@ -117,43 +118,5 @@ function computeTagBoost(tags, query) {
     if (matches === 0)
         return 0;
     return Math.min(MAX_TAG_BOOST, TAG_BOOST_PER_MATCH * matches);
-}
-function extractTags(frontmatterJson) {
-    if (!frontmatterJson)
-        return [];
-    try {
-        const parsed = JSON.parse(frontmatterJson);
-        const rawTags = parsed["tags"];
-        if (Array.isArray(rawTags)) {
-            return normalizeTagList(rawTags.map((tag) => String(tag)));
-        }
-        if (typeof rawTags === "string") {
-            const parts = rawTags.split(",").map((tag) => tag.trim()).filter(Boolean);
-            return normalizeTagList(parts);
-        }
-    }
-    catch {
-        return [];
-    }
-    return [];
-}
-function normalizeTagList(tags) {
-    const normalized = tags
-        .map((tag) => normalizeToken(tag))
-        .filter(Boolean);
-    return [...new Set(normalized)];
-}
-function normalizeToken(value) {
-    return value
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "_")
-        .replace(/^_+|_+$/g, "");
-}
-function normalizeTokens(value) {
-    return value
-        .toLowerCase()
-        .split(/[^a-z0-9]+/g)
-        .map((token) => token.trim())
-        .filter(Boolean);
 }
 //# sourceMappingURL=hybrid-retrieval.js.map

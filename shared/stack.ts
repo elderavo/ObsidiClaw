@@ -20,6 +20,7 @@ import { JobScheduler, createReindexJob, createHealthCheckJob, createNormalizeJo
 import { SubagentRunner } from "./agents/subagent-runner.js";
 import { resolvePaths, type ObsidiClawPaths } from "./config.js";
 import type { RunEvent } from "../orchestrator/types.js";
+import { WindowsTaskSchedulerBackend } from "./os/scheduling-windows.js";
 
 // ---------------------------------------------------------------------------
 // Options
@@ -48,6 +49,7 @@ export interface ObsidiClawStack {
   readonly runner: SubagentRunner;
   readonly sessionId: string;
   readonly paths: ObsidiClawPaths;
+  readonly persistentBackend?: import("./os/scheduling.js").PersistentScheduleBackend;
 
   /** Initialize the context engine and start the scheduler. */
   initialize(): Promise<void>;
@@ -90,6 +92,11 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     },
   });
 
+  // ── Persistent backend (Windows Task Scheduler) ────────────────────────
+  const persistentBackend = process.platform === "win32"
+    ? new WindowsTaskSchedulerBackend(paths.rootDir)
+    : undefined;
+
   // ── JobScheduler (optional) ─────────────────────────────────────────────
   const enableScheduler = opts.enableScheduler ?? true;
   let scheduler: JobScheduler | undefined;
@@ -97,7 +104,7 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
   if (enableScheduler) {
     scheduler = new JobScheduler(logger, sessionId);
     scheduler.register(createReindexJob(engine));
-    scheduler.register(createHealthCheckJob(engine));
+    scheduler.register(createHealthCheckJob(engine, 24 * 60)); // run once per day
     scheduler.register(createNormalizeJob(paths.mdDbPath));
   }
 
@@ -132,6 +139,7 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     runner,
     sessionId,
     paths,
+    persistentBackend,
     initialize,
     shutdown,
   };

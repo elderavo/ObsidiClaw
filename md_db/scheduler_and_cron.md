@@ -49,7 +49,7 @@ Each job execution:
 | Job | Interval | What it does |
 |-----|----------|-------------|
 | `reindex-md-db` | 30 min | Calls `engine.reindex()` — syncs md_db to graph + vector index |
-| `health-check` | 15 min | Checks Ollama reachability and SQLite graph store health |
+| `health-check` | 24 hours | Checks Ollama reachability and SQLite graph store health |
 | `normalize-md-db` | 2 hours | Scans md_db for frontmatter inconsistencies, auto-fixes safe issues |
 
 ## Job Definition

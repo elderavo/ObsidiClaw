@@ -2,7 +2,7 @@
 type: personality
 title: Code Reviewer
 provider:
-  model: llama3
+  model: qwen3.5:4b
 ---
 # Code Reviewer
 

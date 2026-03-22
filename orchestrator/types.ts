@@ -56,7 +56,7 @@ export interface SessionConfig {
   /** System prompt override for the pi agent. */
   systemPrompt?: string;
 
-  /** Ollama model override. Defaults to OLLAMA_MODEL env / "llama3". */
+  /** Ollama model override. Defaults to OLLAMA_MODEL env / "cogito:8b". */
   model?: string;
 
   /**

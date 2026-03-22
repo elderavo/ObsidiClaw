@@ -1,5 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
+import { resolvePaths } from "../shared/config.js";
+import { extractMessageText } from "../shared/text-utils.js";
+import { ensureDir, fileExists, readText, writeText } from "../shared/os/fs.js";
+import { buildFrontmatter } from "../shared/markdown/frontmatter.js";
 const MAX_MESSAGES = 40;
 const MAX_TRANSCRIPT_CHARS = 16000;
 export async function runSessionReview(opts) {
@@ -29,7 +32,7 @@ export async function runSessionReview(opts) {
         const proposal = parseProposal(raw, opts.trigger);
         if (!proposal)
             return;
-        await applyProposal({ proposal, timestamp, rootDir: opts.rootDir ?? process.cwd() });
+        await applyProposal({ proposal, timestamp, rootDir: opts.rootDir ?? resolvePaths().rootDir });
     }
     finally {
         runner.dispose();
@@ -92,22 +95,9 @@ function formatTranscript(messages) {
     return joined.slice(-MAX_TRANSCRIPT_CHARS);
 }
 function stringifyContent(content) {
-    if (typeof content === "string")
-        return content;
-    if (Array.isArray(content)) {
-        return content
-            .map((c) => {
-            if (typeof c === "string")
-                return c;
-            if (c && typeof c === "object" && "text" in c)
-                return String(c.text);
-            return JSON.stringify(c);
-        })
-            .join("\n");
-    }
-    if (content && typeof content === "object" && "text" in content) {
-        return String(content.text);
-    }
+    const text = extractMessageText(content);
+    if (text)
+        return text;
     return JSON.stringify(content ?? "");
 }
 function parseProposal(raw, trigger) {
@@ -158,8 +148,8 @@ async function applyProposal(opts) {
 }
 function appendPreferencesInbox(opts) {
     const inboxPath = join(opts.rootDir, "md_db", "preferences_inbox.md");
-    mkdirSync(dirname(inboxPath), { recursive: true });
-    const header = existsSync(inboxPath) ? "" : `---\ntype: concept\n---\n\n# Preferences Inbox\n\nPending proposals auto-derived from sessions. Review and merge manually.\n\n`;
+    ensureDir(dirname(inboxPath));
+    const header = fileExists(inboxPath) ? "" : `---\ntype: concept\n---\n\n# Preferences Inbox\n\nPending proposals auto-derived from sessions. Review and merge manually.\n\n`;
     const lines = [];
     lines.push(`\n## Proposal (${new Date(opts.timestamp).toISOString()}) — trigger: ${opts.trigger}`);
     for (const u of opts.updates) {
@@ -174,7 +164,7 @@ function appendPreferencesInbox(opts) {
             lines.push(`  reason: ${u.reason}`);
     }
     const blob = header + lines.join("\n") + "\n";
-    writeFileSync(inboxPath, (existsSync(inboxPath) ? readFileSync(inboxPath, "utf8") : "") + blob, "utf8");
+    writeText(inboxPath, (fileExists(inboxPath) ? readText(inboxPath) : "") + blob);
 }
 function writeNewNote(opts) {
     const root = join(opts.rootDir, "md_db");
@@ -182,24 +172,21 @@ function writeNewNote(opts) {
     const slug = slugify(opts.note.path || title);
     const relPath = opts.note.path?.trim() || join("concepts", "auto", `${slug}.md`).replace(/\\/g, "/");
     const absPath = join(root, relPath);
-    mkdirSync(dirname(absPath), { recursive: true });
+    ensureDir(dirname(absPath));
     const bodyProvided = opts.note.body?.trim();
     const tags = opts.note.tags?.length ? opts.note.tags : ["auto-derived", "insight"];
     const type = opts.note.type?.trim() || "concept";
-    const fm = [
-        "---",
-        `title: ${title}`,
-        `type: ${type}`,
-        `created: ${new Date(opts.timestamp).toISOString()}`,
-        `updated: ${new Date(opts.timestamp).toISOString()}`,
-        `source_trigger: ${opts.trigger}`,
-        `tags: [${tags.join(", ")}]`,
-        "---",
-        "",
-    ].join("\n");
+    const fm = buildFrontmatter({
+        title,
+        type,
+        created: new Date(opts.timestamp).toISOString(),
+        updated: new Date(opts.timestamp).toISOString(),
+        source_trigger: opts.trigger,
+        tags,
+    });
     const reason = opts.note.reason ? `\n\n## Source\nDerived automatically (trigger: ${opts.trigger}). Reason: ${opts.note.reason}` : "";
     const content = fm + (bodyProvided || "(no content provided)") + reason + "\n";
-    writeFileSync(absPath, content, "utf8");
+    writeText(absPath, content);
 }
 function slugify(value) {
     return value

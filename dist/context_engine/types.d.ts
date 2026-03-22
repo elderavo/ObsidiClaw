@@ -1,7 +1,5 @@
 /**
  * Context engine public types.
- *
- * TODO: Phase 1 — migrate to shared/types.ts once stable.
  */
 export type NoteType = "tool" | "concept" | "index" | "codebase";
 export interface RetrievedNote {
@@ -37,10 +35,7 @@ export interface ContextPackage {
     query: string;
     /** All retrieved notes, sorted by score descending. */
     retrievedNotes: RetrievedNote[];
-    /**
-     * Tool IDs from retrieved tool nodes.
-     * TODO: Phase 6 — orchestrator runs these tools; outputs appended to context.
-     */
+    /** Tool IDs from retrieved tool nodes. */
     suggestedTools: string[];
     /** Formatted markdown ready for injection into the pi session via agentsFilesOverride. */
     formattedContext: string;
@@ -58,6 +53,12 @@ export interface ContextPackage {
     strippedChars: number;
     /** Rough token estimate of formattedContext (chars ÷ 4). */
     estimatedTokens: number;
+    /** Review/synthesis result, if context review was performed. */
+    reviewResult?: {
+        reviewMs: number;
+        skipped: boolean;
+        skipReason?: string;
+    };
 }
 export interface SubagentInput {
     /** Top-level task description passed to the subagent. */
@@ -66,6 +67,8 @@ export interface SubagentInput {
     plan: string;
     /** Unambiguous, measurable criteria for task completion. */
     successCriteria: string;
+    /** Optional personality name (loads from shared/agents/personalities/). */
+    personality?: string;
 }
 export interface SubagentPackage {
     /** Original input from the main agent. */
@@ -74,16 +77,43 @@ export interface SubagentPackage {
     contextPackage: ContextPackage;
     /**
      * Ready-to-inject system prompt for the subagent session.
-     * Combines: task + plan + retrieved context + success criteria.
+     * Combines: personality + task + plan + retrieved context + success criteria.
      */
     formattedSystemPrompt: string;
+    /** Resolved personality config (if a personality was specified). */
+    personalityConfig?: import("../shared/agents/types.js").PersonalityConfig;
     /** Unix timestamp (ms) when the package was built. */
     builtAt: number;
+}
+export type PruneMemberStatus = "pending" | "keep" | "merge" | "ignore";
+export interface PruneClusterMember {
+    noteId: string;
+    similarity: number;
+    isRepresentative: boolean;
+    status: PruneMemberStatus;
+}
+export interface PruneClusterStats {
+    size: number;
+    maxSimilarity: number;
+    minSimilarity: number;
+    avgSimilarity: number;
+}
+export interface PruneCluster {
+    clusterId: string;
+    representativeNoteId: string;
+    members: PruneClusterMember[];
+    stats: PruneClusterStats;
+}
+export interface PruneConfig {
+    similarityThreshold: number;
+    maxNeighborsPerNote: number;
+    minClusterSize: number;
+    includeNoteTypes: NoteType[];
+    excludeTags?: string[];
 }
 export interface ContextEngineConfig {
     /**
      * Absolute path to the md_db directory.
-     * TODO: Phase 1 — pull from shared/config.ts
      */
     mdDbPath: string;
     /**
@@ -108,5 +138,35 @@ export interface ContextEngineConfig {
      * Default: 5
      */
     topK?: number;
+    /**
+     * Path to the subagent personalities directory.
+     * Default: shared/agents/personalities/ (relative to context_engine)
+     */
+    personalitiesDir?: string;
+    /**
+     * Context review configuration. Always-on by default.
+     * Set `enabled: false` to explicitly disable.
+     * Falls back to raw context on LLM/network errors.
+     */
+    review?: {
+        enabled?: boolean;
+        personality?: string;
+        maxLatencyMs?: number;
+    };
+    /**
+     * Optional pruning configuration. Overrides defaults used by buildPruneClusters().
+     */
+    pruneConfig?: Partial<PruneConfig>;
+    /**
+     * Debug event callback. Called at each internal state transition
+     * (init, retrieval steps, review, reindex). Wire this to the orchestrator's
+     * event logger for full context engine visibility.
+     */
+    onDebug?: (event: ContextEngineEvent) => void;
+}
+export interface ContextEngineEvent {
+    type: string;
+    timestamp: number;
+    [key: string]: unknown;
 }
 //# sourceMappingURL=types.d.ts.map

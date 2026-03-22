@@ -10,17 +10,17 @@
  * The orchestrator calls this in the `context_inject` lifecycle stage, before
  * creating the pi agent session. The returned ContextPackage is injected into
  * the session via agentsFilesOverride, becoming part of the agent's system context.
- *
- * TODO: Phase 6 — tool execution: orchestrator runs suggestedTools and their
- *   outputs are appended to formattedContext before the agent sees it
  */
 import { VectorStoreIndex } from "llamaindex";
 import { SqliteGraphStore } from "./store/graph-store.js";
-import type { ContextEngineConfig, ContextPackage, SubagentInput, SubagentPackage } from "./types.js";
+import type { ContextEngineConfig, ContextPackage, SubagentInput, SubagentPackage, PruneCluster, PruneConfig } from "./types.js";
 export declare class ContextEngine {
     private vectorIndex;
     private graphStore;
     private readonly config;
+    private readonly onDebug;
+    private readonly reviewer;
+    private readonly pruneConfig;
     constructor(config: ContextEngineConfig);
     /**
      * Must be called before build(). Idempotent — safe to call multiple times.
@@ -51,6 +51,11 @@ export declare class ContextEngine {
      * Throws if initialize() has not been called.
      */
     buildSubagentPackage(input: SubagentInput): Promise<SubagentPackage>;
+    /**
+     * Build pruning clusters from the current vector index + graph store.
+     * Writes results into prune_clusters tables and returns the in-memory clusters.
+     */
+    buildPruneClusters(configOverride?: Partial<PruneConfig>): Promise<PruneCluster[]>;
     /**
      * Return the stripped body of a specific note by relative path.
      * Returns null if the note is not in the graph or the engine is not initialized.
@@ -92,5 +97,6 @@ export declare class ContextEngine {
      * Call when the context engine is no longer needed.
      */
     close(): void;
+    private debug;
 }
 //# sourceMappingURL=context-engine.d.ts.map
