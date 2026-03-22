@@ -99,7 +99,7 @@ async function main() {
     }
 
     log(`Subagent ${result.outcome} in ${result.durationMs}ms`);
-    engine.close();
+    await engine.close();
   } catch (err) {
     status = "error";
     error = err instanceof Error ? err.message : String(err);

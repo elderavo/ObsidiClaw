@@ -4,9 +4,5 @@
 node_modules
 __pycache__/
 md_db/
-dist/
-context_engine/**/*.js
-extension/**/*.js
-logger/**/*.js
-orchestrator/**/*.js
-shared/**/*.js
+dist/*
+

@@ -84,7 +84,7 @@ async function main() {
     });
 
     log("Review run complete");
-    engine.close();
+    await engine.close();
   } catch (err) {
     status = "error";
     error = err instanceof Error ? err.message : String(err);
