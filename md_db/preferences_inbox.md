@@ -98,3 +98,9 @@ Pending proposals auto-derived from sessions. Review and merge manually.
 ### Synthesized Preferences
 - **[moderate]** Offer to inspect the jobs/ directory or register a new job script if none are scheduled, giving user control over available options.
   - Evidence: User explicitly asked about available jobs and agent offered inspection/registration as alternatives.
+
+## Session 887f9833 (2026-03-22)
+
+### Signals
+- **[weak imperative]** "you are IN a pi session"
+  → The user wants the agent to be aware that they are in a Pi session context.

@@ -16,7 +16,7 @@ import { randomUUID } from "crypto";
 
 import { RunLogger } from "../logger/run-logger.js";
 import { ContextEngine } from "../context_engine/context-engine.js";
-import { JobScheduler, createReindexJob, createHealthCheckJob, createNormalizeJob, createMergeInboxJob } from "../jobs/index.js";
+import { JobScheduler, createReindexJob, createHealthCheckJob, createNormalizeJob, createMergeInboxJob, createSummarizeCodeJob } from "../jobs/index.js";
 import { SubagentRunner } from "./agents/subagent-runner.js";
 import { resolvePaths, type ObsidiClawPaths } from "./config.js";
 import type { RunEvent } from "../orchestrator/types.js";
@@ -111,6 +111,7 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     scheduler.register(createHealthCheckJob());
     scheduler.register(createNormalizeJob());
     scheduler.register(createMergeInboxJob());
+    scheduler.register(createSummarizeCodeJob());
   } else if (enableScheduler && !persistentBackend) {
     console.warn("[obsidi-claw] no persistent schedule backend available — scheduler disabled");
   }
