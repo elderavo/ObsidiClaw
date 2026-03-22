@@ -20,6 +20,12 @@ export interface ScheduledJob {
   args: string[];
   enabled?: boolean;
   status?: string;
+  /** OS-reported last run time (raw string from schtasks/launchd). */
+  lastRunTime?: string;
+  /** OS-reported last result code (e.g. "0x0" for success). */
+  lastResult?: string;
+  /** Human-readable schedule (e.g. "Every 30m", "Daily"). */
+  scheduleDescription?: string;
 }
 
 export interface PersistentScheduleBackend {

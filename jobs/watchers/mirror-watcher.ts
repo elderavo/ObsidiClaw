@@ -8,7 +8,7 @@ import { runMirrorPy, type MirrorPyOptions } from "../../scripts/mirror-codebase
 // Defaults (mirror the CLI defaults from each script)
 // ---------------------------------------------------------------------------
 
-const DEFAULT_TS_OMIT = ["dist", "node_modules", "_legacy", ".pi", ".claude", "*.d.ts"];
+const DEFAULT_TS_OMIT = ["dist", "node_modules", "_legacy", ".claude", "*.d.ts"];
 const DEFAULT_PY_OMIT = ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist"];
 
 // ---------------------------------------------------------------------------
@@ -62,7 +62,6 @@ export function startMirrorWatcher(
         /[/\\]dist[/\\]/,
         /[/\\]node_modules[/\\]/,
         /[/\\]_legacy[/\\]/,
-        /[/\\]\.pi[/\\]/,
         /[/\\]\.claude[/\\]/,
         /[/\\]md_db[/\\]/,
         /[/\\]__pycache__[/\\]/,

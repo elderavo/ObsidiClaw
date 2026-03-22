@@ -60,7 +60,8 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
       description:
         "Search the ObsidiClaw knowledge base for relevant notes, tools, concepts, and best " +
         "practices. Returns markdown-formatted context from the md_db knowledge graph. " +
-        "Call this before relying on your own knowledge for any project-specific question.",
+        "Call this before relying on your own knowledge for any project-specific question. " +
+        "For detailed tool usage examples, search for the tool name (e.g. 'spawn_subagent').",
       inputSchema: {
         query: z.string().describe("What to search for in the knowledge base."),
         max_chars: z.number().optional().describe("Maximum characters to return (default: 3000). Use a smaller value for tighter context."),
