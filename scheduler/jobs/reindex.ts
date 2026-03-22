@@ -3,12 +3,8 @@
  */
 
 import type { JobDefinition } from "../types.js";
+import type { ObsidiClawPaths } from "../../shared/config.js";
 
-/**
- * Create a reindex job definition.
- *
- * @param intervalMinutes  How often to reindex (default: 30)
- */
 export function createReindexJob(intervalMinutes = 30): JobDefinition {
   return {
     name: "reindex-md-db",
@@ -17,4 +13,15 @@ export function createReindexJob(intervalMinutes = 30): JobDefinition {
     skipIfRunning: true,
     timeoutMs: 300_000,
   };
+}
+
+export async function run(paths: ObsidiClawPaths): Promise<void> {
+  const { ContextEngine } = await import("../../context_engine/context-engine.js");
+  const engine = new ContextEngine({ mdDbPath: paths.mdDbPath });
+  await engine.initialize();
+  try {
+    await engine.reindex();
+  } finally {
+    await engine.close();
+  }
 }

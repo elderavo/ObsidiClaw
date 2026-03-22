@@ -33,6 +33,10 @@ export function createMergeInboxJob(): JobDefinition {
 // Core logic (used by the standalone run-merge-inbox.ts script)
 // ---------------------------------------------------------------------------
 
+export async function run(paths: import("../../shared/config.js").ObsidiClawPaths): Promise<void> {
+  await mergeInbox(paths.mdDbPath);
+}
+
 export async function mergeInbox(mdDbPath: string): Promise<void> {
   const inboxPath = join(mdDbPath, "preferences_inbox.md");
   const prefsPath = join(mdDbPath, "preferences.md");
