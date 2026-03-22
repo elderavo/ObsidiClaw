@@ -730,6 +730,27 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string): 
 }
 
 // ---------------------------------------------------------------------------
+// Summary preservation — survive mirror regeneration
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the "## Summary" section (and everything after it) from an existing
+ * mirror file. Returns the section text including the header, or null if the
+ * file doesn't exist or has no summary.
+ */
+function extractSummarySection(mirrorPath: string): string | null {
+  let content: string;
+  try {
+    content = fs.readFileSync(mirrorPath, "utf8");
+  } catch {
+    return null;
+  }
+  const idx = content.indexOf("\n## Summary");
+  if (idx === -1) return null;
+  return content.slice(idx + 1).trimEnd();
+}
+
+// ---------------------------------------------------------------------------
 // Public API (used by mirror-watcher and CLI)
 // ---------------------------------------------------------------------------
 
@@ -770,8 +791,11 @@ export async function runMirrorPy(
       } catch { /* mirror doesn't exist yet — proceed */ }
     }
     const markdown = generateMarkdown(file, files, today);
+    // Preserve any existing ## Summary section across regeneration
+    const preserved = extractSummarySection(file.mirrorPath);
+    const final = preserved ? markdown.trimEnd() + "\n\n" + preserved + "\n" : markdown;
     fs.mkdirSync(path.dirname(file.mirrorPath), { recursive: true });
-    fs.writeFileSync(file.mirrorPath, markdown, "utf8");
+    fs.writeFileSync(file.mirrorPath, final, "utf8");
     written++;
   }
 

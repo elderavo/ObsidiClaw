@@ -4,20 +4,15 @@ Replaces the TS hybrid-retrieval.ts:
   - VectorStoreIndex.as_retriever() for semantic vector search (seeds)
   - SimplePropertyGraphStore.get_triplets() for depth-1 graph expansion (neighbors)
   - Tag boosting + index note filtering
-
-Also exposes a LlamaIndex-compatible retriever stub (ObsidianGraphRetriever)
-that we can later wire to the custom logic while keeping a native interface.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from typing import Optional
 
 from llama_index.core import VectorStoreIndex
 from llama_index.core.graph_stores import SimplePropertyGraphStore
-from llama_index.core.retrievers import BaseRetriever
-from llama_index.core.schema import NodeWithScore, QueryBundle
 from llama_index.embeddings.ollama import OllamaEmbedding
 
 from .markdown_utils import normalize_token
@@ -196,41 +191,3 @@ class ObsidiClawRetriever:
         matching = sum(1 for t in note_tags if t in query_tokens)
         boost = min(matching * TAG_BOOST_PER_TAG, TAG_BOOST_MAX)
         return score * (1.0 + boost)
-
-
-# ---------------------------------------------------------------------------
-# LlamaIndex-compatible retriever stub (delegates to custom logic later)
-# ---------------------------------------------------------------------------
-
-
-class ObsidianGraphRetriever(BaseRetriever):
-    """Stub retriever that will delegate to the custom ObsidiClaw logic.
-
-    This exists to expose a LlamaIndex-native interface while we keep the
-    bespoke scoring/expansion semantics. For now, it is intentionally
-    unimplemented and should be wired to ObsidiClawRetriever when ready.
-    """
-
-    def __init__(
-        self,
-        vector_index: VectorStoreIndex,
-        graph_store: Optional[SimplePropertyGraphStore],
-        *,
-        top_k: int = 10,
-        hop_depth: int = 1,
-        tag_boost: float = TAG_BOOST_PER_TAG,
-        neighbor_decay: float = NEIGHBOR_SCORE_DECAY,
-        skip_types: Optional[list[str]] = None,
-    ) -> None:
-        super().__init__()
-        self._vector_index = vector_index
-        self._graph_store = graph_store
-        self._top_k = top_k
-        self._hop_depth = hop_depth
-        self._tag_boost = tag_boost
-        self._neighbor_decay = neighbor_decay
-        self._skip_types = skip_types or ["index"]
-
-    def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
-        """TODO: delegate to ObsidiClawRetriever and wrap as NodeWithScore."""
-        raise NotImplementedError("Wire ObsidianGraphRetriever to custom pipeline")

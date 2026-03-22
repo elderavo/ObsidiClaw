@@ -1,13 +1,14 @@
 """Indexer — md_db scanning, note parsing, vector index + graph store construction.
 
-Architecture (mirrors the old TS code):
+Architecture:
   - VectorStoreIndex: owns text embeddings for semantic search (via OllamaEmbedding)
   - SimplePropertyGraphStore: owns wikilink graph (EntityNode + Relation edges)
 
 Both persist to .obsidi-claw/knowledge_graph/.
 
-This version leans on LlamaIndex's ObsidianReader for ingestion to avoid
-bespoke frontmatter/wikilink parsing.
+Ingestion uses markdown_utils (our own frontmatter/wikilink/title/type parser)
+rather than LlamaIndex's ObsidianReader, so parsing is fully under our control
+and the MD5 hash stays byte-identical across TS and Python.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from llama_index.core import VectorStoreIndex, StorageContext, load_index_from_storage
 from llama_index.core.graph_stores import (
@@ -25,8 +26,15 @@ from llama_index.core.graph_stores import (
 )
 from llama_index.core.schema import TextNode
 from llama_index.embeddings.ollama import OllamaEmbedding
-from llama_index.readers.obsidian import ObsidianReader
 
+from .markdown_utils import (
+    collect_markdown_files,
+    extract_tags,
+    extract_title,
+    extract_wikilinks,
+    infer_note_type,
+    parse_frontmatter,
+)
 from .models import NoteType, ParsedNote
 
 log = logging.getLogger(__name__)
@@ -43,73 +51,43 @@ _LABEL_MAP: dict[str, str] = {
     "codeUnit": "CODEUNIT",
 }
 
-CANONICAL_NOTE_TYPES: dict[str, str] = {
-    "tool": "tool",
-    "concept": "concept",
-    "index": "index",
-    "codebase": "codebase",
-    "codeunit": "codeUnit",
-}
-
 
 # ---------------------------------------------------------------------------
-# Scan + parse (via ObsidianReader)
+# Scan + parse (via markdown_utils)
 # ---------------------------------------------------------------------------
 
 
 def _scan_md_db(md_db_path: str) -> list[ParsedNote]:
-    """Use ObsidianReader to ingest markdown files with frontmatter + wikilinks."""
-    # TODO: ObsidianReader metadata uses `file_name` + `folder_path` keys —
-    #       update _relative_path() to construct path from those when
-    #       `file_path`/`path`/`source` are missing.
-    # TODO: ObsidianReader may flatten frontmatter fields directly into metadata
-    #       instead of nesting under meta["frontmatter"]. Make _extract_tags(),
-    #       _infer_note_type(), and frontmatter access robust to both layouts.
-    reader = ObsidianReader(
-        input_dir=md_db_path,
-    )
-
-    try:
-        docs = reader.load_data()
-    except Exception as exc:
-        log.error("ObsidianReader failed: %s", exc)
-        return []
-
+    """Scan md_db directory and parse all .md files into ParsedNote objects."""
+    file_paths = collect_markdown_files(md_db_path)
     notes: list[ParsedNote] = []
 
-    for doc in docs:
-        meta = doc.metadata or {}
-        frontmatter = meta.get("frontmatter", {})
-        if not isinstance(frontmatter, dict):
-            frontmatter = {}
-
-        rel_path = _relative_path(meta, md_db_path)
-        if not rel_path:
-            log.warning("Skipping doc with unknown path metadata: %s", meta)
+    for abs_path in file_paths:
+        try:
+            content = Path(abs_path).read_text(encoding="utf-8")
+        except Exception as exc:
+            log.warning("Failed to read %s: %s", abs_path, exc)
             continue
 
-        title = _pick_title(meta, rel_path)
-        note_type = _infer_note_type(frontmatter, rel_path)
-        tags = _extract_tags(frontmatter, meta)
+        rel_path = os.path.relpath(abs_path, md_db_path).replace("\\", "/")
+        frontmatter, body = parse_frontmatter(content)
 
-        raw_links = meta.get("wikilinks", []) or []
-        links = _dedupe_links(raw_links)
+        note_type = infer_note_type(frontmatter, rel_path)
+        title = extract_title(frontmatter, body, rel_path)
+        tags = extract_tags(frontmatter)
+        links = extract_wikilinks(body)
 
         tool_id: Optional[str] = None
         if note_type == "tool":
             tool_id = str(frontmatter.get("tool_id") or Path(rel_path).stem)
 
-        time_created = _first_non_empty(
+        time_created = _first_str(
             frontmatter.get("time_created"),
             frontmatter.get("created"),
-            meta.get("time_created"),
-            meta.get("created"),
         )
-        last_edited = _first_non_empty(
+        last_edited = _first_str(
             frontmatter.get("last_edited"),
             frontmatter.get("updated"),
-            meta.get("last_edited"),
-            meta.get("updated"),
         )
 
         notes.append(
@@ -117,124 +95,27 @@ def _scan_md_db(md_db_path: str) -> list[ParsedNote]:
                 note_id=rel_path,
                 path=rel_path,
                 title=title,
-                note_type=note_type,
-                body=doc.text or "",
+                note_type=note_type,  # type: ignore[arg-type]
+                body=body,
                 frontmatter=frontmatter,
                 links_out=links,
                 tool_id=tool_id,
-                time_created=_str_or_none(time_created),
-                last_edited=_str_or_none(last_edited),
+                time_created=time_created,
+                last_edited=last_edited,
                 tags=tags,
             )
         )
 
-    log.info("Scanned %d notes from %s via ObsidianReader", len(notes), md_db_path)
+    log.info("Scanned %d notes from %s", len(notes), md_db_path)
     return notes
 
 
-def _relative_path(meta: dict, md_db_path: str) -> str | None:
-    """Derive a vault-relative path from ObsidianReader metadata."""
-    candidate = None
-    for key in ("file_path", "path", "source"):
-        val = meta.get(key)
-        if isinstance(val, str) and val.strip():
-            candidate = val
-            break
-
-    # Fallback: ObsidianReader may provide folder_path + file_name
-    if not candidate:
-        folder = meta.get("folder_path")
-        fname = meta.get("file_name")
-        if isinstance(folder, str) and folder.strip() and isinstance(fname, str) and fname.strip():
-            candidate = os.path.join(folder, fname)
-
-    if not candidate:
-        return None
-
-    candidate = candidate.replace("\\", "/")
-    # If absolute, rebase to md_db
-    try:
-        if os.path.isabs(candidate):
-            rel = os.path.relpath(candidate, md_db_path)
-        else:
-            rel = candidate
-    except Exception:
-        rel = candidate
-
-    return rel.replace("\\", "/")
-
-
-def _pick_title(meta: dict, rel_path: str) -> str:
-    title = meta.get("title")
-    if isinstance(title, str) and title.strip():
-        return title.strip()
-    stem = Path(rel_path).stem
-    return stem.replace("_", " ").replace("-", " ").title()
-
-
-def _infer_note_type(frontmatter: dict, rel_path: str) -> NoteType:
-    val = frontmatter.get("type") or frontmatter.get("note_type")
-    if isinstance(val, str) and val.strip():
-        normalized = val.strip().lower()
-        if normalized in CANONICAL_NOTE_TYPES:
-            return CANONICAL_NOTE_TYPES[normalized]  # type: ignore[return-value]
-
-    norm_path = rel_path.replace("\\", "/")
-    if norm_path.startswith("tools/"):
-        return "tool"  # type: ignore[return-value]
-    if norm_path.startswith("concepts/"):
-        return "concept"  # type: ignore[return-value]
-
-    if Path(rel_path).stem.lower() == "index":
-        return "index"  # type: ignore[return-value]
-
-    return "concept"  # type: ignore[return-value]
-
-
-def _extract_tags(frontmatter: dict, meta: dict) -> list[str]:
-    raw = frontmatter.get("tags") or meta.get("tags") or []
-    tags: list[str] = []
-    if isinstance(raw, list):
-        tags = [str(t).strip() for t in raw if str(t).strip()]
-    elif isinstance(raw, str):
-        parts = [t.strip() for t in raw.replace("\n", ",").split(",") if t.strip()]
-        tags = parts
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for t in tags:
-        key = t.lower()
-        if key not in seen:
-            seen.add(key)
-            deduped.append(t)
-    return deduped
-
-
-def _dedupe_links(raw_links: Any) -> list[str]:
-    links: list[str] = []
-    if isinstance(raw_links, list):
-        links = [str(l).strip() for l in raw_links if str(l).strip()]
-    seen: set[str] = set()
-    result: list[str] = []
-    for link in links:
-        cleaned = link.split("|", 1)[0].strip()
-        if cleaned and cleaned not in seen:
-            seen.add(cleaned)
-            result.append(cleaned)
-    return result
-
-
-def _first_non_empty(*values: Any) -> Optional[str]:
+def _first_str(*values: object) -> Optional[str]:
+    """Return the first non-empty string value, or None."""
     for v in values:
         if isinstance(v, str) and v.strip():
-            return v
+            return v.strip()
     return None
-
-
-def _str_or_none(val: Any) -> Optional[str]:
-    if val is None:
-        return None
-    s = str(val).strip()
-    return s if s else None
 
 
 # ---------------------------------------------------------------------------
