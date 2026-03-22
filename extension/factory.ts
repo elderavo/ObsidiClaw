@@ -181,19 +181,28 @@ export function createObsidiClawExtension(
     // Current run ID — updated per before_agent_start for event attribution
     let currentRunId = "";
 
-    // Create InMemoryTransport pair and client (connected in session_start).
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "obsidi-claw-ext", version: "1.0.0" });
+    // MCP client — reassigned each session_start so transport is always fresh.
+    // Closures in registerTool/on() reference this variable (not the value at
+    // capture time), so reassignment is visible to all call sites.
+    let client = new Client({ name: "obsidi-claw-ext", version: "1.0.0" });
 
     // ── session_start: initialize stack + connect MCP pair ───────────────────
     pi.on("session_start", async () => {
       ensureDir(join(paths.rootDir, ".obsidi-claw"));
-      if (stack) await stack.initialize();
 
       // One-time migration: strip directory tree block from preferences.md if present.
       try { stripDirectoryBlock(join(mdDbPath, "preferences.md")); } catch { /* ignore */ }
+
+      // Connect MCP FIRST — before stack.initialize() — so any engine init
+      // failure surfaces as "ContextEngine not initialized" rather than the
+      // opaque "Not connected" error that results from client never connecting.
+      // Also recreate transport+client each session so shutdown→new-session works.
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      client = new Client({ name: "obsidi-claw-ext", version: "1.0.0" });
       await mcpServer.connect(serverTransport);
       await client.connect(clientTransport);
+
+      if (stack) await stack.initialize();
 
       // Show persistent tasks on TUI startup
       if (stack?.persistentBackend) {
