@@ -79,8 +79,6 @@ export class ContextEngine {
   private readonly pendingRpc = new Map<string, RpcPending>();
   private initialized = false;
   private pythonPath: string | null = null;
-  private startupError: Error | null = null;
-  private recentSubprocessStderr: string[] = [];
 
   /** In-memory note cache populated on init/reindex. */
   private noteCache = new Map<string, string>();

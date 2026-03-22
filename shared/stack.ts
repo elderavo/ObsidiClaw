@@ -22,6 +22,9 @@ import { resolvePaths, type ObsidiClawPaths } from "./config.js";
 import type { RunEvent } from "../orchestrator/types.js";
 import { WindowsTaskSchedulerBackend } from "./os/scheduling-windows.js";
 import { startMdDbLintWatcher } from "../jobs/watchers/md-db-lint-watcher.js";
+import { startMirrorWatcher } from "../jobs/watchers/mirror-watcher.js";
+import { runMirrorTs } from "../scripts/mirror-codebase.js";
+import { runMirrorPy } from "../scripts/mirror-codebase-py.js";
 import { updateDirectory } from "./update-directory-tree.js";
 
 // ---------------------------------------------------------------------------
@@ -116,6 +119,9 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
   // ── md_db watcher (lint on change) ───────────────────────────────────────
   let mdDbWatcher: ReturnType<typeof startMdDbLintWatcher> | undefined;
 
+  // ── mirror watcher (regenerate code notes on source change) ──────────────
+  let mirrorWatcher: ReturnType<typeof startMirrorWatcher> | undefined;
+
   // ── SubagentRunner ──────────────────────────────────────────────────────
   const runner = new SubagentRunner({
     dbPath: paths.dbPath,
@@ -137,9 +143,24 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
       void scheduler.start();
     }
     mdDbWatcher = startMdDbLintWatcher(paths.mdDbPath);
+
+    // Initial incremental mirror pass — catches files changed while process was down
+    const mirrorDir = join(paths.mdDbPath, "code");
+    try {
+      const ts = await runMirrorTs({ scanDir: paths.rootDir, mirrorDir, omitPatterns: ["dist", "node_modules", "_legacy", ".pi", ".claude", "*.d.ts"], force: false });
+      const py = await runMirrorPy({ scanDir: join(paths.rootDir, "knowledge_graph"), mirrorDir, omitPatterns: ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist"], force: false });
+      console.log(`[obsidi-claw] mirror: ts ${ts.written} written / ${ts.skipped} skipped — py ${py.written} written / ${py.skipped} skipped`);
+    } catch (err) {
+      console.warn("[obsidi-claw] initial mirror run failed", err);
+    }
+    mirrorWatcher = startMirrorWatcher(paths.rootDir, mirrorDir);
   }
 
   async function shutdown(): Promise<void> {
+    if (mirrorWatcher) {
+      await mirrorWatcher.close();
+      mirrorWatcher = undefined;
+    }
     if (mdDbWatcher) {
       await mdDbWatcher.close();
       mdDbWatcher = undefined;
