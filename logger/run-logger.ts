@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { dirname, join } from "path";
-import { ensureDir, appendText } from "../shared/os/fs.js";
-import type { RunEvent } from "../orchestrator/types.js";
+import { ensureDir, appendText } from "../core/os/fs.js";
+import type { RunEvent } from "../agents/orchestrator/types.js";
 import { TraceEmitter } from "./trace-emitter.js";
 
 

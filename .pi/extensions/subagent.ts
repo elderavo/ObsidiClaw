@@ -20,11 +20,11 @@
 
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { ContextEngine } from "../../context_engine/index.js";
+import { ContextEngine } from "../../knowledge/engine/index.js";
 import { RunLogger } from "../../logger/run-logger.js";
-import { SubagentRunner } from "../../shared/agents/subagent-runner.js";
-import { resolvePaths, type ObsidiClawPaths } from "../../shared/config.js";
-import { getSharedEngine, getSharedRunner } from "../../extension/factory.js";
+import { SubagentRunner } from "../../agents/subagent/subagent-runner.js";
+import { resolvePaths, type ObsidiClawPaths } from "../../core/config.js";
+import { getSharedEngine, getSharedRunner } from "../../entry/extension.js";
 
 // ---------------------------------------------------------------------------
 // Config

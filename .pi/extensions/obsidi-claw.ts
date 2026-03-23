@@ -11,7 +11,7 @@
 
 import { join } from "path";
 import { fileURLToPath } from "url";
-import { createObsidiClawExtension } from "../../extension/factory.js";
+import { createObsidiClawExtension } from "../../entry/extension.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const rootDir = join(__dirname, "../..");

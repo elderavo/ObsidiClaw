@@ -15,7 +15,7 @@ import { join } from "path";
 import { fileURLToPath } from "url";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
-import { getSharedScheduler, getSharedBackend } from "../../extension/factory.js";
+import { getSharedScheduler, getSharedBackend } from "../../entry/extension.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const rootDir = join(__dirname, "../..");
