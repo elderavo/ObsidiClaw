@@ -202,10 +202,16 @@ export class JobScheduler {
       }
     }
 
-    // Remaining entries are orphaned (in OS but not registered)
+    // Remaining entries are orphaned (in OS but not registered) — auto-remove
     for (const [shortName, osJob] of osTaskMap) {
-      console.warn(`[scheduler] orphaned OS task: "${osJob.jobName}" (not registered in code)`);
-      this.reconciliationState.set(shortName, { reconciliation: "orphaned", osJob });
+      console.log(`[scheduler] removing orphaned OS task: "${osJob.jobName}"`);
+      try {
+        await this.backend.uninstall(osJob.jobName);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[scheduler] failed to remove orphaned task "${osJob.jobName}": ${msg}`);
+        this.reconciliationState.set(shortName, { reconciliation: "orphaned", osJob });
+      }
     }
   }
 

@@ -59,6 +59,9 @@ export interface SessionConfig {
   /** Ollama model override. Defaults to OLLAMA_MODEL env / "cogito:8b". */
   model?: string;
 
+  /** Ollama base URL override (e.g. from personality provider config). */
+  baseUrl?: string;
+
   /**
    * Called with streaming text delta from the agent.
    * Use this to print agent output in real time.

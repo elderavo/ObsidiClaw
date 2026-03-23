@@ -19,6 +19,7 @@ import { llmChat, isLlmReachable } from "../../../core/llm-client.js";
 import type { JobDefinition } from "../types.js";
 import type { ObsidiClawPaths } from "../../../core/config.js";
 import { loadPersonality } from "../../../agents/subagent/personality-loader.js";
+import { SUMMARIZE_CODE_SYSTEM_PROMPT } from "../../../agents/prompts.js";
 import { readText, writeText, fileExists, listDir } from "../../../core/os/fs.js";
 import { buildDirectoryTree } from "../../scripts/update-directory-tree.js";
 
@@ -203,8 +204,6 @@ function stripSummarySection(content: string): string {
 // Ollama call
 // ---------------------------------------------------------------------------
 
-const FALLBACK_SYSTEM_PROMPT = `You are a senior software engineer writing internal documentation. Given a source code file, its structured mirror note (imports, exports, call graph), and the project directory tree, write a concise 2-3 sentence technical description of what this module does and why it exists. Be precise and technical. Write in present tense. Output only the description — no headers, no preamble, no bullet points.`;
-
 async function callOllama(
   sourceContent: string,
   mirrorContent: string,
@@ -228,7 +227,7 @@ async function callOllama(
   try {
     const result = await llmChat(
       [
-        { role: "system", content: systemPrompt ?? FALLBACK_SYSTEM_PROMPT },
+        { role: "system", content: systemPrompt ?? SUMMARIZE_CODE_SYSTEM_PROMPT },
         { role: "user", content: userPrompt },
       ],
       {

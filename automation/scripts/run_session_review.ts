@@ -21,6 +21,7 @@ import axios from "axios";
 
 import { getOllamaConfig, resolvePaths } from "../../core/config.js";
 import { loadPersonality } from "../../agents/subagent/personality-loader.js";
+import { DETACHED_SESSION_REVIEW_SYSTEM_PROMPT } from "../../agents/prompts.js";
 import { readText, writeText, ensureDir, appendText, fileExists } from "../../core/os/fs.js";
 import { exitProcess } from "../../core/os/process.js";
 
@@ -198,8 +199,6 @@ function extractText(content: unknown): string {
 // Step 2: Analyze with Ollama
 // ---------------------------------------------------------------------------
 
-const FALLBACK_SYSTEM_PROMPT = `You analyze conversations between a user and an AI coding agent to extract preferences and behavioral signals. Respond with JSON only: { "signals": [...], "preferences": [...] }. If the conversation is purely task execution with no preference signals, return empty lists.`;
-
 async function analyzeConversation(
   conversation: string,
   log: (msg: string) => void,
@@ -216,7 +215,7 @@ async function analyzeConversation(
     {
       model: ollama.model,
       messages: [
-        { role: "system", content: systemPrompt ?? FALLBACK_SYSTEM_PROMPT },
+        { role: "system", content: systemPrompt ?? DETACHED_SESSION_REVIEW_SYSTEM_PROMPT },
         { role: "user", content: `## Conversation\n\n${conversation}` },
       ],
       stream: false,

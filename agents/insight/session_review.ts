@@ -4,6 +4,12 @@ import { resolvePaths } from "../../core/config.js";
 import { extractMessageText } from "../../core/text-utils.js";
 import { ensureDir, fileExists, readText, writeText } from "../../core/os/fs.js";
 import { buildFrontmatter } from "../../knowledge/markdown/frontmatter.js";
+import {
+  SESSION_REVIEW_PROMPT,
+  SESSION_REVIEW_PLAN,
+  SESSION_REVIEW_SUCCESS_CRITERIA,
+  SESSION_REVIEW_SCHEMA_TEXT,
+} from "../prompts.js";
 import type { RunEvent } from "../orchestrator/types.js";
 
 export type ReviewTrigger = "session_end" | "pre_compaction";
@@ -131,36 +137,10 @@ export async function runSessionReview(opts: SessionReviewOptions): Promise<void
 }
 
 function buildSpec() {
-  const schemaText = `
-Schema (JSON):
-{
-  "trigger": "session_end" | "pre_compaction",
-  "should_update_preferences": boolean,
-  "preferences_updates": [
-    { "action": "add"|"modify"|"deprecate", "section": string, "rule_id": string, "text": string, "reason": string }
-  ],
-  "new_notes": [
-    { "path": string, "title": string, "type": string, "tags": string[], "body": string, "reason": string }
-  ]
-}
-All fields optional except trigger. Keep lists small (<=3 items each).`;
-
-  const prompt = `You are a review subagent. Read the provided session transcript and current preferences/meta-notes (via retrieval). Decide if any general, enduring preference should be updated, and whether any specific heuristic/insight should become a new concept note. Output JSON per schema.`;
-
-  const plan = `
-1) Skim transcript for corrections, strong preferences, repeated patterns.
-2) Check if these are already encoded in preferences/meta-notes (via retrieval context).
-3) For each candidate lesson, decide:
-   - General + durable -> preferences update.
-   - Specific/domain -> new concept note.
-4) Limit to at most 3 preference updates and 3 new notes.
-5) Produce JSON per schema; avoid duplicates; include reasons.`;
-
-  const successCriteria = `
-- Output valid JSON only.
-- Max 3 preference updates, max 3 new notes.
-- Each item has a concise reason.
-- No secrets or private data. Preference changes must be general, not project-specific.`;
+  const schemaText = SESSION_REVIEW_SCHEMA_TEXT;
+  const prompt = SESSION_REVIEW_PROMPT;
+  const plan = SESSION_REVIEW_PLAN;
+  const successCriteria = SESSION_REVIEW_SUCCESS_CRITERIA;
 
   return { prompt, plan, successCriteria, schemaText };
 }

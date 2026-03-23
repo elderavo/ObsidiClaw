@@ -22,6 +22,7 @@
  *   - Session review on shutdown
  */
 
+import "dotenv/config";
 import { randomUUID } from "crypto";
 import { join } from "path";
 import { Type } from "@sinclair/typebox";
@@ -30,13 +31,14 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { type ExtensionFactory } from "@mariozechner/pi-coding-agent";
 import { createContextEngineMcpServer } from "../knowledge/engine/index.js";
-import { resolvePaths } from "../core/config.js";
+import { resolvePaths, getEmbedConfig } from "../core/config.js";
 import { extractMcpText } from "../core/text-utils.js";
 import { ensureDir, writeText } from "../core/os/fs.js";
 import { spawnProcess, getExecPath } from "../core/os/process.js";
 import { createObsidiClawStack, type ObsidiClawStack } from "./stack.js";
 import { mapPiEventToRunEvent } from "../agents/pi-event-mapper.js";
 import { buildDirectoryTree, stripDirectoryBlock } from "../automation/scripts/update-directory-tree.js";
+import { TOOL_REMINDER, ENGINE_UNAVAILABLE_WARNING } from "../agents/prompts.js";
 import type { RunEvent } from "../agents/orchestrator/types.js";
 
 // ---------------------------------------------------------------------------
@@ -95,12 +97,6 @@ export interface ObsidiClawExtensionConfig {
 // ---------------------------------------------------------------------------
 // Standing system-prompt instruction (appended on every before_agent_start)
 // ---------------------------------------------------------------------------
-
-const TOOL_REMINDER = `
-## ObsidiClaw Knowledge Base
-
-The context block above was automatically retrieved from the knowledge base for your prompt. If it doesn't cover what you need, call \`retrieve_context\` again with a more specific query.
-`.trim();
 
 // ---------------------------------------------------------------------------
 // Factory
@@ -191,13 +187,16 @@ export function createObsidiClawExtension(
     // Current run ID — updated per before_agent_start for event attribution
     let currentRunId = "";
 
+    // Engine availability state — drives system prompt warnings
+    let engineState: "ok" | "degraded" | "unavailable" = "ok";
+
     // MCP client — reassigned each session_start so transport is always fresh.
     // Closures in registerTool/on() reference this variable (not the value at
     // capture time), so reassignment is visible to all call sites.
     let client = new Client({ name: "obsidi-claw-ext", version: "1.0.0" });
 
     // ── session_start: initialize stack + connect MCP pair ───────────────────
-    pi.on("session_start", async () => {
+    pi.on("session_start", async (_event, ctx) => {
       ensureDir(join(paths.rootDir, ".obsidi-claw"));
 
       // One-time migration: strip directory tree block from preferences.md if present.
@@ -212,7 +211,47 @@ export function createObsidiClawExtension(
       await mcpServer.connect(serverTransport);
       await client.connect(clientTransport);
 
-      if (stack) await stack.initialize();
+      if (stack) {
+        try {
+          await stack.initialize();
+
+          // Engine started but without embeddings — keyword + graph still work
+          if (stack.engine.isDegraded) {
+            engineState = "degraded";
+            const reason = stack.engine.degradedReasonMessage || "embedding provider unavailable";
+            if (ctx.hasUI) {
+              ctx.ui.notify(
+                `Context engine running in keyword-only mode: ${reason}`,
+                "warning",
+              );
+            } else {
+              console.warn(`[obsidi-claw] Context engine degraded: ${reason}`);
+            }
+          }
+        } catch (err) {
+          engineState = "unavailable";
+          const reason = err instanceof Error ? err.message : String(err);
+          if (ctx.hasUI) {
+            ctx.ui.notify(
+              `Context engine unavailable: ${reason}`,
+              "warning",
+            );
+          } else {
+            console.warn(`[obsidi-claw] Context engine failed to initialize: ${reason}`);
+          }
+        }
+      }
+
+      // Warn when embed host falls back to default (easy misconfiguration)
+      if (stack && ctx.hasUI) {
+        const embedCfg = getEmbedConfig();
+        if (embedCfg.provider !== "local" && !process.env["OBSIDI_EMBED_HOST"]) {
+          ctx.ui.notify(
+            `OBSIDI_EMBED_HOST not set — embedding provider defaulting to ${embedCfg.host}`,
+            "warning",
+          );
+        }
+      }
 
       if (stack) {
         stack.logger.logEvent({
@@ -298,6 +337,19 @@ export function createObsidiClawExtension(
         } as RunEvent);
       }
 
+      // Fast path: engine is completely unavailable — inject warning, skip MCP calls
+      if (engineState === "unavailable") {
+        const treeContent = buildDirectoryTree(paths.rootDir);
+        const treeBlock = `<!-- ObsidiClaw: Project Structure -->\n\n## Project directory structure\n\n${treeContent}\n\n<!-- End ObsidiClaw Project Structure -->`;
+
+        return {
+          systemPrompt:
+            event.systemPrompt +
+            "\n\n" + ENGINE_UNAVAILABLE_WARNING +
+            "\n\n" + treeBlock,
+        };
+      }
+
       try {
         const result = await client.callTool({ name: "get_preferences", arguments: {} });
         const prefsContent = extractMcpText(result);
@@ -318,9 +370,18 @@ export function createObsidiClawExtension(
             TOOL_REMINDER,
         };
       } catch {
-        // Fail open — Pi still runs without injected context.
-        if (ctx.hasUI) ctx.ui.setWorkingMessage();
-        return;
+        // MCP call failed unexpectedly — inject warning for this turn
+        if (ctx.hasUI) ctx.ui.notify("Context engine unavailable this turn", "warning");
+
+        const treeContent = buildDirectoryTree(paths.rootDir);
+        const treeBlock = `<!-- ObsidiClaw: Project Structure -->\n\n## Project directory structure\n\n${treeContent}\n\n<!-- End ObsidiClaw Project Structure -->`;
+
+        return {
+          systemPrompt:
+            event.systemPrompt +
+            "\n\n" + ENGINE_UNAVAILABLE_WARNING +
+            "\n\n" + treeBlock,
+        };
       }
     });
 

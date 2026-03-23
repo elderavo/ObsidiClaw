@@ -22,6 +22,7 @@
  *   OBSIDI_CLAW_DEBUG    — set to 0/false to disable debug JSONL (ON by default)
  */
 
+import "dotenv/config";
 import { createInterface } from "readline";
 import { resolve } from "path";
 import { fileURLToPath } from "url";

@@ -308,7 +308,10 @@ export class OrchestratorSession {
         })]
       : [];
 
-    const cfg = getOllamaConfig(this.config.model ? { model: this.config.model } : undefined);
+    const cfg = getOllamaConfig({
+      ...(this.config.model ? { model: this.config.model } : {}),
+      ...(this.config.baseUrl ? { baseUrl: this.config.baseUrl } : {}),
+    });
     const extensionFactories: ExtensionFactory[] = [
       (pi) => {
         pi.registerProvider("ollama", {

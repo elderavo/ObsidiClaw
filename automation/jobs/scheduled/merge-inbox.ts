@@ -12,6 +12,7 @@
 import { join } from "path";
 import { llmChat, isLlmReachable } from "../../../core/llm-client.js";
 import { readText, writeText, fileExists } from "../../../core/os/fs.js";
+import { MERGE_INBOX_SYSTEM_PROMPT } from "../../../agents/prompts.js";
 import type { JobDefinition } from "../types.js";
 
 // ---------------------------------------------------------------------------
@@ -111,39 +112,7 @@ interface MergeResult {
   dropped: Array<{ item: string; reason: string }>;
 }
 
-const SYSTEM_PROMPT = `You help maintain an AI agent's preferences.md file.
-
-You receive:
-1. A "preferences inbox" containing signals and synthesized preferences from recent sessions
-2. The current preferences.md file
-
-Your job:
-- Decide which inbox items should be **added** to preferences.md as new rules
-- Decide which inbox items should **modify** existing rules in preferences.md
-- Decide which inbox items should be **dropped** (too weak, already covered, or contradictory)
-
-Rules for promotion:
-- **Strong** items: always promote (explicit user instruction)
-- **Moderate** items: promote if they appear in 2+ sessions, or if they reinforce an existing preference
-- **Weak** items: drop unless they form a pattern with other signals
-- Never add duplicate rules — if the preference is already covered, skip it
-- Never contradict existing strong preferences without noting the conflict
-- Keep rules concise and actionable
-
-Respond with JSON only:
-{
-  "additions": [
-    { "rule": "concise rule for preferences.md", "evidence": "which session/signal this came from" }
-  ],
-  "modifications": [
-    { "find": "exact text to find in preferences.md", "replace": "replacement text", "reason": "why" }
-  ],
-  "dropped": [
-    { "item": "what was dropped", "reason": "why" }
-  ]
-}
-
-If nothing needs to change, return {"additions": [], "modifications": [], "dropped": []}`;
+const SYSTEM_PROMPT = MERGE_INBOX_SYSTEM_PROMPT;
 
 async function callOllama(inbox: string, currentPrefs: string): Promise<MergeResult | null> {
   const userPrompt = [
@@ -156,6 +125,7 @@ async function callOllama(inbox: string, currentPrefs: string): Promise<MergeRes
 
   const result = await llmChat(
     [
+    // TODO: This is getting interpreted by the llm as everything being from the user, it should be a conversation pattern.
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: userPrompt },
     ],

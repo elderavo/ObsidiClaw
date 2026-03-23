@@ -17,6 +17,7 @@
 
 import { llmChat } from "../../../core/llm-client.js";
 import { loadPersonality } from "../../../agents/subagent/personality-loader.js";
+import { CONTEXT_REVIEW_FALLBACK_SYSTEM_PROMPT } from "../../../agents/prompts.js";
 import type { PersonalityConfig } from "../../../agents/subagent/types.js";
 import type { RetrievedNote } from "../types.js";
 
@@ -105,9 +106,11 @@ export class ContextReviewer {
         reviewMs: Date.now() - t0,
         skipped: false,
       };
-    } catch {
-      // Error details surface via ce_review_done event (skipped=true, skipReason="error")
-      // emitted by the ContextEngine caller. No console output needed.
+    } catch (err) {
+      // Log the actual error so silent failures are diagnosable.
+      // Also surfaces via ce_review_done event (skipped=true, skipReason="error").
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[context-reviewer] synthesis failed: ${msg}`);
       return {
         synthesizedContext: null,
         reviewMs: Date.now() - t0,
@@ -127,7 +130,7 @@ export class ContextReviewer {
     rawContext: string,
     personality: PersonalityConfig | null,
   ): Promise<string> {
-    const systemPrompt = personality?.content ?? "You synthesize retrieved context into focused, query-relevant summaries.";
+    const systemPrompt = personality?.content ?? CONTEXT_REVIEW_FALLBACK_SYSTEM_PROMPT;
 
     const userPrompt = [
       `## Query`,

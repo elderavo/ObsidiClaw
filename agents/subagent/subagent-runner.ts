@@ -20,6 +20,7 @@ import { OrchestratorSession } from "../orchestrator/session.js";
 import { loadPersonality } from "./personality-loader.js";
 import { extractMessageText } from "../../core/text-utils.js";
 import { resolvePaths } from "../../core/config.js";
+import { SUBAGENT_FOOTER_BASE_LINES } from "../prompts.js";
 import type { ContextEngine } from "../../knowledge/engine/context-engine.js";
 import type { PersonalityConfig, SubagentSpec, SubagentResult } from "./types.js";
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes
@@ -104,6 +105,7 @@ export class SubagentRunner {
         onOutput: (delta) => { outputBuffer += delta; },
         runKind: "subagent",
         model: personality?.provider?.model,
+        baseUrl: personality?.provider?.baseUrl,
         parentRunId: spec.parentRunId,
         parentSessionId: spec.parentSessionId,
       },
@@ -196,11 +198,7 @@ function formatSystemPromptNoRAG(
     sections.push("", "## Additional Context", spec.callerContext);
   }
 
-  sections.push(
-    "",
-    "---",
-    "Focus exclusively on the plan above. Work systematically towards the success criteria.",
-  );
+  sections.push(...SUBAGENT_FOOTER_BASE_LINES);
 
   return sections.join("\n");
 }
