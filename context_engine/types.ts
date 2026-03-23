@@ -34,7 +34,7 @@ export interface RetrievedNote {
   tags?: string[];
 
   /** How this note entered the result set. */
-  retrievalSource: "vector" | "graph" | "hybrid";
+  retrievalSource: "vector" | "graph" | "hybrid" | "keyword";
 
   /**
    * NoteIds of notes that linked to this one.
@@ -185,19 +185,6 @@ export interface ContextEngineConfig {
    * The .obsidi-claw/ directory is created automatically on initialize().
    */
   dbPath?: string;
-
-  /**
-   * Ollama host (no path, no trailing slash).
-   * Default: "10.0.132.100"
-   */
-  ollamaHost?: string;
-
-  /**
-   * Ollama embedding model.
-   * Must be a text-embedding model (e.g. "nomic-embed-text:v1.5").
-   * Override with OLLAMA_EMBED_MODEL env var.
-   */
-  embeddingModel?: string;
 
   /**
    * Number of vector seed notes to retrieve per query.

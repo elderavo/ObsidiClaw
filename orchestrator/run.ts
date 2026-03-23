@@ -13,10 +13,12 @@
  *   npx tsx orchestrator/run.ts
  *
  * Environment variables:
- *   OLLAMA_BASE_URL      — LLM endpoint   (default: http://10.0.132.100/v1)
- *   OLLAMA_MODEL         — LLM model      (default: cogito:8b)
- *   OLLAMA_HOST          — embeddings host (default: 10.0.132.100)
- *   OLLAMA_EMBED_MODEL   — embeddings model (default: nomic-embed-text:v1.5)
+ *   OBSIDI_LLM_PROVIDER  — LLM provider   (default: ollama)
+ *   OBSIDI_LLM_HOST      — LLM endpoint   (default: http://localhost:11434)
+ *   OBSIDI_LLM_MODEL     — LLM model      (default: cogito:8b)
+ *   OBSIDI_EMBED_PROVIDER — embed provider (default: ollama)
+ *   OBSIDI_EMBED_HOST    — embed endpoint  (default: http://localhost:11434)
+ *   OBSIDI_EMBED_MODEL   — embed model     (default: nomic-embed-text:v1.5)
  *   OBSIDI_CLAW_DEBUG    — set to 0/false to disable debug JSONL (ON by default)
  */
 

@@ -1,14 +1,71 @@
 /**
  * Shared configuration for ObsidiClaw.
  *
- * Centralises Ollama provider settings and path resolution so that
+ * Centralises LLM and embedding provider settings and path resolution so that
  * orchestrator, extensions, and detached workers all share one source of truth.
+ *
+ * Environment variables:
+ *   OBSIDI_EMBED_PROVIDER  — "ollama" | "openai" | "local"  (default: "ollama")
+ *   OBSIDI_EMBED_MODEL     — embedding model name            (default: "nomic-embed-text:v1.5")
+ *   OBSIDI_EMBED_HOST      — embedding provider host         (default: "http://localhost:11434")
+ *   OBSIDI_LLM_PROVIDER    — "ollama" | "openai"             (default: "ollama")
+ *   OBSIDI_LLM_MODEL       — LLM model name                  (default: "cogito:8b")
+ *   OBSIDI_LLM_HOST        — LLM provider host               (default: "http://localhost:11434")
+ *   OPENAI_API_KEY         — OpenAI API key (for openai provider)
  */
 
 import { join } from "path";
 
 // ---------------------------------------------------------------------------
-// Ollama provider config
+// Embedding provider config
+// ---------------------------------------------------------------------------
+
+export type EmbedProvider = "ollama" | "openai" | "local";
+
+export interface EmbedConfig {
+  provider: EmbedProvider;
+  model: string;
+  host: string;
+  apiKey?: string;
+}
+
+export function getEmbedConfig(): EmbedConfig {
+  return {
+    provider: (process.env["OBSIDI_EMBED_PROVIDER"] as EmbedProvider) ?? "ollama",
+    model: process.env["OBSIDI_EMBED_MODEL"] ?? "nomic-embed-text:v1.5",
+    host: process.env["OBSIDI_EMBED_HOST"] ?? "http://localhost:11434",
+    apiKey: process.env["OPENAI_API_KEY"],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// LLM provider config
+// ---------------------------------------------------------------------------
+
+export type LlmProvider = "ollama" | "openai";
+
+export interface LlmConfig {
+  provider: LlmProvider;
+  model: string;
+  host: string;
+  apiKey?: string;
+  contextWindow: number;
+  maxTokens: number;
+}
+
+export function getLlmConfig(): LlmConfig {
+  return {
+    provider: (process.env["OBSIDI_LLM_PROVIDER"] as LlmProvider) ?? "ollama",
+    model: process.env["OBSIDI_LLM_MODEL"] ?? process.env["OLLAMA_MODEL"] ?? "cogito:8b",
+    host: process.env["OBSIDI_LLM_HOST"] ?? process.env["OLLAMA_BASE_URL"]?.replace(/\/v1\/?$/, "") ?? "http://localhost:11434",
+    apiKey: process.env["OPENAI_API_KEY"],
+    contextWindow: 32768,
+    maxTokens: 4096,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Ollama provider config (deprecated — use getLlmConfig())
 // ---------------------------------------------------------------------------
 
 export interface OllamaConfig {
@@ -18,12 +75,17 @@ export interface OllamaConfig {
   maxTokens: number;
 }
 
+/**
+ * @deprecated Use `getLlmConfig()` for provider-agnostic config.
+ * Kept for backward compatibility — maps to getLlmConfig() internally.
+ */
 export function getOllamaConfig(overrides?: Partial<OllamaConfig>): OllamaConfig {
+  const llm = getLlmConfig();
   return {
-    baseUrl: overrides?.baseUrl ?? process.env["OLLAMA_BASE_URL"] ?? "http://10.0.132.100:11434/v1",
-    model: overrides?.model ?? process.env["OLLAMA_MODEL"] ?? "cogito:8b",
-    contextWindow: overrides?.contextWindow ?? 32768,
-    maxTokens: overrides?.maxTokens ?? 4096,
+    baseUrl: overrides?.baseUrl ?? `${llm.host}/v1`,
+    model: overrides?.model ?? llm.model,
+    contextWindow: overrides?.contextWindow ?? llm.contextWindow,
+    maxTokens: overrides?.maxTokens ?? llm.maxTokens,
   };
 }
 

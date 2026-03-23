@@ -1,7 +1,7 @@
 """Indexer — md_db scanning, note parsing, vector index + graph store construction.
 
 Architecture:
-  - VectorStoreIndex: owns text embeddings for semantic search (via OllamaEmbedding)
+  - VectorStoreIndex: owns text embeddings for semantic search (via embedding provider)
   - SimplePropertyGraphStore: owns wikilink graph (EntityNode + Relation edges)
 
 Both persist to .obsidi-claw/knowledge_graph/.
@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from llama_index.core import VectorStoreIndex, StorageContext, load_index_from_storage
 from llama_index.core.graph_stores import (
@@ -25,7 +25,6 @@ from llama_index.core.graph_stores import (
     SimplePropertyGraphStore,
 )
 from llama_index.core.schema import TextNode
-from llama_index.embeddings.ollama import OllamaEmbedding
 
 from .markdown_utils import (
     collect_markdown_files,
@@ -165,20 +164,19 @@ def _resolve_link(target: str, notes_by_id: dict[str, ParsedNote]) -> Optional[s
 
 
 # ---------------------------------------------------------------------------
-# Build index (slow path)
+# Graph store construction (separated from vector index)
 # ---------------------------------------------------------------------------
 
 
-def build_index(
-    md_db_path: str,
-    db_dir: str,
-    embed_model: OllamaEmbedding,
-) -> tuple[VectorStoreIndex, SimplePropertyGraphStore, list[ParsedNote]]:
-    """Full rebuild: scan md_db → build VectorStoreIndex + graph store → persist."""
-    notes = _scan_md_db(md_db_path)
-    notes_by_id = {n.note_id: n for n in notes}
+def _build_graph_store(
+    notes: list[ParsedNote],
+    notes_by_id: dict[str, ParsedNote],
+) -> SimplePropertyGraphStore:
+    """Build a SimplePropertyGraphStore from parsed notes.
 
-    # ── Graph store: entity nodes + wikilink relations ──────────────────
+    Creates entity nodes and wikilink relations. Does NOT require an
+    embedding provider — pure graph structure.
+    """
     graph_store = SimplePropertyGraphStore()
 
     entity_nodes: list[EntityNode] = []
@@ -214,10 +212,23 @@ def build_index(
         graph_store.upsert_relations(relations)
     log.info("Graph: %d nodes, %d relations", len(entity_nodes), len(relations))
 
-    # Persist graph store separately
-    graph_store.persist(persist_path=os.path.join(db_dir, "property_graph_store.json"))
+    return graph_store
 
-    # ── Vector index: text embeddings ───────────────────────────────────
+
+# ---------------------------------------------------------------------------
+# Vector index construction (requires embedding provider)
+# ---------------------------------------------------------------------------
+
+
+def _build_vector_index(
+    notes: list[ParsedNote],
+    embed_model: Any,
+    db_dir: str,
+) -> VectorStoreIndex:
+    """Build a VectorStoreIndex from parsed notes and persist to disk.
+
+    Requires a working embedding provider (OllamaEmbedding, OpenAIEmbedding, etc).
+    """
     text_nodes: list[TextNode] = []
     for note in notes:
         text_nodes.append(TextNode(
@@ -240,7 +251,33 @@ def build_index(
 
     # Persist vector index
     vector_index.storage_context.persist(persist_dir=db_dir)
-    log.info("Index persisted to %s", db_dir)
+    log.info("Vector index persisted to %s", db_dir)
+
+    return vector_index
+
+
+# ---------------------------------------------------------------------------
+# Combined build (legacy — kept for backward compat)
+# ---------------------------------------------------------------------------
+
+
+def build_index(
+    md_db_path: str,
+    db_dir: str,
+    embed_model: Any,
+) -> tuple[VectorStoreIndex, SimplePropertyGraphStore, list[ParsedNote]]:
+    """Full rebuild: scan md_db → build VectorStoreIndex + graph store → persist.
+
+    Note: prefer using _scan_md_db, _build_graph_store, and _build_vector_index
+    separately for better control over degraded mode.
+    """
+    notes = _scan_md_db(md_db_path)
+    notes_by_id = {n.note_id: n for n in notes}
+
+    graph_store = _build_graph_store(notes, notes_by_id)
+    graph_store.persist(persist_path=os.path.join(db_dir, "property_graph_store.json"))
+
+    vector_index = _build_vector_index(notes, embed_model, db_dir)
 
     return vector_index, graph_store, notes
 
@@ -252,7 +289,7 @@ def build_index(
 
 def load_index(
     db_dir: str,
-    embed_model: OllamaEmbedding,
+    embed_model: Any,
     md_db_path: str,
 ) -> tuple[VectorStoreIndex, SimplePropertyGraphStore, list[ParsedNote]]:
     """Load persisted VectorStoreIndex + graph store from disk."""

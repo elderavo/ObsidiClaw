@@ -31,12 +31,18 @@ engine = KnowledgeGraphEngine()
 
 
 def handle_initialize(params: dict[str, Any]) -> dict[str, Any]:
+    # ollama_host and embed_model are optional — env vars take precedence
+    kwargs: dict[str, Any] = {}
+    if "ollama_host" in params:
+        kwargs["ollama_host"] = params["ollama_host"]
+    if "embed_model" in params:
+        kwargs["embed_model"] = params["embed_model"]
+
     return engine.initialize(
         md_db_path=params["md_db_path"],
         db_dir=params["db_dir"],
-        ollama_host=params.get("ollama_host", "http://localhost:11434"),
-        embed_model=params.get("embed_model", "nomic-embed-text:v1.5"),
         top_k=params.get("top_k", 8),
+        **kwargs,
     )
 
 

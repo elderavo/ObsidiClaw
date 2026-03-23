@@ -15,9 +15,8 @@
  *   - maxLatencyMs: timeout for the review call
  */
 
-import axios from "axios";
+import { llmChat } from "../../shared/llm-client.js";
 import { loadPersonality } from "../../shared/agents/personality-loader.js";
-import { getOllamaConfig } from "../../shared/config.js";
 import type { PersonalityConfig } from "../../shared/agents/types.js";
 import type { RetrievedNote } from "../types.js";
 
@@ -119,7 +118,8 @@ export class ContextReviewer {
   }
 
   /**
-   * Direct Ollama API call for context synthesis.
+   * LLM call for context synthesis.
+   * Uses the provider-agnostic llmChat() client.
    * Returns the synthesized markdown context document.
    */
   private async callSynthesizeLLM(
@@ -127,47 +127,30 @@ export class ContextReviewer {
     rawContext: string,
     personality: PersonalityConfig | null,
   ): Promise<string> {
-    const ollamaConfig = getOllamaConfig();
-
-    // Determine model: personality > default
-    const model = personality?.provider?.model ?? ollamaConfig.model;
-
-    // Determine host: strip /v1 from OpenAI-compat URL to get native Ollama URL
-    const baseUrl = personality?.provider?.baseUrl ?? ollamaConfig.baseUrl;
-    const ollamaHost = baseUrl.replace(/\/v1\/?$/, "");
-
     const systemPrompt = personality?.content ?? "You synthesize retrieved context into focused, query-relevant summaries.";
 
-const userPrompt = [
-  `## Query`,
-  `"${query}"`,
-  ``,
-  `## Retrieved Context`,
-  rawContext,
-].join("\n");
-const response = await axios.post(
-  `${ollamaHost}/api/chat`,
-  {
-    model,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ],
-    stream: false,
-    options: {
-      num_ctx: 16384,
-      temperature: 0.1,
-      top_p: 0.9,
-      repeat_penalty: 1.1,
-    },
-  },
-  {
-    timeout: this.config.maxLatencyMs,
-    signal: AbortSignal.timeout(this.config.maxLatencyMs),
-  },
-);
+    const userPrompt = [
+      `## Query`,
+      `"${query}"`,
+      ``,
+      `## Retrieved Context`,
+      rawContext,
+    ].join("\n");
 
-    const content = response.data?.message?.content ?? "";
+    const result = await llmChat(
+      [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      {
+        model: personality?.provider?.model,
+        temperature: 0.1,
+        numCtx: 16384,
+        timeout: this.config.maxLatencyMs,
+      },
+    );
+
+    const content = result.content;
     if (!content.trim()) {
       throw new Error("Empty response from synthesis LLM");
     }

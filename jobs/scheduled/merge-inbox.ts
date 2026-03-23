@@ -10,8 +10,7 @@
  */
 
 import { join } from "path";
-import axios from "axios";
-import { getOllamaConfig } from "../../shared/config.js";
+import { llmChat, isLlmReachable } from "../../shared/llm-client.js";
 import { readText, writeText, fileExists } from "../../shared/os/fs.js";
 import type { JobDefinition } from "../types.js";
 
@@ -46,6 +45,12 @@ export async function mergeInbox(mdDbPath: string): Promise<void> {
   const inboxContent = readText(inboxPath);
   // Skip if inbox is just the header with no sessions
   if (!inboxContent.includes("## Session")) return;
+
+  // Early-out if LLM provider is unreachable
+  if (!await isLlmReachable()) {
+    console.log("[merge-inbox] LLM unavailable, deferring");
+    return;
+  }
 
   const currentPrefs = fileExists(prefsPath) ? readText(prefsPath) : "(no preferences.md yet)";
 
@@ -141,9 +146,6 @@ Respond with JSON only:
 If nothing needs to change, return {"additions": [], "modifications": [], "dropped": []}`;
 
 async function callOllama(inbox: string, currentPrefs: string): Promise<MergeResult | null> {
-  const ollama = getOllamaConfig();
-  const host = ollama.baseUrl.replace(/\/v1\/?$/, "");
-
   const userPrompt = [
     "## Current preferences.md",
     currentPrefs.slice(0, 6000),
@@ -152,21 +154,15 @@ async function callOllama(inbox: string, currentPrefs: string): Promise<MergeRes
     inbox.slice(0, 6000),
   ].join("\n");
 
-  const response = await axios.post(
-    `${host}/api/chat`,
-    {
-      model: ollama.model,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userPrompt },
-      ],
-      stream: false,
-      options: { num_ctx: 16384, temperature: 0.1 },
-    },
-    { timeout: 120_000, signal: AbortSignal.timeout(120_000) },
+  const result = await llmChat(
+    [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: userPrompt },
+    ],
+    { temperature: 0.1, numCtx: 16384, timeout: 120_000 },
   );
 
-  const raw = response.data?.message?.content ?? "";
+  const raw = result.content;
   if (!raw.trim()) return null;
 
   const jsonStr = extractJson(raw);

@@ -15,10 +15,9 @@
 
 import { join } from "path";
 import { statSync } from "fs";
-import axios from "axios";
+import { llmChat, isLlmReachable } from "../../shared/llm-client.js";
 import type { JobDefinition } from "../types.js";
 import type { ObsidiClawPaths } from "../../shared/config.js";
-import { getOllamaConfig } from "../../shared/config.js";
 import { loadPersonality } from "../../shared/agents/personality-loader.js";
 import { readText, writeText, fileExists, listDir } from "../../shared/os/fs.js";
 import { buildDirectoryTree } from "../../scripts/update-directory-tree.js";
@@ -45,6 +44,12 @@ export function createSummarizeCodeJob(intervalHours = 6): JobDefinition {
 // ---------------------------------------------------------------------------
 
 export async function run(paths: ObsidiClawPaths): Promise<void> {
+  // Early-out if LLM provider is unreachable
+  if (!await isLlmReachable()) {
+    console.log("[summarize-code] LLM unavailable, skipping");
+    return;
+  }
+
   const mirrorDir = join(paths.mdDbPath, "code");
   if (!fileExists(mirrorDir)) {
     console.log("[summarize-code] no md_db/code directory found, skipping");
@@ -207,9 +212,6 @@ async function callOllama(
   systemPrompt?: string,
   providerOverride?: { model?: string; baseUrl?: string },
 ): Promise<string | null> {
-  const ollama = getOllamaConfig({ model: providerOverride?.model, baseUrl: providerOverride?.baseUrl });
-  const host = ollama.baseUrl.replace(/\/v1\/?$/, "");
-
   const userPrompt = [
     "## Project Directory Tree",
     directoryTree,
@@ -224,22 +226,20 @@ async function callOllama(
   ].join("\n");
 
   try {
-    const response = await axios.post(
-      `${host}/api/chat`,
+    const result = await llmChat(
+      [
+        { role: "system", content: systemPrompt ?? FALLBACK_SYSTEM_PROMPT },
+        { role: "user", content: userPrompt },
+      ],
       {
-        model: ollama.model,
-        messages: [
-          { role: "system", content: systemPrompt ?? FALLBACK_SYSTEM_PROMPT },
-          { role: "user", content: userPrompt },
-        ],
-        stream: false,
-        options: { num_ctx: 16384, temperature: 0.2 },
+        model: providerOverride?.model,
+        temperature: 0.2,
+        numCtx: 16384,
+        timeout: 60_000,
       },
-      { timeout: 60_000, signal: AbortSignal.timeout(60_000) },
     );
 
-    const text = (response.data?.message?.content ?? "").trim();
-    return text || null;
+    return result.content.trim() || null;
   } catch {
     return null;
   }

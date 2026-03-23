@@ -137,3 +137,9 @@ Pending proposals auto-derived from sessions. Review and merge manually.
 ### Synthesized Preferences
 - **[moderate]** Initialize the scheduler with a persistent backend when possible, especially on Windows systems.
   - Evidence: The user mentioned that the scheduler status was 'not initialized' and noted the limitation of no persistent backend available on Windows only.
+
+## Session b5b62a4a (2026-03-22)
+
+### Signals
+- **[moderate imperative]** "Ready to execute whenever you give the word."
+  → The agent should wait for explicit confirmation before proceeding with execution.

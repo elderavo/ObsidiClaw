@@ -43,8 +43,6 @@ import type {
   PruneConfig,
 } from "./types.js";
 
-const DEFAULT_OLLAMA_HOST = process.env["OLLAMA_HOST"] ?? "http://10.0.132.100:11434";
-const DEFAULT_EMBED_MODEL = process.env["OLLAMA_EMBED_MODEL"] ?? "nomic-embed-text:v1.5";
 const DEFAULT_TOP_K = 5;
 const DEFAULT_PERSONALITIES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "shared", "agents", "personalities");
 const DEFAULT_PRUNE_CONFIG: PruneConfig = {
@@ -83,6 +81,10 @@ export class ContextEngine {
   /** In-memory note cache populated on init/reindex. */
   private noteCache = new Map<string, string>();
 
+  /** True when the Python engine is in degraded mode (no vector embeddings). */
+  private degraded = false;
+  private degradedReason = "";
+
   private readonly config: Required<Omit<ContextEngineConfig, "review" | "pruneConfig" | "onDebug">> & {
     review?: ContextEngineConfig["review"];
     pruneConfig?: ContextEngineConfig["pruneConfig"];
@@ -98,8 +100,6 @@ export class ContextEngine {
     this.config = {
       mdDbPath,
       dbPath: config.dbPath ?? defaultDbPath,
-      ollamaHost: config.ollamaHost ?? DEFAULT_OLLAMA_HOST,
-      embeddingModel: config.embeddingModel ?? DEFAULT_EMBED_MODEL,
       topK: config.topK ?? DEFAULT_TOP_K,
       personalitiesDir: config.personalitiesDir ?? DEFAULT_PERSONALITIES_DIR,
       review: config.review,
@@ -145,16 +145,25 @@ export class ContextEngine {
     const result = await this.rpc("initialize", {
       md_db_path: this.config.mdDbPath,
       db_dir: this.config.dbPath,
-      ollama_host: this.config.ollamaHost,
-      embed_model: this.config.embeddingModel,
       top_k: this.config.topK,
-    }) as { path: string; duration_ms: number; note_count: number; note_cache: Record<string, string> };
+    }) as {
+      path: string;
+      mode: string;
+      degraded_reason: string;
+      duration_ms: number;
+      note_count: number;
+      note_cache: Record<string, string>;
+    };
 
     // Populate note cache
     this.noteCache.clear();
     for (const [key, val] of Object.entries(result.note_cache)) {
       this.noteCache.set(key, val);
     }
+
+    // Track degradation state
+    this.degraded = result.mode === "degraded";
+    this.degradedReason = result.degraded_reason ?? "";
 
     this.initialized = true;
 
@@ -233,6 +242,11 @@ export class ContextEngine {
       if (!review.skipped && review.synthesizedContext) {
         formattedContext = review.synthesizedContext;
       }
+    }
+
+    // Append degradation warning if running without embeddings
+    if (this.degraded) {
+      formattedContext += "\n\n> ⚠️ Embedding provider unavailable — using keyword matching. Results may be less precise.";
     }
 
     const retrievalMs = Date.now() - t0;
@@ -404,6 +418,20 @@ export class ContextEngine {
     this.rl = null;
     this.initialized = false;
     this.noteCache.clear();
+  }
+
+  // =========================================================================
+  // Degradation state
+  // =========================================================================
+
+  /** Whether the engine initialized in degraded mode (keyword-only retrieval). */
+  get isDegraded(): boolean {
+    return this.degraded;
+  }
+
+  /** Human-readable reason for degraded mode, or empty string if full mode. */
+  get degradedReasonMessage(): string {
+    return this.degradedReason;
   }
 
   // =========================================================================

@@ -12,7 +12,7 @@
  * title: Deep Researcher
  * provider:
  *   model: llama3
- *   baseUrl: http://10.0.132.100/v1
+ *   baseUrl: http://localhost:11434/v1
  * ---
  * # Deep Researcher
  * You are a deep researcher...
