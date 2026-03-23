@@ -704,13 +704,13 @@ function extractSummarySection(mirrorPath: string): string | null {
 
 /**
  * Walk the mirror directory and delete any .md files that are not in the set
- * of valid mirror paths (i.e., their source .ts/.py file no longer exists).
+ * of valid mirror paths (i.e., their source file no longer exists).
  * Also removes empty directories left behind.
  *
- * Only deletes files with `generated: true` in frontmatter to avoid nuking
- * hand-written notes that happen to live under md_db/code/.
+ * Only deletes files with `generated: true` AND matching `language:` in
+ * frontmatter, so the TS mirror won't delete Python mirrors and vice versa.
  */
-function cleanStaleMirrors(mirrorDir: string, validPaths: Set<string>, sourceExt: string): number {
+function cleanStaleMirrors(mirrorDir: string, validPaths: Set<string>, language: string): number {
   let cleaned = 0;
 
   function walkClean(dir: string): void {
@@ -733,10 +733,10 @@ function cleanStaleMirrors(mirrorDir: string, validPaths: Set<string>, sourceExt
       } else if (entry.isFile() && entry.name.endsWith(".md")) {
         const resolved = path.resolve(absPath);
         if (!validPaths.has(resolved)) {
-          // Safety check: only delete generated mirrors
+          // Safety: only delete generated mirrors of the same language
           try {
             const content = fs.readFileSync(absPath, "utf8");
-            if (content.includes("generated: true")) {
+            if (content.includes("generated: true") && content.includes(`language: ${language}`)) {
               fs.unlinkSync(absPath);
               cleaned++;
             }
@@ -801,7 +801,7 @@ export async function runMirrorTs(
 
   // ── Cleanup stale mirrors ──────────────────────────────────────────────
   const validMirrorPaths = new Set(files.map((f) => path.resolve(f.mirrorPath)));
-  const cleaned = cleanStaleMirrors(opts.mirrorDir, validMirrorPaths, ".ts");
+  const cleaned = cleanStaleMirrors(opts.mirrorDir, validMirrorPaths, "ts");
 
   if (parseErrors > 0) console.warn(`[mirror-ts] ${parseErrors} files failed to parse`);
   return { written, skipped, cleaned };

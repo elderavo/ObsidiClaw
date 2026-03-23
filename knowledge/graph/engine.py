@@ -10,6 +10,7 @@ Supports graceful degradation:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import time
@@ -18,6 +19,7 @@ from typing import Any, Optional
 
 from llama_index.core import VectorStoreIndex, Settings
 from llama_index.core.graph_stores import SimplePropertyGraphStore
+from llama_index.core.schema import TextNode, Document
 
 from .indexer import build_index, load_index, _scan_md_db, _build_graph_store
 from .keyword_retriever import KeywordRetriever
@@ -26,6 +28,12 @@ from .models import ParsedNote, RetrievedNote
 from .providers import get_embed_config, check_reachable, create_embedding
 
 log = logging.getLogger(__name__)
+
+
+def _content_hash(text: str) -> str:
+    """Fast MD5 hash of note body text for change detection."""
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
+
 
 # ---------------------------------------------------------------------------
 # Engine
@@ -55,6 +63,9 @@ class KnowledgeGraphEngine:
 
         # Parsed notes for retrieval metadata
         self._parsed_notes: dict[str, ParsedNote] = {}
+
+        # Per-note content hash for incremental updates: {note_id: md5_hex}
+        self._note_hashes: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Initialize
@@ -98,8 +109,9 @@ class KnowledgeGraphEngine:
         # ── Step 3: Build keyword retriever (always) ────────────────────
         self.keyword_retriever = KeywordRetriever(notes_by_id)
 
-        # ── Step 4: Build note cache (always) ───────────────────────────
+        # ── Step 4: Build note cache + per-note hashes (always) ──────────
         self.note_cache = {n.note_id: n.body for n in notes}
+        self._note_hashes = {n.note_id: _content_hash(n.body) for n in notes}
 
         # ── Step 5: Resolve embed config ────────────────────────────────
         embed_config = get_embed_config()
@@ -336,6 +348,173 @@ class KnowledgeGraphEngine:
             "note_count": len(notes),
             "note_cache": self.note_cache,
         }
+
+    # ------------------------------------------------------------------
+    # Incremental update
+    # ------------------------------------------------------------------
+
+    def incremental_update(
+        self,
+        changed_paths: list[str],
+        deleted_paths: list[str],
+    ) -> dict[str, Any]:
+        """Update only the notes that changed/were added/deleted.
+
+        changed_paths: relative paths within md_db of files that were
+                       added or modified (re-parsed and re-embedded).
+        deleted_paths: relative paths of files that were removed.
+
+        Returns update metadata for the TS bridge.
+        """
+        if not self.md_db_path:
+            raise RuntimeError("Engine not initialized")
+
+        t0 = time.time()
+        added = 0
+        updated = 0
+        removed = 0
+
+        # ── Handle deletions ─────────────────────────────────────────────
+        for rel_path in deleted_paths:
+            if rel_path not in self._parsed_notes:
+                continue
+            self._remove_note(rel_path)
+            removed += 1
+
+        # ── Handle additions/modifications ───────────────────────────────
+        from .markdown_utils import (
+            extract_tags,
+            extract_title,
+            extract_wikilinks,
+            infer_note_type,
+            parse_frontmatter,
+        )
+
+        new_notes: list[ParsedNote] = []
+        for rel_path in changed_paths:
+            abs_path = os.path.join(self.md_db_path, rel_path.replace("/", os.sep))
+            if not os.path.isfile(abs_path):
+                # File listed as changed but doesn't exist — treat as delete
+                if rel_path in self._parsed_notes:
+                    self._remove_note(rel_path)
+                    removed += 1
+                continue
+
+            try:
+                content = Path(abs_path).read_text(encoding="utf-8")
+            except Exception as exc:
+                log.warning("Failed to read %s: %s", abs_path, exc)
+                continue
+
+            frontmatter, body = parse_frontmatter(content)
+            new_hash = _content_hash(body)
+
+            # Skip if content hasn't actually changed
+            if rel_path in self._note_hashes and self._note_hashes[rel_path] == new_hash:
+                continue
+
+            note_type = infer_note_type(frontmatter, rel_path)
+            title = extract_title(frontmatter, body, rel_path)
+            tags = extract_tags(frontmatter)
+            links = extract_wikilinks(body)
+
+            tool_id: Optional[str] = None
+            if note_type == "tool":
+                tool_id = str(frontmatter.get("tool_id") or Path(rel_path).stem)
+
+            note = ParsedNote(
+                note_id=rel_path,
+                path=rel_path,
+                title=title,
+                note_type=note_type,  # type: ignore[arg-type]
+                body=body,
+                frontmatter=frontmatter,
+                links_out=links,
+                tool_id=tool_id,
+                time_created=None,
+                last_edited=None,
+                tags=tags,
+            )
+
+            is_new = rel_path not in self._parsed_notes
+            new_notes.append(note)
+
+            # Update in-memory state
+            self._parsed_notes[rel_path] = note
+            self.note_cache[rel_path] = body
+            self._note_hashes[rel_path] = new_hash
+
+            # Update vector index
+            if self.index is not None:
+                text_node = TextNode(
+                    text=f"{title}\n\n{body}",
+                    id_=rel_path,
+                    metadata={
+                        "file_path": rel_path,
+                        "note_type": note_type,
+                        "title": title,
+                        "tool_id": tool_id or "",
+                        "tags": ",".join(tags),
+                    },
+                )
+                doc = Document(text=f"{title}\n\n{body}", id_=rel_path)
+                if is_new:
+                    self.index.insert_nodes([text_node])
+                    added += 1
+                else:
+                    # update_ref_doc deletes old nodes then inserts new
+                    self.index.update_ref_doc(doc)
+                    updated += 1
+            else:
+                if is_new:
+                    added += 1
+                else:
+                    updated += 1
+
+        # ── Rebuild graph store (cheap — no embeddings) ──────────────────
+        # Graph edges depend on cross-note wikilinks, so after any note
+        # changes we rebuild the full graph. This is fast (~10ms for 70
+        # notes) since it's just in-memory data structure manipulation.
+        if added + updated + removed > 0:
+            all_notes = list(self._parsed_notes.values())
+            self.graph_store = _build_graph_store(all_notes, self._parsed_notes)
+            self.graph_store.persist(
+                persist_path=os.path.join(self.db_dir, "property_graph_store.json")
+            )
+            self.keyword_retriever = KeywordRetriever(self._parsed_notes)
+
+            # Persist vector index if it exists
+            if self.index is not None:
+                self.index.storage_context.persist(persist_dir=self.db_dir)
+
+        duration_ms = int((time.time() - t0) * 1000)
+        total = added + updated + removed
+        log.info(
+            "Incremental update: +%d ~%d -%d (%d total) in %dms",
+            added, updated, removed, total, duration_ms,
+        )
+
+        return {
+            "added": added,
+            "updated": updated,
+            "removed": removed,
+            "duration_ms": duration_ms,
+            "note_count": len(self._parsed_notes),
+            "note_cache": self.note_cache,
+        }
+
+    def _remove_note(self, note_id: str) -> None:
+        """Remove a single note from all in-memory structures."""
+        self._parsed_notes.pop(note_id, None)
+        self.note_cache.pop(note_id, None)
+        self._note_hashes.pop(note_id, None)
+
+        # Remove from vector index
+        if self.index is not None:
+            try:
+                self.index.delete_ref_doc(note_id, delete_from_docstore=True)
+            except Exception as exc:
+                log.warning("Failed to delete %s from vector index: %s", note_id, exc)
 
     # ------------------------------------------------------------------
     # Graph stats

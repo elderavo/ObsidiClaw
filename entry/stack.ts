@@ -11,12 +11,13 @@
  *   - gateway/*              (future: Telegram, etc.)
  */
 
-import { join, resolve } from "path";
+import { join, relative, resolve } from "path";
 import { randomUUID } from "crypto";
 
+import chokidar, { type FSWatcher } from "chokidar";
 import { RunLogger } from "../logger/run-logger.js";
 import { ContextEngine } from "../knowledge/engine/context-engine.js";
-import { JobScheduler, createReindexJob, createHealthCheckJob, createNormalizeJob, createMergeInboxJob, createSummarizeCodeJob } from "../automation/jobs/index.js";
+import { JobScheduler, createHealthCheckJob, createNormalizeJob, createMergeInboxJob, createSummarizeCodeJob } from "../automation/jobs/index.js";
 import { SubagentRunner } from "../agents/subagent/subagent-runner.js";
 import { resolvePaths, type ObsidiClawPaths } from "../core/config.js";
 import type { RunEvent } from "../agents/orchestrator/types.js";
@@ -107,7 +108,6 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
 
   if (enableScheduler && persistentBackend) {
     scheduler = new JobScheduler(logger, persistentBackend, paths.rootDir, sessionId);
-    scheduler.register(createReindexJob());
     scheduler.register(createHealthCheckJob());
     scheduler.register(createNormalizeJob());
     scheduler.register(createMergeInboxJob());
@@ -118,6 +118,9 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
 
   // ── md_db watcher (lint on change) ───────────────────────────────────────
   let mdDbWatcher: ReturnType<typeof startMdDbLintWatcher> | undefined;
+
+  // ── md_db reindex watcher (incremental update on change) ────────────────
+  let reindexWatcher: FSWatcher | undefined;
 
   // ── mirror watcher (regenerate code notes on source change) ──────────────
   let mirrorWatcher: ReturnType<typeof startMirrorWatcher> | undefined;
@@ -146,7 +149,7 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
       try {
         await Promise.all([
           runMirrorTs({ scanDir: paths.rootDir, mirrorDir, omitPatterns: ["dist", "node_modules", "_legacy", ".claude", "*.d.ts"], force: false }),
-          runMirrorPy({ scanDir: join(paths.rootDir, "knowledge_graph"), mirrorDir, omitPatterns: ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist"], force: false }),
+          runMirrorPy({ scanDir: join(paths.rootDir, "knowledge", "graph"), mirrorDir, omitPatterns: ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist"], force: false }),
         ]);
       } catch (err) {
         console.warn("[obsidi-claw] initial mirror run failed", err);
@@ -163,9 +166,14 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     // Watchers are cheap — start after everything else is up.
     mdDbWatcher = startMdDbLintWatcher(paths.mdDbPath);
     mirrorWatcher = startMirrorWatcher(paths.rootDir, mirrorDir);
+    reindexWatcher = startMdDbReindexWatcher(paths.mdDbPath, engine);
   }
 
   async function shutdown(): Promise<void> {
+    if (reindexWatcher) {
+      await reindexWatcher.close();
+      reindexWatcher = undefined;
+    }
     if (mirrorWatcher) {
       await mirrorWatcher.close();
       mirrorWatcher = undefined;
@@ -192,4 +200,78 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     initialize,
     shutdown,
   };
+}
+
+// ---------------------------------------------------------------------------
+// md_db reindex watcher — incremental update on file change
+// ---------------------------------------------------------------------------
+
+const REINDEX_DEBOUNCE_MS = 1500;
+
+/**
+ * Watch md_db for .md file changes and trigger incremental engine updates.
+ * Batches rapid changes (debounce) and sends only the changed/deleted paths.
+ */
+function startMdDbReindexWatcher(mdDbPath: string, engine: ContextEngine): FSWatcher {
+  const pendingChanged = new Set<string>();
+  const pendingDeleted = new Set<string>();
+  let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function toRelPath(absPath: string): string {
+    return relative(mdDbPath, absPath).replace(/\\/g, "/");
+  }
+
+  function scheduleFlush(): void {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = undefined;
+      void flush();
+    }, REINDEX_DEBOUNCE_MS);
+  }
+
+  async function flush(): Promise<void> {
+    const changed = [...pendingChanged];
+    const deleted = [...pendingDeleted];
+    pendingChanged.clear();
+    pendingDeleted.clear();
+
+    // Don't send files that are in both changed and deleted — only delete
+    const changedFiltered = changed.filter((p) => !deleted.includes(p));
+
+    if (changedFiltered.length === 0 && deleted.length === 0) return;
+
+    try {
+      await engine.incrementalUpdate(changedFiltered, deleted);
+    } catch (err) {
+      // Engine might not be initialized yet or subprocess crashed — swallow
+    }
+  }
+
+  const watcher = chokidar.watch(mdDbPath, {
+    ignored: [/\.obsidian/, /\.obsidi-claw/],
+    ignoreInitial: true,
+    awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
+  });
+
+  function handleChange(absPath: string): void {
+    if (!absPath.endsWith(".md")) return;
+    const rel = toRelPath(absPath);
+    pendingChanged.add(rel);
+    pendingDeleted.delete(rel); // un-delete if re-created
+    scheduleFlush();
+  }
+
+  function handleUnlink(absPath: string): void {
+    if (!absPath.endsWith(".md")) return;
+    const rel = toRelPath(absPath);
+    pendingDeleted.add(rel);
+    pendingChanged.delete(rel); // don't try to update a deleted file
+    scheduleFlush();
+  }
+
+  watcher.on("add", handleChange);
+  watcher.on("change", handleChange);
+  watcher.on("unlink", handleUnlink);
+
+  return watcher;
 }

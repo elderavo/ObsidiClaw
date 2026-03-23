@@ -138,7 +138,7 @@ const extension: ExtensionFactory = async (pi) => {
       "For detailed usage, use retrieve_context with 'scheduler'.",
     promptSnippet: "run_job(job_name) — run a scheduler job now",
     parameters: Type.Object({
-      job_name: Type.String({ description: "Job name (e.g., 'reindex-md-db')." }),
+      job_name: Type.String({ description: "Job name (e.g., 'health-check')." }),
     }),
     async execute(_id, { job_name }) {
       try {

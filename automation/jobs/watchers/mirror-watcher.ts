@@ -109,6 +109,7 @@ export function startMirrorWatcher(
 
   watcher.on("add", scheduleRun);
   watcher.on("change", scheduleRun);
+  watcher.on("unlink", scheduleRun);
 
   return watcher;
 }

@@ -62,6 +62,13 @@ def handle_reindex(params: dict[str, Any]) -> dict[str, Any]:
     return engine.reindex()
 
 
+def handle_incremental_update(params: dict[str, Any]) -> dict[str, Any]:
+    return engine.incremental_update(
+        changed_paths=params.get("changed_paths", []),
+        deleted_paths=params.get("deleted_paths", []),
+    )
+
+
 def handle_build_prune_clusters(params: dict[str, Any]) -> dict[str, Any]:
     from .pruner import build_prune_clusters
     from .models import PruneConfig
@@ -99,6 +106,7 @@ HANDLERS: dict[str, Any] = {
     "retrieve": handle_retrieve,
     "get_note_content": handle_get_note_content,
     "reindex": handle_reindex,
+    "incremental_update": handle_incremental_update,
     "build_prune_clusters": handle_build_prune_clusters,
     "get_graph_stats": handle_get_graph_stats,
     "shutdown": handle_shutdown,

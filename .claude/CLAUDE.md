@@ -36,7 +36,7 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 | `shared/markdown/` | Canonical markdown utilities: frontmatter parse/build, wikilinks, token normalization, md_db normalizer |
 | `shared/agents/` | First-class subagent entity: SubagentRunner, personality loader, personality files |
 | `shared/agents/personalities/` | Subagent personality markdown files (outside md_db, not indexed) |
-| `scheduler/` | In-process job scheduler with setInterval: reindex (30m), health-check (15m), normalize-md-db (2h) |
+| `scheduler/` | In-process job scheduler with setInterval: health-check (15m), normalize-md-db (2h). md_db changes trigger immediate incremental reindex via file watcher |
 | `insight_engine/` | Post-session review: captures session transcripts, proposes preference updates + new concept notes |
 
 # Key Design Decisions
@@ -57,7 +57,7 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **OS compat layer**: All code uses `shared/os/` abstractions for process spawning, filesystem, signal handling. No `process.platform` or Windows-specific code.
 - **Shared markdown layer**: `shared/markdown/` is the single source of truth for frontmatter parsing/building, wikilink extraction, token normalization. All consumers import from here — no local duplicates.
 - **Context synthesis**: `ContextReviewer` in `context_engine/review/` takes raw formatted context + query and produces a focused markdown document via LLM. Natural language in/out, no structured JSON. Falls back to raw notes on failure.
-- **Scheduler**: In-process `setInterval`-based. Jobs: `reindex-md-db` (30m), `health-check` (15m), `normalize-md-db` (2h). `PersistentScheduleBackend` interface stubbed for future OS-native scheduling. Job executions create `runs` rows with `run_kind="job"`.
+- **Scheduler**: OS-delegated via `PersistentScheduleBackend` (Windows Task Scheduler). Jobs: `health-check` (15m), `normalize-md-db` (2h), `merge-preferences-inbox`, `summarize-code`. Reindexing is **not** a scheduled job — md_db changes are picked up immediately by a chokidar file watcher that calls `engine.incrementalUpdate()` on the live in-process engine. Job executions create `runs` rows with `run_kind="job"`.
 - **Session/Run/Trace hierarchy**: `sessions` table is the top-level container (multi-prompt). `runs` table has `run_kind` (`core`|`subagent`|`reviewer`|`job`) + `parent_run_id`/`parent_session_id` for lineage trees. `trace` table supports both legacy (`type`+`payload`) and structured (`source`/`target`/`action`/`status`/`seq`/`span_id`) columns. `TraceEmitter` in `logger/trace-emitter.ts` manages per-run monotonic seq counters.
 - **Trace modules**: Canonical module names in `shared/trace-modules.ts`: `orchestrator`, `pi_session`, `context_engine`, `scheduler`, `extension`, `subagent`, `insight_engine`, `logger`, `user`, `tool:<name>`. All trace events use these as source/target.
 
@@ -93,7 +93,7 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
   - [x] 9e. Validate: vector retrieval + graph expansion working (43 notes, 90 edges, scores verified, fast/slow paths, JSON-RPC confirmed)
 
 - [ ] **Phase 10 — Scheduler validation** *(depends on Phase 7 — if agents are flaky, scheduled jobs may silently fail)*
-  - [ ] 10a. Verify all scheduled jobs run: `reindex-md-db`, `health-check`, `normalize-md-db` — check `job_start`/`job_complete` events in runs.db
+  - [ ] 10a. Verify all scheduled jobs run: `health-check`, `normalize-md-db` — check `job_start`/`job_complete` events in runs.db
   - [ ] 10b. Verify scheduled subagent jobs (if any) complete successfully using Phase 7 fixes
   - [ ] 10c. Add a `scheduler-status` MCP tool or CLI command that reports job states, last run times, error counts
   - [ ] 10d. Evaluate whether `PersistentScheduleBackend` is needed (do jobs need to survive process restarts?) — implement if yes
@@ -136,7 +136,7 @@ See `.claude/learning-loops-plan.md` for the detailed closure plan.
 - Shared markdown layer: canonical frontmatter/wikilink/token handling, md_db normalizer
 - OS compat layer: all code uses `shared/os/` abstractions
 - Personality-driven subagents: `SubagentRunner` with personality files, spawnable from anywhere
-- Scheduler: reindex (30m), health-check (15m), normalize-md-db (2h). Job executions tracked in `runs` table.
+- Scheduler: health-check (15m), normalize-md-db (2h). md_db changes trigger immediate incremental reindex via file watcher. Job executions tracked in `runs` table.
 - Session/run/trace schema: `sessions` table, `run_kind` enum, parent linking, `TraceEmitter` with structured columns + seq counters
 
 ## What's Broken / Unvalidated
@@ -241,7 +241,7 @@ See `.claude/learning-loops-plan.md` for the detailed closure plan.
 - **Personality system** — `shared/agents/personality-loader.ts` reads `.md` files from `shared/agents/personalities/` (outside md_db, not indexed by context engine). Frontmatter includes `provider.model` and `provider.baseUrl` for LLM config per personality. Three built-in: deep-researcher, code-reviewer, context-gardener.
 - **Subagent extension refactor** — `.pi/extensions/subagent.ts` rewritten as thin wrapper around `SubagentRunner`. Added `personality` parameter to `spawn_subagent` and `spawn_subagent_detached`. Removed ~100 lines of duplicated session/MCP/logger management. `scripts/run_detached_subagent.ts` also simplified to use SubagentRunner.
 - **Context review gate** — `context_engine/review/context-reviewer.ts` with `ContextReviewer` class. Direct Ollama `/api/chat` call using personality's model. Confidence-threshold trigger (skips review when avg retrieval score >= threshold). Wired into `ContextEngine.build()` as optional post-retrieval filter. Review metrics flow through `context_retrieved` RunEvent.
-- **Cron scheduler** — `scheduler/scheduler.ts` with `JobScheduler` class using setInterval. `register()`, `start()`, `stop()`, `runNow()`, `setEnabled()`. Built-in jobs: `reindex-md-db` (30min), `health-check` (15min). Job events (`job_start`/`job_complete`/`job_error`) added to RunEvent union. Wired into `orchestrator/run.ts` with graceful shutdown.
+- **Cron scheduler** — `automation/jobs/schedule-job.ts` with `JobScheduler` class using OS-delegated scheduling. `register()`, `start()`, `stop()`, `runNow()`. Built-in jobs: `health-check` (15min), `normalize-md-db` (2h), `merge-preferences-inbox`, `summarize-code`. Job events (`job_start`/`job_complete`/`job_error`) added to RunEvent union. Wired into `entry/stack.ts`.
 - **Type changes**: `SubagentInput.personality` field, `SubagentPackage.personalityConfig`, `ContextEngineConfig.personalitiesDir` + `.review`, `ContextPackage.reviewResult`, `prepare_subagent` MCP tool gets `personality` param.
 - `tsc --noEmit` clean. Zero platform-specific code (`process.platform`, `win32`, etc.) in any new module.
 - **Next**: Phase 7 — comparison engine. Also: migrate existing OS calls to compat layer, implement `PersistentScheduleBackend` for at least one platform.

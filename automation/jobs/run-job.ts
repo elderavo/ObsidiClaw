@@ -11,7 +11,6 @@
 import { randomUUID } from "crypto";
 import { resolvePaths, type ObsidiClawPaths } from "../../core/config.js";
 import { RunLogger } from "../../logger/run-logger.js";
-import * as reindex from "./scheduled/reindex.js";
 import * as normalize from "./scheduled/normalize.js";
 import * as healthCheck from "./scheduled/health-check.js";
 import * as mergeInbox from "./scheduled/merge-inbox.js";
@@ -20,7 +19,6 @@ import * as summarizeCode from "./scheduled/summarize-code.js";
 type JobModule = { run: (paths: ObsidiClawPaths) => Promise<void> };
 
 const JOBS: Record<string, JobModule> = {
-  "reindex-md-db":           reindex,
   "normalize-md-db":         normalize,
   "health-check":            healthCheck,
   "merge-preferences-inbox": mergeInbox,

@@ -11,7 +11,7 @@
 // ---------------------------------------------------------------------------
 
 export interface JobDefinition {
-  /** Unique job name (e.g., "reindex-md-db"). */
+  /** Unique job name (e.g., "health-check"). */
   name: string;
 
   /** Human-readable description. */

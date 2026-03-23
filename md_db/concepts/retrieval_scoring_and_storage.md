@@ -75,10 +75,26 @@ Full event payload as JSON blob, queryable by run_id/session_id/event type.
 ### Why the split
 `PropertyGraphIndex` (LlamaIndex's unified graph+vector object) doesn't persist embeddings for manually-upserted `EntityNode`s. The dual-store pattern (`VectorStoreIndex` + `SimplePropertyGraphStore`) is intentional. Python handles vector/graph primitives; TS owns formatting, review, and orchestration. The JSON-RPC subprocess boundary keeps the two sides decoupled.
 
+### `context_ratings` table
+Agent self-grades of retrieval quality, written by the `rate_context` MCP tool. See [[concepts/context_feedback_loop]] for the full feedback loop status.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| query | TEXT | The original search query |
+| score | INTEGER | 1 (irrelevant) to 5 (exactly what was needed) |
+| missing | TEXT | Free-text: what information was lacking |
+| helpful | TEXT | Free-text: what was useful |
+| session_id | TEXT | FK to sessions |
+| run_id | TEXT | FK to runs |
+
+Joinable to `note_hits` via `session_id` + `run_id` — this is the key link between "what was retrieved" and "was it useful."
+
 ## Gaps for the Context-Improvement Cycle
 
+See [[concepts/context_feedback_loop]] for the full gap analysis and proposed closure plan.
+
 ### 1. No link between note_hits and outcomes
-`note_hits` records what was retrieved. `runs.utility_score` records whether the run was useful. But nothing connects "note X was retrieved AND the run was rated useful/useless." The learning loop needs this join to answer: *did retrieving this note help or hurt?*
+`note_hits` records what was retrieved. `context_ratings` records whether it was useful. The join key exists (`session_id` + `run_id`) but **no query methods exist** — `RunLogger` is write-only for all three tables. `runs.utility_score` provides a second signal (subagent grading) but is also unqueried.
 
 ### 2. Boosted scores hide base quality
 The stored `score` merges raw cosine similarity with tag boost. You can't distinguish "this note scored 0.8 from embedding quality" from "0.62 base + 30% tag boost." Tuning boost weights or evaluating embedding quality requires storing both the raw and boosted scores.

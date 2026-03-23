@@ -28,6 +28,7 @@ import { existsSync, readFileSync, writeFileSync } from "fs";
 import { ensureDir } from "../../core/os/fs.js";
 import { stripFrontmatter, estimateTokens } from "./frontmatter-utils.js";
 import { loadPersonality } from "../../agents/subagent/personality-loader.js";
+import { SUBAGENT_RAG_FOOTER_LINES } from "../../agents/prompts.js";
 import { ContextReviewer } from "./review/context-reviewer.js";
 import { PruneClusterStorage } from "./prune/prune-storage.js";
 import Database from "better-sqlite3";
@@ -380,6 +381,55 @@ export class ContextEngine {
     this.debug({ type: "ce_reindex_start", timestamp: t0, path: "full" });
     this.debug({ type: "ce_reindex_done", timestamp: Date.now(), durationMs: Date.now() - t0, noteCount: result.note_count, skipped: false });
     this.debug({ type: "ce_subprocess_log", timestamp: Date.now(), message: "Full reindex completed" });
+  }
+
+  /**
+   * Incrementally update only the notes that changed.
+   * Much faster than full reindex — only re-parses and re-embeds the
+   * listed files. Unchanged files are skipped via content hash comparison
+   * on the Python side.
+   */
+  async incrementalUpdate(changedPaths: string[], deletedPaths: string[] = []): Promise<{
+    added: number;
+    updated: number;
+    removed: number;
+    durationMs: number;
+  }> {
+    this.ensureInitialized();
+
+    const t0 = Date.now();
+
+    const result = await this.rpc("incremental_update", {
+      changed_paths: changedPaths,
+      deleted_paths: deletedPaths,
+    }) as {
+      added: number;
+      updated: number;
+      removed: number;
+      duration_ms: number;
+      note_count: number;
+      note_cache: Record<string, string>;
+    };
+
+    // Sync local note cache with Python's updated state
+    this.noteCache.clear();
+    for (const [key, val] of Object.entries(result.note_cache)) {
+      this.noteCache.set(key, val);
+    }
+
+    const durationMs = Date.now() - t0;
+    this.debug({
+      type: "ce_subprocess_log",
+      timestamp: Date.now(),
+      message: `Incremental update: +${result.added} ~${result.updated} -${result.removed} in ${durationMs}ms`,
+    });
+
+    return {
+      added: result.added,
+      updated: result.updated,
+      removed: result.removed,
+      durationMs,
+    };
   }
 
   /**
@@ -744,9 +794,7 @@ function formatSubagentSystemPrompt(
     "## Retrieved Context",
     ctx.formattedContext,
     "",
-    "---",
-    "Focus exclusively on the plan above. Work systematically towards the success criteria.",
-    "Use `retrieve_context` for additional knowledge lookup.",
+    ...SUBAGENT_RAG_FOOTER_LINES,
   );
 
   return sections.join("\n");

@@ -756,8 +756,8 @@ function extractSummarySection(mirrorPath: string): string | null {
 
 /**
  * Walk the mirror directory and delete any .md files that are not in the set
- * of valid mirror paths. Only deletes files with `generated: true` in
- * frontmatter to avoid nuking hand-written notes.
+ * of valid mirror paths. Only deletes files with `generated: true` AND
+ * `language: py` in frontmatter, so Python cleanup won't touch TS mirrors.
  * Also removes empty directories left behind.
  */
 function cleanStaleMirrors(mirrorDir: string, validPaths: Set<string>): number {
@@ -784,7 +784,7 @@ function cleanStaleMirrors(mirrorDir: string, validPaths: Set<string>): number {
         if (!validPaths.has(resolved)) {
           try {
             const content = fs.readFileSync(absPath, "utf8");
-            if (content.includes("generated: true")) {
+            if (content.includes("generated: true") && content.includes("language: py")) {
               fs.unlinkSync(absPath);
               cleaned++;
             }
@@ -861,12 +861,7 @@ export async function runMirrorPy(
 
 async function main() {
   const args = parseArgs();
-  // console.log(`Scan dir  : ${args.scanDir}`);
-  // console.log(`Mirror dir: ${args.mirrorDir}`);
-  // console.log(`Omitting  : ${args.omitPatterns.join(", ")}`);
-  // console.log(`Force     : ${args.force}\n`);
-  // const { written, skipped } = await runMirrorPy(args);
-  // console.log(`Done. Written: ${written}, Skipped (up-to-date): ${skipped}`);
+  await runMirrorPy(args);
 }
 
 main().catch((err) => {
