@@ -19,6 +19,7 @@ import type { ContextEngine } from "../context-engine.js";
 import type { ContextPackage, SubagentPackage, PruneMemberStatus } from "../types.js";
 import { PruneClusterStorage } from "../prune/prune-storage.js";
 import { resolvePaths } from "../../../core/config.js";
+import { RATE_CONTEXT_REMINDER } from "../../../agents/prompts.js";
 
 export type OnContextBuilt = (pkg: ContextPackage) => void;
 export type OnSubagentPrepared = (pkg: SubagentPackage) => void;
@@ -76,7 +77,7 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
       let text = pkg.formattedContext.length <= budget
         ? pkg.formattedContext
         : pkg.formattedContext.slice(0, budget) + "\n\n_(context truncated to fit budget)_\n<!-- End ObsidiClaw Context -->";
-      text += "\n\n<!-- After using this context, call rate_context to report how well it answered your query. -->";
+      text += "\n\n" + RATE_CONTEXT_REMINDER;
       return { content: [{ type: "text" as const, text }] };
     },
   );

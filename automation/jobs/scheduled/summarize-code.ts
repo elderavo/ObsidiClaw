@@ -1,16 +1,19 @@
 /**
- * summarize-code — generate a technical summary for each code mirror note.
+ * summarize-code — generate a technical summary + tags for each code mirror note.
  *
- * For every markdown file under md_db/code/ whose source file has changed
- * since the last summary was written:
- *   1. Reads the source file content
- *   2. Reads the existing mirror markdown (imports, exports, call graph)
- *   3. Sends both + the repo directory tree to Ollama
- *   4. Writes the 2-3 sentence response under "## Summary" in the mirror
+ * Runs every 20 minutes via OS scheduler. For every mirror markdown under
+ * md_db/code/ whose source file is newer than the mirror:
+ *   1. Read the source code
+ *   2. Read the mirror markdown (imports, exports, call graph)
+ *   3. Send both to the code-summarizer personality with existing tag list
+ *   4. Parse response for summary text + tags
+ *   5. Write the summary as `## Summary` and update `tags:` in frontmatter
  *
- * Staleness is tracked by embedding a <!-- summary_source_mtime: ... -->
- * comment inside the ## Summary section. If the source file's mtime is newer,
- * the summary is regenerated. Missing summaries are always generated.
+ * Staleness is determined purely by filesystem mtime:
+ *   source mtime > mirror mtime  →  needs (re-)summary
+ *
+ * Writing the summary updates the mirror's mtime, so the next run skips it.
+ * No tracking files, no database — the filesystem IS the state.
  */
 
 import { join } from "path";
@@ -21,20 +24,18 @@ import type { ObsidiClawPaths } from "../../../core/config.js";
 import { loadPersonality } from "../../../agents/subagent/personality-loader.js";
 import { SUMMARIZE_CODE_SYSTEM_PROMPT } from "../../../agents/prompts.js";
 import { readText, writeText, fileExists, listDir } from "../../../core/os/fs.js";
-import { buildDirectoryTree } from "../../scripts/update-directory-tree.js";
 
 const SUMMARY_HEADER = "## Summary";
-const MTIME_COMMENT_RE = /<!-- summary_source_mtime: (\d+) -->/;
 
 // ---------------------------------------------------------------------------
 // Job definition
 // ---------------------------------------------------------------------------
 
-export function createSummarizeCodeJob(intervalHours = 6): JobDefinition {
+export function createSummarizeCodeJob(intervalMinutes = 20): JobDefinition {
   return {
     name: "summarize-code",
-    description: "Write AI technical summaries for code mirror notes with stale or missing summaries",
-    schedule: { hours: intervalHours },
+    description: "Write AI technical summaries and tags for stale code mirror notes",
+    schedule: { minutes: intervalMinutes },
     skipIfRunning: true,
     timeoutMs: 600_000,
   };
@@ -45,7 +46,6 @@ export function createSummarizeCodeJob(intervalHours = 6): JobDefinition {
 // ---------------------------------------------------------------------------
 
 export async function run(paths: ObsidiClawPaths): Promise<void> {
-  // Early-out if LLM provider is unreachable
   if (!await isLlmReachable()) {
     console.log("[summarize-code] LLM unavailable, skipping");
     return;
@@ -58,35 +58,35 @@ export async function run(paths: ObsidiClawPaths): Promise<void> {
   }
 
   const mirrors = collectMirrorFiles(mirrorDir, paths.rootDir);
-  const stale = mirrors.filter((m) => needsSummary(m));
+  const stale = mirrors.filter((m) => isStale(m));
 
   if (stale.length === 0) {
-    console.log("[summarize-code] all mirrors up-to-date");
     return;
   }
 
-  console.log(`[summarize-code] summarizing ${stale.length} file(s)`);
+  console.log(`[summarize-code] ${stale.length} stale mirror(s)`);
 
   const personality = loadPersonality("code-summarizer", paths.personalitiesDir);
-  const directoryTree = buildDirectoryTree(paths.rootDir);
+  const existingTags = collectExistingTags(paths.mdDbPath);
+
   let done = 0;
-  let skipped = 0;
+  let failed = 0;
 
-  for (const { mirrorPath, sourcePath, sourceMtime } of stale) {
-    const sourceContent = readText(sourcePath);
-    const mirrorContent = readText(mirrorPath);
+  for (const entry of stale) {
+    const sourceContent = readText(entry.sourcePath);
+    const mirrorContent = readText(entry.mirrorPath);
 
-    const summary = await callOllama(sourceContent, mirrorContent, directoryTree, personality?.content, personality?.provider);
-    if (!summary) {
-      skipped++;
+    const result = await summarize(sourceContent, mirrorContent, existingTags, personality?.content, personality?.provider);
+    if (!result) {
+      failed++;
       continue;
     }
 
-    writeSummary(mirrorPath, mirrorContent, summary, sourceMtime);
+    writeResult(entry.mirrorPath, mirrorContent, result.summary, result.tags);
     done++;
   }
 
-  console.log(`[summarize-code] done=${done} skipped=${skipped}`);
+  console.log(`[summarize-code] done=${done} failed=${failed}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -96,8 +96,8 @@ export async function run(paths: ObsidiClawPaths): Promise<void> {
 interface MirrorEntry {
   mirrorPath: string;
   sourcePath: string;
-  /** Source file mtime in ms at the time we checked. */
   sourceMtime: number;
+  mirrorMtime: number;
 }
 
 function collectMirrorFiles(mirrorDir: string, rootDir: string): MirrorEntry[] {
@@ -120,8 +120,12 @@ function collectMirrorFiles(mirrorDir: string, rootDir: string): MirrorEntry[] {
         } else if (name.endsWith(".md")) {
           const sourcePath = resolveSourcePath(full, rootDir);
           if (!sourcePath || !fileExists(sourcePath)) continue;
-          const sourceMtime = statSync(sourcePath).mtimeMs;
-          results.push({ mirrorPath: full, sourcePath, sourceMtime });
+          results.push({
+            mirrorPath: full,
+            sourcePath,
+            sourceMtime: statSync(sourcePath).mtimeMs,
+            mirrorMtime: stat.mtimeMs,
+          });
         }
       } catch {
         continue;
@@ -145,76 +149,138 @@ function resolveSourcePath(mirrorPath: string, rootDir: string): string | null {
   const match = content.match(/^---[\s\S]*?^path:\s*(.+)$/m);
   if (!match) return null;
 
-  const relPath = match[1].trim();
-  return join(rootDir, relPath);
+  return join(rootDir, match[1].trim());
 }
 
 // ---------------------------------------------------------------------------
-// Staleness detection
+// Tag collection — scan md_db for all tags currently in use
 // ---------------------------------------------------------------------------
 
-/**
- * A mirror needs a (re-)summary when:
- *   - it has no ## Summary section at all, or
- *   - its embedded summary_source_mtime is older than the source file's mtime
- */
-function needsSummary(entry: MirrorEntry): boolean {
-  let content: string;
-  try {
-    content = readText(entry.mirrorPath);
-  } catch {
-    return true;
+function collectExistingTags(mdDbPath: string): string[] {
+  const tagCounts = new Map<string, number>();
+
+  function walk(dir: string): void {
+    let entries: string[];
+    try {
+      entries = listDir(dir);
+    } catch {
+      return;
+    }
+
+    for (const name of entries) {
+      const full = join(dir, name);
+      try {
+        const stat = statSync(full);
+        if (stat.isDirectory()) {
+          walk(full);
+        } else if (name.endsWith(".md")) {
+          const content = readText(full);
+          extractTagsFromContent(content, tagCounts);
+        }
+      } catch {
+        continue;
+      }
+    }
   }
 
-  if (!content.includes(SUMMARY_HEADER)) return true;
+  walk(mdDbPath);
 
-  const mtimeMatch = content.match(MTIME_COMMENT_RE);
-  if (!mtimeMatch) return true; // summary exists but no mtime recorded — treat as stale
+  // Sort by frequency descending, then alphabetically
+  return [...tagCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([tag]) => tag);
+}
 
-  const recordedMtime = Number(mtimeMatch[1]);
-  return entry.sourceMtime > recordedMtime;
+function extractTagsFromContent(content: string, counts: Map<string, number>): void {
+  // Match YAML dash-list items under a `tags:` key in frontmatter
+  const fmMatch = content.match(/^---[\s\S]*?^tags:\s*\n((?:\s+-\s+.+\n?)*)/m);
+  if (!fmMatch) return;
+
+  const lines = fmMatch[1].split("\n");
+  for (const line of lines) {
+    const m = line.match(/^\s+-\s+(.+)/);
+    if (m) {
+      const tag = m[1].trim().toLowerCase();
+      if (tag && tag !== "codeunit") {
+        counts.set(tag, (counts.get(tag) ?? 0) + 1);
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Summary write (replace, not append)
+// Staleness — pure mtime comparison
 // ---------------------------------------------------------------------------
+
+function isStale(entry: MirrorEntry): boolean {
+  return entry.sourceMtime > entry.mirrorMtime;
+}
+
+// ---------------------------------------------------------------------------
+// Write summary + update tags in frontmatter
+// ---------------------------------------------------------------------------
+
+interface SummarizeResult {
+  summary: string;
+  tags: string[];
+}
+
+function writeResult(mirrorPath: string, existingContent: string, summary: string, tags: string[]): void {
+  // Update tags in frontmatter
+  let content = updateFrontmatterTags(existingContent, tags);
+  // Write/replace summary section
+  content = stripSummarySection(content).trimEnd() + `\n\n${SUMMARY_HEADER}\n\n${summary}\n`;
+  writeText(mirrorPath, content);
+}
 
 /**
- * Write (or replace) the ## Summary section in a mirror file.
- * Embeds the source mtime so future runs can detect staleness.
+ * Replace the `tags:` block in frontmatter with the new tag list.
+ * Always keeps `codeUnit` as the first tag.
  */
-function writeSummary(mirrorPath: string, existingContent: string, summary: string, sourceMtime: number): void {
-  // Strip any existing ## Summary section (everything from "## Summary" to EOF
-  // or to the next ## heading at the same level)
-  const stripped = stripSummarySection(existingContent);
-  const mtimeComment = `<!-- summary_source_mtime: ${Math.floor(sourceMtime)} -->`;
-  const newContent = stripped.trimEnd() + `\n\n${SUMMARY_HEADER}\n\n${mtimeComment}\n\n${summary}\n`;
-  writeText(mirrorPath, newContent);
+function updateFrontmatterTags(content: string, newTags: string[]): string {
+  // Ensure codeUnit is always present and first
+  const allTags = ["codeUnit", ...newTags.filter((t) => t.toLowerCase() !== "codeunit")];
+
+  const tagBlock = "tags:\n" + allTags.map((t) => `  - ${t}`).join("\n");
+
+  // Replace existing tags block in frontmatter
+  // Match from `tags:` through all following `  - ...` lines
+  const tagsBlockRe = /^tags:\s*\n(?:\s+-\s+.+\n?)*/m;
+  if (tagsBlockRe.test(content)) {
+    return content.replace(tagsBlockRe, tagBlock + "\n");
+  }
+
+  // No existing tags — insert before closing `---`
+  const closeIdx = content.indexOf("\n---", 4);
+  if (closeIdx !== -1) {
+    return content.slice(0, closeIdx) + "\n" + tagBlock + content.slice(closeIdx);
+  }
+
+  return content;
 }
 
-/** Remove the ## Summary section from content, if present. */
 function stripSummarySection(content: string): string {
   const idx = content.indexOf("\n## Summary");
   if (idx === -1) return content;
-  // Keep everything before the summary header
   return content.slice(0, idx);
 }
 
 // ---------------------------------------------------------------------------
-// Ollama call
+// LLM call
 // ---------------------------------------------------------------------------
 
-async function callOllama(
+async function summarize(
   sourceContent: string,
   mirrorContent: string,
-  directoryTree: string,
+  existingTags: string[],
   systemPrompt?: string,
   providerOverride?: { model?: string; baseUrl?: string },
-): Promise<string | null> {
+): Promise<SummarizeResult | null> {
+  const tagList = existingTags.length > 0
+    ? existingTags.slice(0, 50).join(", ")
+    : "(none yet)";
+
   const userPrompt = [
-    "## Project Directory Tree",
-    directoryTree,
-    "",
     "## Mirror Note (imports, exports, call graph)",
     mirrorContent.slice(0, 3000),
     "",
@@ -222,6 +288,13 @@ async function callOllama(
     "```",
     sourceContent.slice(0, 6000),
     "```",
+    "",
+    "## Existing Tags in Knowledge Base",
+    tagList,
+    "",
+    "Respond in exactly this format:",
+    "TAGS: tag1, tag2, tag3",
+    "SUMMARY: Your 2-3 sentence summary here.",
   ].join("\n");
 
   try {
@@ -238,8 +311,49 @@ async function callOllama(
       },
     );
 
-    return result.content.trim() || null;
-  } catch {
+    return parseResponse(result.content);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[summarize-code] LLM call failed: ${msg}`);
     return null;
   }
+}
+
+/**
+ * Parse the LLM response into summary + tags.
+ * Expected format:
+ *   TAGS: tag1, tag2, tag3
+ *   SUMMARY: The summary text...
+ *
+ * Falls back gracefully: if no TAGS line, returns empty tags.
+ * If no SUMMARY line, treats entire response as summary.
+ */
+function parseResponse(raw: string): SummarizeResult | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  let tags: string[] = [];
+  let summary = trimmed;
+
+  // Extract TAGS line
+  const tagsMatch = trimmed.match(/^TAGS:\s*(.+)$/mi);
+  if (tagsMatch) {
+    tags = tagsMatch[1]
+      .split(",")
+      .map((t) => t.trim().toLowerCase().replace(/\s+/g, "_"))
+      .filter((t) => t.length > 0 && t !== "codeunit");
+  }
+
+  // Extract SUMMARY line (everything after "SUMMARY:" to end)
+  const summaryMatch = trimmed.match(/^SUMMARY:\s*([\s\S]+)$/mi);
+  if (summaryMatch) {
+    summary = summaryMatch[1].trim();
+  } else if (tagsMatch) {
+    // Remove the TAGS line from the response and use the rest
+    summary = trimmed.replace(/^TAGS:\s*.+$/mi, "").trim();
+  }
+
+  if (!summary) return null;
+
+  return { summary, tags };
 }

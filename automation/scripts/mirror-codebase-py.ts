@@ -23,7 +23,7 @@
  * All structural info is placed in the NOTE BODY, not frontmatter, because
  * ObsidianReader strips frontmatter from embedded text — agents only see body
  * during RAG retrieval. Wikilinks in the body become graph edges.
- *
+ * 
  * Usage:
  *   npx tsx scripts/mirror-codebase-py.ts [options]
  *
@@ -600,12 +600,10 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string): 
   // ── Frontmatter ───────────────────────────────────────────────────────────
   lines.push(
     "---",
-    "note_type: codeUnit",
     "type: codeUnit",
     `path: ${file.relativePath}`,
     "language: py",
     "generated: true",
-    `last_verified: ${today}`,
     "tags:",
     "  - codeUnit",
     "---",

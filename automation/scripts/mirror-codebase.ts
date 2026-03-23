@@ -537,15 +537,18 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string): 
   const filename = path.basename(file.relativePath);
 
   // ── Frontmatter (minimal — body carries everything for RAG embedding) ──────
-  const tags: string[] = ["codeUnit"];
+  // Only fields the context engine actually reads:
+  //   type       → infer_note_type() → graph label
+  //   tags       → extract_tags() → tag boosting in retrieval
+  //   path       → summarizer source lookup
+  //   language   → mirror cleanup scoping
+  //   generated  → mirror cleanup safety check
   lines.push(
     "---",
-    "note_type: codeUnit",
     "type: codeUnit",
     `path: ${file.relativePath}`,
     "language: ts",
     "generated: true",
-    `last_verified: ${today}`,
     "tags:",
     "  - codeUnit",
     "---",

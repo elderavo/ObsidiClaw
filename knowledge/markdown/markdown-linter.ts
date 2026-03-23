@@ -2,14 +2,17 @@
  * Markdown linter / normalizer for md_db.
  *
  * Responsibilities:
- *   - Ensure required frontmatter fields (id/uuid, type, created, updated, tags, md_db)
  *   - Canonicalize frontmatter formatting (YAML dash lists via buildFrontmatter)
+ *   - Normalize tag lists (lowercase, deduplicate)
  *   - Normalize markdown body whitespace (line endings, trailing spaces, final newline)
  *   - Validate wikilinks (report-only)
  *   - Support single-file linting for watcher-driven workflows
+ *
+ * The linter preserves all existing frontmatter fields as-is. It does NOT
+ * inject id/uuid/created/updated/md_db — those are not used by the context
+ * engine and add noise. Type inference only runs when `type` is missing.
  */
 
-import { randomUUID } from "crypto";
 import { statSync } from "fs";
 import { basename, extname, join, relative } from "path";
 
@@ -24,7 +27,6 @@ import { readText, writeText, listDir } from "../../core/os/fs.js";
 
 export type LintIssueType =
   | "missing_field"
-  | "invalid_uuid"
   | "format_inconsistency"
   | "broken_link"
   | "malformed_frontmatter";
@@ -147,7 +149,7 @@ function normalizeFile(
   frontmatter: Record<string, unknown>,
   body: string,
   relativePath: string,
-  stats: ReturnType<typeof statSync> | undefined,
+  _stats: ReturnType<typeof statSync> | undefined,
   allNotePaths: Set<string>,
 ): {
   normalizedFrontmatter: Record<string, unknown>;
@@ -155,49 +157,27 @@ function normalizeFile(
   issues: LintIssue[];
 } {
   const issues: LintIssue[] = [];
+
+  // Start with all existing fields preserved as-is
+  const normalizedFrontmatter: Record<string, unknown> = { ...frontmatter };
+
+  // Normalize type if present, infer from path if missing
   const noteType = normalizeType(frontmatter["type"], relativePath);
-  const normalizedTags = normalizeTags(frontmatter["tags"]);
-
-  // UUID / ID handling
-  const existingId = pickUuid(frontmatter["uuid"] ?? frontmatter["id"]);
-  let noteUuid = existingId.value;
-  if (!existingId.value) {
-    noteUuid = randomUUID();
-    issues.push({
-      path: relativePath,
-      type: "missing_field",
-      description: "Missing id/uuid — generated new UUID",
-      autoFixed: true,
-    });
-  } else if (!existingId.valid) {
-    noteUuid = randomUUID();
-    issues.push({
-      path: relativePath,
-      type: "invalid_uuid",
-      description: "Invalid id/uuid — replaced with new UUID",
-      autoFixed: true,
-    });
+  if (!frontmatter["type"] || frontmatter["type"] !== noteType) {
+    normalizedFrontmatter["type"] = noteType;
+    if (!frontmatter["type"]) {
+      issues.push({
+        path: relativePath,
+        type: "missing_field",
+        description: `Missing type — inferred "${noteType}" from path`,
+        autoFixed: true,
+      });
+    }
   }
 
-  // created/updated
-  const created = normalizeTimestamp(frontmatter["created"], stats?.birthtime ?? stats?.mtime);
-  if (!frontmatter["created"] || isPlaceholder(frontmatter["created"])) {
-    issues.push({
-      path: relativePath,
-      type: "missing_field",
-      description: "Missing created timestamp — filled from file birth/mtime or now",
-      autoFixed: true,
-    });
-  }
-
-  let updated = normalizeTimestamp(frontmatter["updated"], new Date());
-  if (!frontmatter["updated"] || isPlaceholder(frontmatter["updated"])) {
-    issues.push({
-      path: relativePath,
-      type: "missing_field",
-      description: "Missing updated timestamp — set to now",
-      autoFixed: true,
-    });
+  // Normalize tags (lowercase, deduplicate) if present
+  if (frontmatter["tags"]) {
+    normalizedFrontmatter["tags"] = normalizeTags(frontmatter["tags"]);
   }
 
   // Markdown body normalization
@@ -216,50 +196,6 @@ function normalizeFile(
       });
     }
   }
-
-  // Preserve any extra frontmatter fields not part of the canonical set
-  const canonicalKeys = new Set([
-    "id",
-    "uuid",
-    "type",
-    "created",
-    "updated",
-    "tags",
-    "md_db",
-  ]);
-  const extras: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(frontmatter)) {
-    if (!canonicalKeys.has(key)) {
-      extras[key] = value;
-    }
-  }
-
-  // If we made any body or frontmatter normalization, update `updated` timestamp
-  const frontmatterChanged =
-    !frontmatter["id"] ||
-    !frontmatter["uuid"] ||
-    !frontmatter["created"] ||
-    isPlaceholder(frontmatter["created"]) ||
-    !frontmatter["updated"] ||
-    isPlaceholder(frontmatter["updated"]) ||
-    !frontmatter["tags"] ||
-    isPlaceholder(frontmatter["tags"]) ||
-    frontmatter["type"] !== noteType;
-
-  if (frontmatterChanged || normalizedBody !== body) {
-    updated = toIsoTimestamp(new Date());
-  }
-
-  const normalizedFrontmatter: Record<string, unknown> = {
-    id: noteUuid,
-    uuid: noteUuid,
-    type: noteType,
-    created,
-    updated,
-    tags: normalizedTags,
-    md_db: true,
-    ...extras,
-  };
 
   return { normalizedFrontmatter, normalizedBody, issues };
 }
@@ -313,11 +249,9 @@ function collectMdFiles(dir: string, rootDir: string, ignoredDirs: Set<string>):
 }
 
 function normalizeType(raw: unknown, relPath: string): string {
-  if (typeof raw === "string") {
-    const cleaned = stripParens(raw).trim();
-    if (cleaned) return cleaned;
+  if (typeof raw === "string" && raw.trim()) {
+    return raw.trim();
   }
-
   return inferTypeFromPath(relPath);
 }
 
@@ -335,59 +269,18 @@ function normalizeTags(raw: unknown): string[] {
 
   if (Array.isArray(raw)) {
     for (const item of raw) {
-      const cleaned = stripParens(String(item)).trim();
-      if (cleaned) tags.push(cleaned);
+      const t = String(item).trim();
+      if (t) tags.push(t);
     }
   } else if (typeof raw === "string") {
-    const cleaned = stripParens(raw).trim();
-    if (cleaned && !isPlaceholder(cleaned)) {
-      const parts = cleaned.includes(",") ? cleaned.split(",") : cleaned.split(/\s+/);
-      for (const part of parts) {
-        const t = part.trim();
-        if (t) tags.push(t);
-      }
+    const parts = raw.includes(",") ? raw.split(",") : raw.split(/\s+/);
+    for (const part of parts) {
+      const t = part.trim();
+      if (t) tags.push(t);
     }
   }
 
   return normalizeTagList(tags);
-}
-
-function pickUuid(raw: unknown): { value: string | null; valid: boolean } {
-  if (typeof raw !== "string") return { value: null, valid: false };
-  const cleaned = stripParens(raw).trim();
-  if (!cleaned) return { value: null, valid: false };
-  const valid = isUuid(cleaned);
-  return { value: cleaned, valid };
-}
-
-function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
-}
-
-function normalizeTimestamp(raw: unknown, fallbackDate?: Date): string {
-  if (typeof raw === "string" && raw.trim() && !isPlaceholder(raw)) {
-    return stripParens(raw).trim();
-  }
-  return toIsoTimestamp(fallbackDate ?? new Date());
-}
-
-function toIsoTimestamp(date: Date): string {
-  return date.toISOString();
-}
-
-function isPlaceholder(value: unknown): boolean {
-  if (typeof value !== "string") return false;
-  const trimmed = value.trim();
-  if (!trimmed) return true;
-  if (trimmed.startsWith("(") && trimmed.endsWith(")")) return true;
-  if (/YYYY/i.test(trimmed)) return true;
-  if (/UUID/i.test(trimmed)) return true;
-  if (/tag1|tag2/i.test(trimmed)) return true;
-  return false;
-}
-
-function stripParens(value: string): string {
-  return value.replace(/^\(\s*/, "").replace(/\s*\)$/, "");
 }
 
 function normalizeBody(body: string): string {
