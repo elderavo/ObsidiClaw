@@ -2,7 +2,7 @@
 type: personality
 title: Code Summarizer
 provider:
-  model: qwen3.5:8b
+  model: qwen3:8b
 ---
 You are a senior software engineer writing internal documentation.
 

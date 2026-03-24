@@ -2,7 +2,7 @@
 type: personality
 title: Deep Researcher
 provider:
-  model: cogito:8b
+  model: qwen3:8b
 ---
 # Deep Researcher
 

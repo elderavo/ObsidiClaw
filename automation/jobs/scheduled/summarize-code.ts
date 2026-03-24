@@ -237,6 +237,7 @@ function writeResult(mirrorPath: string, existingContent: string, summary: strin
  * Replace the `tags:` block in frontmatter with the new tag list.
  * Always keeps `codeUnit` as the first tag.
  */
+// TODO: Let the linter handle this?
 function updateFrontmatterTags(content: string, newTags: string[]): string {
   // Ensure codeUnit is always present and first
   const allTags = ["codeUnit", ...newTags.filter((t) => t.toLowerCase() !== "codeunit")];
@@ -295,6 +296,7 @@ async function summarize(
     "Respond in exactly this format:",
     "TAGS: tag1, tag2, tag3",
     "SUMMARY: Your 2-3 sentence summary here.",
+    // TODO - the intent is to have all prompts live in agents/prompts such that they LIVE there - editing them there causes the actual call to be different. 
   ].join("\n");
 
   try {
