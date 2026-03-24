@@ -129,12 +129,23 @@ export function createObsidiClawExtension(
 
       mcpServer = createContextEngineMcpServer({
         engine: stack.engine,
+        pruneStorage: stack.noteMetrics.pruneStorage,
         onContextBuilt: (pkg) => {
+          const noteHits = pkg.retrievedNotes.map((n) => ({
+            noteId: n.noteId,
+            score: n.score,
+            depth: n.depth ?? 0,
+            source: n.retrievalSource,
+            tier: n.tier,
+            noteType: n.type,
+            symbolKind: n.symbolKind,
+          }));
+          const ts = Date.now();
           stack!.logger.logEvent({
             type: "context_retrieved",
             sessionId,
             runId: currentRunId,
-            timestamp: Date.now(),
+            timestamp: ts,
             query: pkg.query,
             seedCount: pkg.seedNoteIds?.length ?? 0,
             expandedCount: pkg.expandedNoteIds?.length ?? 0,
@@ -145,13 +156,22 @@ export function createObsidiClawExtension(
             estimatedTokens: pkg.estimatedTokens,
             reviewMs: pkg.reviewResult?.reviewMs,
             reviewSkipped: pkg.reviewResult?.skipped,
-            noteHits: pkg.retrievedNotes.map((n) => ({
-              noteId: n.noteId,
-              score: n.score,
-              depth: n.depth ?? 0,
-              source: n.retrievalSource,
-            })),
+            noteHits,
           } as RunEvent);
+          stack!.noteMetrics.logRetrieval({
+            sessionId,
+            runId: currentRunId,
+            timestamp: ts,
+            query: pkg.query,
+            seedCount: pkg.seedNoteIds?.length ?? 0,
+            expandedCount: pkg.expandedNoteIds?.length ?? 0,
+            toolCount: pkg.suggestedTools.length,
+            retrievalMs: pkg.retrievalMs,
+            rawChars: pkg.rawChars,
+            strippedChars: pkg.strippedChars,
+            estimatedTokens: pkg.estimatedTokens,
+            noteHits,
+          });
         },
         onSubagentPrepared: (pkg) => {
           stack!.logger.logEvent({
@@ -167,16 +187,26 @@ export function createObsidiClawExtension(
           } as RunEvent);
         },
         onContextRated: (rating) => {
+          const ts = Date.now();
           stack!.logger.logEvent({
             type: "context_rated",
             sessionId,
             runId: currentRunId,
-            timestamp: Date.now(),
+            timestamp: ts,
             query: rating.query,
             score: rating.score,
             missing: rating.missing,
             helpful: rating.helpful,
           } as RunEvent);
+          stack!.noteMetrics.logRating({
+            sessionId,
+            runId: currentRunId,
+            timestamp: ts,
+            query: rating.query,
+            score: rating.score,
+            missing: rating.missing,
+            helpful: rating.helpful,
+          });
         },
       });
     }

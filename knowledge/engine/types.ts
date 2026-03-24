@@ -6,7 +6,7 @@
 // Note types
 // ---------------------------------------------------------------------------
 
-export type NoteType = "tool" | "concept" | "index" | "codebase" | "codeUnit";
+export type NoteType = "tool" | "concept" | "index" | "codebase" | "codeUnit" | "codeSymbol" | "codeModule";
 
 // ---------------------------------------------------------------------------
 // RetrievedNote — a note that has entered the result set
@@ -48,6 +48,12 @@ export interface RetrievedNote {
    * 1 = one hop from a seed, etc.
    */
   depth?: number;
+
+  /** Note tier: '1' (symbol), '2' (file), '3' (module). Undefined for non-code notes. */
+  tier?: string;
+
+  /** Symbol kind for tier-1 notes: 'function', 'class', 'interface', 'type', 'const'. */
+  symbolKind?: string;
 }
 
 // ---------------------------------------------------------------------------

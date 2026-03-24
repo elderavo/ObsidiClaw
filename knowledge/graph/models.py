@@ -9,7 +9,11 @@ from typing import Literal, Optional
 # Note types
 # ---------------------------------------------------------------------------
 
-NoteType = Literal["tool", "concept", "index", "codebase", "codeUnit"]
+NoteType = Literal["tool", "concept", "index", "codebase", "codeUnit", "codeSymbol", "codeModule"]
+
+# Tier label for the three-tier code note system
+# "" = non-code note (concept/tool), "1" = symbol, "2" = file, "3" = module
+NoteTier = Literal["", "1", "2", "3"]
 
 # ---------------------------------------------------------------------------
 # Parsed note (output of markdown ingestion)
@@ -31,6 +35,11 @@ class ParsedNote:
     time_created: Optional[str] = None
     last_edited: Optional[str] = None
     tags: list[str] = field(default_factory=list)
+    # Three-tier fields (populated for code notes; empty string for concept/tool notes)
+    tier: str = ""           # "1" | "2" | "3" | ""
+    symbol_kind: str = ""    # "function" | "class" | "type" | "interface" | "const" | ""
+    parent_file: str = ""    # tier-1 only: wikilink path to parent tier-2 note
+    parent_module: str = ""  # tier-1/2: wikilink path to parent tier-3 note
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +61,7 @@ class RetrievedNote:
     tags: Optional[list[str]] = None
     linked_from: Optional[list[str]] = None
     depth: Optional[int] = None  # 0 = seed, 1+ = graph expansion
+    tier: str = ""               # "1" | "2" | "3" | ""
 
 
 # ---------------------------------------------------------------------------

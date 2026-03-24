@@ -1,14 +1,33 @@
-"""ObsidiClawRetriever — hybrid retrieval with vector seeds + graph expansion.
+"""ObsidiClawRetriever — hybrid retrieval with vector seeds + tier-aware graph expansion.
 
 Replaces the TS hybrid-retrieval.ts:
   - VectorStoreIndex.as_retriever() for semantic vector search (seeds)
-  - SimplePropertyGraphStore.get_triplets() for depth-1 graph expansion (neighbors)
+  - SimplePropertyGraphStore.get_triplets() for depth-1 graph expansion
+  - Tier-aware score multipliers (vs. flat 0.7 decay)
   - Tag boosting + index note filtering
+
+Tier-aware expansion heuristics
+────────────────────────────────
+Going UP (always):
+  DEFINED_IN   tier-1 → tier-2   0.80×   symbol's parent file
+  BELONGS_TO   tier-2 → tier-3   0.50×   file's parent module
+
+Going DOWN (selective — only when seed score ≥ DOWN_SEED_THRESHOLD):
+  CONTAINS_SYMBOL  tier-2 → tier-1   0.90×   symbols inside a file
+  CONTAINS         tier-3 → tier-2   0.85×   files inside a module
+
+Going SIDEWAYS (conditional — only when neighbor name overlaps query):
+  CALLS    tier-1 → tier-1   0.60×
+  IMPORTS  tier-2 → tier-2   0.60×
+
+Generic (non-code notes):
+  LINKS_TO  any   0.70×
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 from llama_index.core import VectorStoreIndex
@@ -21,12 +40,49 @@ from .models import ParsedNote, RetrievedNote
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Constants (match TS behaviour)
+# Constants
 # ---------------------------------------------------------------------------
 
-NEIGHBOR_SCORE_DECAY = 0.7  # expanded score = parent score × 0.7
-TAG_BOOST_PER_TAG = 0.10  # +10% per matching tag
-TAG_BOOST_MAX = 0.30  # max +30%
+TAG_BOOST_PER_TAG = 0.10   # +10% per matching tag
+TAG_BOOST_MAX = 0.30       # cap at +30%
+
+# Score multipliers for each edge type
+_EDGE_MULTIPLIER: dict[str, float] = {
+    "DEFINED_IN": 0.80,         # up: symbol → file
+    "BELONGS_TO": 0.50,         # up: file → module
+    "CONTAINS_SYMBOL": 0.90,    # down: file → symbol
+    "CONTAINS": 0.85,           # down: module → file
+    "CALLS": 0.60,              # sideways: symbol → symbol
+    "IMPORTS": 0.60,            # sideways: file → file
+    "LINKS_TO": 0.70,           # generic non-code wikilink
+}
+
+# Only follow downward edges when the seed has a strong enough score
+DOWN_SEED_THRESHOLD = 0.60
+
+# Only follow CALLS/IMPORTS when neighbor name overlaps the query
+SIDEWAYS_REQUIRE_QUERY_OVERLAP = True
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _name_tokens(note: ParsedNote) -> set[str]:
+    """Normalized tokens from a note's title and path stem."""
+    stem = Path(note.path).stem
+    tokens: set[str] = set()
+    for word in (note.title + " " + stem).split():
+        t = normalize_token(word)
+        if t:
+            tokens.add(t)
+    return tokens
+
+
+def _overlaps_query(note: ParsedNote, query_tokens: set[str]) -> bool:
+    """True if any name token appears in the query."""
+    return bool(_name_tokens(note) & query_tokens)
 
 
 # ---------------------------------------------------------------------------
@@ -35,10 +91,11 @@ TAG_BOOST_MAX = 0.30  # max +30%
 
 
 class ObsidiClawRetriever:
-    """Hybrid retrieval: vector seeds + graph-expanded neighbors.
+    """Hybrid retrieval: vector seeds + tier-aware graph-expanded neighbors.
 
     1. VectorStoreIndex.as_retriever() for top-k semantic seeds
-    2. SimplePropertyGraphStore.get_triplets() for depth-1 graph neighbors
+    2. SimplePropertyGraphStore.get_triplets() for depth-1 expansion
+       with per-edge-type score multipliers
     3. Tag boosting applied to both
     4. Index notes filtered from both
     """
@@ -60,8 +117,7 @@ class ObsidiClawRetriever:
     def retrieve(self, query: str) -> tuple[list[RetrievedNote], list[RetrievedNote]]:
         """Run hybrid retrieval.
 
-        Returns (seed_notes, expanded_notes) — both lists already filtered
-        and scored.
+        Returns (seed_notes, expanded_notes) — both lists filtered and scored.
         """
         query_tokens = set(
             normalize_token(w) for w in query.lower().split() if normalize_token(w)
@@ -83,7 +139,6 @@ class ObsidiClawRetriever:
             file_path = str(metadata.get("file_path", note_id))
             note_type_str = str(metadata.get("note_type", "concept"))
 
-            # Skip index notes
             if note_type_str == "index":
                 continue
 
@@ -91,6 +146,7 @@ class ObsidiClawRetriever:
             tags = parsed.tags if parsed else []
             tool_id = parsed.tool_id if parsed else metadata.get("tool_id")
             content = parsed.body if parsed else getattr(node, "text", "")
+            tier = parsed.tier if parsed else ""
 
             boosted_score = self._apply_tag_boost(score, tags, query_tokens)
 
@@ -106,68 +162,76 @@ class ObsidiClawRetriever:
                     retrieval_source="vector",
                     linked_from=None,
                     depth=0,
+                    tier=tier,
                 )
             )
             seed_ids.add(file_path)
             seed_scores[file_path] = boosted_score
 
-        # ── Step 2: Graph expansion (depth-1 neighbors) ──────────────────
+        # ── Step 2: Tier-aware graph expansion ────────────────────────────
         expanded: list[RetrievedNote] = []
         expanded_ids: set[str] = set()
 
         if self.graph_store:
             for seed_id in list(seed_ids):
+                seed_score = seed_scores.get(seed_id, 0.5)
+                seed_parsed = self.parsed_notes.get(seed_id)
+
                 try:
                     triplets = self.graph_store.get_triplets(entity_names=[seed_id])
                 except Exception as exc:
                     log.warning("get_triplets failed for %s: %s", seed_id, exc)
                     continue
 
-                for source_node, _relation, target_node in triplets:
+                for source_node, relation, target_node in triplets:
                     source_name = getattr(source_node, "name", "")
                     target_name = getattr(target_node, "name", "")
+                    edge_label = getattr(relation, "label", "LINKS_TO")
 
-                    # Determine the neighbor (the other end of the relation)
-                    if source_name == seed_id:
-                        neighbor_id = target_name
-                    else:
-                        neighbor_id = source_name
+                    is_outgoing = source_name == seed_id
+                    neighbor_id = target_name if is_outgoing else source_name
 
-                    # Skip if already a seed or already expanded
-                    if neighbor_id in seed_ids or neighbor_id in expanded_ids:
+                    if not neighbor_id or neighbor_id in seed_ids or neighbor_id in expanded_ids:
                         continue
 
-                    parsed = self.parsed_notes.get(neighbor_id)
-                    if not parsed:
+                    neighbor_parsed = self.parsed_notes.get(neighbor_id)
+                    if not neighbor_parsed or neighbor_parsed.note_type == "index":
                         continue
 
-                    if parsed.note_type == "index":
+                    # --- Tier-aware edge filtering ---
+                    skip = self._should_skip_edge(
+                        edge_label=edge_label,
+                        is_outgoing=is_outgoing,
+                        seed_score=seed_score,
+                        neighbor_parsed=neighbor_parsed,
+                        query_tokens=query_tokens,
+                    )
+                    if skip:
                         continue
 
-                    # Neighbor score = parent score × decay
-                    parent_score = seed_scores.get(seed_id, 0.5)
-                    neighbor_score = parent_score * NEIGHBOR_SCORE_DECAY
+                    multiplier = _EDGE_MULTIPLIER.get(edge_label, 0.70)
+                    neighbor_score = seed_score * multiplier
                     boosted = self._apply_tag_boost(
-                        neighbor_score, parsed.tags, query_tokens
+                        neighbor_score, neighbor_parsed.tags, query_tokens
                     )
 
                     expanded.append(
                         RetrievedNote(
                             note_id=neighbor_id,
                             path=neighbor_id,
-                            content=parsed.body,
+                            content=neighbor_parsed.body,
                             score=boosted,
-                            type=parsed.note_type,  # type: ignore[arg-type]
-                            tool_id=parsed.tool_id,
-                            tags=parsed.tags,
+                            type=neighbor_parsed.note_type,  # type: ignore[arg-type]
+                            tool_id=neighbor_parsed.tool_id,
+                            tags=neighbor_parsed.tags,
                             retrieval_source="graph",
                             linked_from=[seed_id],
                             depth=1,
+                            tier=neighbor_parsed.tier,
                         )
                     )
                     expanded_ids.add(neighbor_id)
 
-        # Sort by score descending
         seeds.sort(key=lambda n: n.score, reverse=True)
         expanded.sort(key=lambda n: n.score, reverse=True)
 
@@ -181,13 +245,36 @@ class ObsidiClawRetriever:
         return seeds, expanded
 
     @staticmethod
+    def _should_skip_edge(
+        edge_label: str,
+        is_outgoing: bool,
+        seed_score: float,
+        neighbor_parsed: ParsedNote,
+        query_tokens: set[str],
+    ) -> bool:
+        """Return True if this expansion edge should be skipped."""
+        # Downward edges: only follow when seed is strong
+        if edge_label in ("CONTAINS_SYMBOL", "CONTAINS"):
+            if not is_outgoing:
+                # Incoming CONTAINS_SYMBOL/CONTAINS means neighbor is the container — that's "going up", allow
+                return False
+            if seed_score < DOWN_SEED_THRESHOLD:
+                return True
+
+        # Sideways edges: only follow when neighbor name overlaps query
+        if edge_label in ("CALLS", "IMPORTS") and SIDEWAYS_REQUIRE_QUERY_OVERLAP:
+            if not _overlaps_query(neighbor_parsed, query_tokens):
+                return True
+
+        return False
+
+    @staticmethod
     def _apply_tag_boost(
         score: float, note_tags: list[str], query_tokens: set[str]
     ) -> float:
         """Boost score by +10% per matching tag, capped at +30%."""
         if not note_tags or not query_tokens:
             return score
-
         matching = sum(1 for t in note_tags if t in query_tokens)
         boost = min(matching * TAG_BOOST_PER_TAG, TAG_BOOST_MAX)
         return score * (1.0 + boost)

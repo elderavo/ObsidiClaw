@@ -16,6 +16,7 @@
  */
 
 import { RunLogger } from "../../logger/run-logger.js";
+import type { NoteMetricsLogger } from "../../logger/note-metrics.js";
 import { OrchestratorSession } from "../orchestrator/session.js";
 import { loadPersonality } from "./personality-loader.js";
 import { extractMessageText } from "../../core/text-utils.js";
@@ -36,6 +37,9 @@ export interface SubagentRunnerConfig {
   /** ContextEngine for RAG. Optional — runs without RAG if omitted. */
   contextEngine?: ContextEngine;
 
+  /** NoteMetricsLogger for retrieval analytics. Optional. */
+  noteMetrics?: NoteMetricsLogger;
+
   /** Path to personalities directory. Default: shared/agents/personalities/ */
   personalitiesDir?: string;
 
@@ -49,6 +53,7 @@ export class SubagentRunner {
   private readonly config: {
     dbPath: string;
     contextEngine?: ContextEngine;
+    noteMetrics?: NoteMetricsLogger;
     personalitiesDir: string;
   };
 
@@ -56,6 +61,7 @@ export class SubagentRunner {
     this.config = {
       dbPath: config.dbPath,
       contextEngine: config.contextEngine,
+      noteMetrics: config.noteMetrics,
       personalitiesDir: config.personalitiesDir ?? resolvePaths().personalitiesDir,
     };
   }
@@ -109,6 +115,7 @@ export class SubagentRunner {
         parentRunId: spec.parentRunId,
         parentSessionId: spec.parentSessionId,
       },
+      this.config.noteMetrics,
     );
 
     // ── Run with timeout + cancellation ────────────────────────────────

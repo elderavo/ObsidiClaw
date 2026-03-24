@@ -9,6 +9,7 @@
  */
 
 import type { RunLogger } from "../../logger/index.js";
+import type { NoteMetricsLogger } from "../../logger/note-metrics.js";
 import type { ContextEngine } from "../../knowledge/engine/index.js";
 import type { RunConfig, RunResult, SessionConfig } from "./types.js";
 import { OrchestratorSession } from "./session.js";
@@ -17,6 +18,7 @@ export class Orchestrator {
   constructor(
     private readonly logger: RunLogger,
     private readonly contextEngine?: ContextEngine,
+    private readonly noteMetrics?: NoteMetricsLogger,
   ) {}
 
   /**
@@ -24,7 +26,7 @@ export class Orchestrator {
    * First prompt triggers context injection; subsequent prompts go straight to pi.
    */
   createSession(config: SessionConfig = {}): OrchestratorSession {
-    return new OrchestratorSession(this.logger, this.contextEngine, config);
+    return new OrchestratorSession(this.logger, this.contextEngine, config, this.noteMetrics);
   }
 
   /**

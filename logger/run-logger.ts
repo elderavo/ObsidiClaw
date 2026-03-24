@@ -14,6 +14,11 @@ export interface RunLoggerOptions {
    * Set via OBSIDI_CLAW_DEBUG=1 in run.ts.
    */
   debugDir?: string;
+  /**
+   * Called when a retrieve_context tool_result error event is logged.
+   * Used to route retrieval errors to NoteMetricsLogger.
+   */
+  onRetrievalError?: (sessionId: string, runId: string | null, timestamp: number, errorPayload: string) => void;
 }
 
 /**
@@ -22,7 +27,7 @@ export interface RunLoggerOptions {
  * Schema:
  *   runs               — one row per prompt round-trip (run_id PK)
  *   trace              — one row per RunEvent (run_id FK, many per run)
- *   synthesis_metrics  — context build stats + retrieve_context errors (session_id/run_id FK)
+ *   (note_hits, synthesis_metrics, context_ratings moved to notes.db — see NoteMetricsLogger)
  *
  * Session-level events (session_start / session_end) have no run_id;
  * they are written to trace with run_id = NULL.
@@ -33,6 +38,7 @@ export interface RunLoggerOptions {
 export class RunLogger {
   private readonly db: Database.Database;
   private readonly debugDir: string | undefined;
+  private readonly onRetrievalError: RunLoggerOptions["onRetrievalError"];
   /** Track which session files have been created so we only mkdirSync once. */
   private readonly debugSessions = new Set<string>();
   private _traceEmitter: TraceEmitter | null = null;
@@ -42,6 +48,7 @@ export class RunLogger {
     const opts: RunLoggerOptions = typeof options === "string" ? { dbPath: options } : options;
     const dbPath = opts.dbPath;
     this.debugDir = opts.debugDir;
+    this.onRetrievalError = opts.onRetrievalError;
 
     ensureDir(dirname(dbPath));
     this.db = new Database(dbPath);
@@ -83,62 +90,10 @@ export class RunLogger {
         payload    TEXT    NOT NULL
       );
 
-      CREATE TABLE IF NOT EXISTS note_hits (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id   TEXT    NOT NULL,
-        run_id       TEXT,
-        timestamp    INTEGER NOT NULL,
-        note_id      TEXT    NOT NULL,
-        score        REAL    NOT NULL,
-        depth        INTEGER NOT NULL,
-        source       TEXT    NOT NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_note_hits_note    ON note_hits(note_id);
-      CREATE INDEX IF NOT EXISTS idx_note_hits_session ON note_hits(session_id);
-
-      CREATE TABLE IF NOT EXISTS synthesis_metrics (
-        id               INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id       TEXT    NOT NULL,
-        run_id           TEXT,
-        timestamp        INTEGER NOT NULL,
-        prompt_snippet   TEXT    NOT NULL,
-        seed_count       INTEGER NOT NULL,
-        expanded_count   INTEGER NOT NULL,
-        tool_count       INTEGER NOT NULL,
-        retrieval_ms     INTEGER NOT NULL,
-        raw_chars        INTEGER NOT NULL,
-        stripped_chars   INTEGER NOT NULL,
-        estimated_tokens INTEGER NOT NULL,
-        is_error         INTEGER NOT NULL DEFAULT 0,
-        error_type       TEXT,
-        error_message    TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS trace_run_id        ON trace(run_id);
-      CREATE INDEX IF NOT EXISTS synthesis_session   ON synthesis_metrics(session_id);
-
-      CREATE TABLE IF NOT EXISTS context_ratings (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id   TEXT    NOT NULL,
-        run_id       TEXT,
-        timestamp    INTEGER NOT NULL,
-        query        TEXT    NOT NULL,
-        score        INTEGER NOT NULL,
-        missing      TEXT    NOT NULL DEFAULT '',
-        helpful      TEXT    NOT NULL DEFAULT ''
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_context_ratings_session ON context_ratings(session_id);
-      CREATE INDEX IF NOT EXISTS idx_context_ratings_score   ON context_ratings(score);
+      CREATE INDEX IF NOT EXISTS trace_run_id ON trace(run_id);
     `);
 
     this._ensureRunSchema();
-    this._ensureSynthesisSchema();
-
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS synthesis_run_id    ON synthesis_metrics(run_id);
-    `);
   }
 
   private _ensureRunSchema(): void {
@@ -171,23 +126,6 @@ export class RunLogger {
     }
   }
 
-  private _ensureSynthesisSchema(): void {
-    const columns = this.db.prepare("PRAGMA table_info(synthesis_metrics)").all() as { name: string }[];
-    const columnNames = new Set(columns.map((col) => col.name));
-
-    if (!columnNames.has("run_id")) {
-      this.db.exec("ALTER TABLE synthesis_metrics ADD COLUMN run_id TEXT");
-    }
-    if (!columnNames.has("is_error")) {
-      this.db.exec("ALTER TABLE synthesis_metrics ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0");
-    }
-    if (!columnNames.has("error_type")) {
-      this.db.exec("ALTER TABLE synthesis_metrics ADD COLUMN error_type TEXT");
-    }
-    if (!columnNames.has("error_message")) {
-      this.db.exec("ALTER TABLE synthesis_metrics ADD COLUMN error_message TEXT");
-    }
-  }
 
   /**
    * Structured trace emitter. Uses the same `trace` table but writes
@@ -227,47 +165,11 @@ export class RunLogger {
       this._finalizeRun(event.runId, "error", event.timestamp);
     }
 
-    // Denormalized retrieval metrics — queryable without JSON parsing.
-    // The same event also goes to `trace` via _insertTrace below.
-    if (event.type === "context_retrieved") {
-      this.db
-        .prepare(
-          `INSERT INTO synthesis_metrics
-             (session_id, run_id, timestamp, prompt_snippet, seed_count, expanded_count,
-              tool_count, retrieval_ms, raw_chars, stripped_chars, estimated_tokens, is_error, error_type, error_message)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL)`
-        )
-        .run(
-          sessionId,
-          runId,
-          event.timestamp,
-          event.query.slice(0, 120),
-          event.seedCount,
-          event.expandedCount,
-          event.toolCount,
-          event.retrievalMs,
-          event.rawChars,
-          event.strippedChars,
-          event.estimatedTokens,
-        );
+    // Note analytics (note_hits, synthesis_metrics, context_ratings) have moved
+    // to NoteMetricsLogger / notes.db. Raw events still go to trace below.
 
-      // Per-note retrieval hits — tracks which notes get pulled and how often
-      if (event.noteHits?.length) {
-        const insertHit = this.db.prepare(
-          `INSERT INTO note_hits (session_id, run_id, timestamp, note_id, score, depth, source)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
-        );
-        const insertMany = this.db.transaction((hits: typeof event.noteHits) => {
-          for (const hit of hits!) {
-            insertHit.run(sessionId, runId, event.timestamp, hit.noteId, hit.score, hit.depth, hit.source);
-          }
-        });
-        insertMany(event.noteHits);
-      }
-    }
-
-    // Log retrieval failures (tool_result errors for retrieve_context) so gaps are visible in metrics.
-    if (event.type === "tool_result" && event.toolName === "retrieve_context" && event.isError) {
+    // Route retrieve_context errors to NoteMetricsLogger via callback.
+    if (event.type === "tool_result" && event.toolName === "retrieve_context" && event.isError && this.onRetrievalError) {
       const errorPayload = (() => {
         try {
           return JSON.stringify(event.toolResult).slice(0, 240);
@@ -275,31 +177,7 @@ export class RunLogger {
           return String(event.toolResult).slice(0, 240);
         }
       })();
-
-      this.db
-        .prepare(
-          `INSERT INTO synthesis_metrics
-             (session_id, run_id, timestamp, prompt_snippet, seed_count, expanded_count,
-              tool_count, retrieval_ms, raw_chars, stripped_chars, estimated_tokens, is_error, error_type, error_message)
-           VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 1, 'tool_error', ?)`
-        )
-        .run(
-          sessionId,
-          runId,
-          event.timestamp,
-          "retrieve_context error",
-          errorPayload,
-        );
-    }
-
-    // ── Context self-grading ─────────────────────────────────────────────
-    if (event.type === "context_rated") {
-      this.db
-        .prepare(
-          `INSERT INTO context_ratings (session_id, run_id, timestamp, query, score, missing, helpful)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
-        )
-        .run(sessionId, runId, event.timestamp, event.query, event.score, event.missing, event.helpful);
+      this.onRetrievalError(sessionId, runId, event.timestamp, errorPayload);
     }
 
     this._insertTrace(runId, sessionId, event.type, event.timestamp, event);

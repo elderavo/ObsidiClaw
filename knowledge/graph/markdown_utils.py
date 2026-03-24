@@ -190,6 +190,9 @@ CANONICAL_NOTE_TYPES = {
     "index": "index",
     "codebase": "codebase",
     "codeunit": "codeUnit",
+    # Three-tier code note types
+    "codesymbol": "codeSymbol",  # tier-1: individual exported symbol
+    "codemodule": "codeModule",  # tier-3: directory-level module
 }
 
 
@@ -216,6 +219,34 @@ def infer_note_type(
         return "index"
 
     return "concept"
+
+
+def extract_tier(frontmatter: dict) -> str:
+    """Extract the tier field from frontmatter. Returns '1', '2', '3', or ''."""
+    val = frontmatter.get("tier")
+    if val is not None:
+        s = str(val).strip()
+        if s in ("1", "2", "3"):
+            return s
+    return ""
+
+
+def extract_parent_file(frontmatter: dict) -> str:
+    """Extract parentFile wikilink path (tier-1 notes only)."""
+    val = frontmatter.get("parentFile")
+    return str(val).strip() if val else ""
+
+
+def extract_parent_module(frontmatter: dict) -> str:
+    """Extract parentModule wikilink path (tier-1 and tier-2 notes)."""
+    val = frontmatter.get("parentModule")
+    return str(val).strip() if val else ""
+
+
+def extract_symbol_kind(frontmatter: dict) -> str:
+    """Extract symbolKind field (tier-1 notes only)."""
+    val = frontmatter.get("symbolKind")
+    return str(val).strip() if val else ""
 
 
 # ---------------------------------------------------------------------------

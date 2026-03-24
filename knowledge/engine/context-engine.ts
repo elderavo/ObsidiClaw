@@ -30,8 +30,7 @@ import { stripFrontmatter, estimateTokens } from "./frontmatter-utils.js";
 import { loadPersonality } from "../../agents/subagent/personality-loader.js";
 import { SUBAGENT_RAG_FOOTER_LINES } from "../../agents/prompts.js";
 import { ContextReviewer } from "./review/context-reviewer.js";
-import { PruneClusterStorage } from "./prune/prune-storage.js";
-import Database from "better-sqlite3";
+import type { PruneClusterStorage } from "./prune/prune-storage.js";
 import type { PersonalityConfig } from "../../agents/subagent/types.js";
 import type {
   ContextEngineConfig,
@@ -292,9 +291,10 @@ export class ContextEngine {
   }
 
   /**
-   * Build pruning clusters via Python RPC, store in local prune.db.
+   * Build pruning clusters via Python RPC, store in provided storage.
+   * If no storage is provided, clusters are returned but not persisted.
    */
-  async buildPruneClusters(configOverride?: Partial<PruneConfig>): Promise<PruneCluster[]> {
+  async buildPruneClusters(configOverride?: Partial<PruneConfig>, storage?: PruneClusterStorage): Promise<PruneCluster[]> {
     this.ensureInitialized();
 
     const effectiveConfig: PruneConfig = {
@@ -310,15 +310,9 @@ export class ContextEngine {
       exclude_tags: effectiveConfig.excludeTags ?? [],
     }) as { clusters: PruneCluster[] };
 
-    // Store clusters in local prune.db
-    const pruneDbPath = join(dirname(this.config.dbPath), "prune.db");
-    const db = new Database(pruneDbPath);
-    try {
-      const storage = new PruneClusterStorage(db);
+    if (storage) {
       storage.resetClusters();
       storage.storeClusters(result.clusters);
-    } finally {
-      db.close();
     }
 
     return result.clusters;

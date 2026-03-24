@@ -16,6 +16,7 @@ import { randomUUID } from "crypto";
 
 import chokidar, { type FSWatcher } from "chokidar";
 import { RunLogger } from "../logger/run-logger.js";
+import { NoteMetricsLogger } from "../logger/note-metrics.js";
 import { ContextEngine } from "../knowledge/engine/context-engine.js";
 import { JobScheduler, createHealthCheckJob, createNormalizeJob, createMergeInboxJob, createSummarizeCodeJob } from "../automation/jobs/index.js";
 import { SubagentRunner } from "../agents/subagent/subagent-runner.js";
@@ -50,6 +51,7 @@ export interface StackOptions {
 export interface ObsidiClawStack {
   readonly engine: ContextEngine;
   readonly logger: RunLogger;
+  readonly noteMetrics: NoteMetricsLogger;
   readonly scheduler: JobScheduler | undefined;
   readonly runner: SubagentRunner;
   readonly sessionId: string;
@@ -83,7 +85,13 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     ...(debugEnabled
       ? { debugDir: resolve(paths.rootDir, ".obsidi-claw/debug") }
       : {}),
+    onRetrievalError: (sessionId, runId, timestamp, errorPayload) => {
+      noteMetrics.logRetrievalError({ sessionId, runId: runId ?? undefined, timestamp, errorPayload });
+    },
   });
+
+  // ── NoteMetricsLogger ──────────────────────────────────────────────────
+  const noteMetrics = new NoteMetricsLogger(paths.notesDbPath);
 
   // ── ContextEngine ───────────────────────────────────────────────────────
   const engine = new ContextEngine({
@@ -129,6 +137,7 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
   const runner = new SubagentRunner({
     dbPath: paths.dbPath,
     contextEngine: engine,
+    noteMetrics,
   });
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
@@ -186,12 +195,14 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
       await scheduler.stop();
     }
     await engine.close();
+    noteMetrics.close();
     logger.close();
   }
 
   return {
     engine,
     logger,
+    noteMetrics,
     scheduler,
     runner,
     sessionId,

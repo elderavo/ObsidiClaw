@@ -34,7 +34,7 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 | `automation/jobs/` | OS-delegated scheduler (Windows Task Scheduler). Jobs: health-check, normalize-md-db, summarize-code |
 | `automation/jobs/watchers/` | Chokidar file watchers: md-db lint watcher, mirror watcher, reindex watcher (in stack.ts) |
 | `automation/scripts/` | One-shot scripts: mirror-codebase (TS+Py), force-summarize, run_session_review |
-| `logger/` | SQLite runs.db: `sessions`, `runs`, `trace`, `synthesis_metrics` tables + TraceEmitter |
+| `logger/` | SQLite runs.db (`sessions`, `runs`, `trace` + TraceEmitter) and notes.db (`note_hits`, `synthesis_metrics`, `context_ratings`, `note_lifecycle`, prune clusters via NoteMetricsLogger) |
 | `entry/` | Entry points: `stack.ts` (shared infrastructure factory), `extension.ts` (Pi TUI) |
 | `.pi/extensions/` | Pi TUI extensions: subagent spawning, web search, codebase indexer |
 | `tools/` | Live tools: web search via Perplexity API |
@@ -56,6 +56,7 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **Startup injection**: `before_agent_start` injects `preferences.md` only — no RAG on startup. Pi uses `retrieve_context` for on-demand lookup
 - **Index notes filtered**: `type === "index"` notes excluded from retrieval and graph expansion
 - **Session/Run/Trace hierarchy**: `sessions` (multi-prompt container) → `runs` (`run_kind`: core/subagent/reviewer/job, with parent linking) → `trace` (structured + legacy columns). `TraceEmitter` manages per-run monotonic seq counters
+- **Split databases**: `runs.db` owns operational event log (sessions, runs, trace). `notes.db` owns note retrieval analytics (note_hits, synthesis_metrics, context_ratings, note_lifecycle, prune clusters). Schema is 3-tier-aware from the start (tier, note_type, symbol_kind, edge_label columns)
 - **Trace modules**: canonical names in `core/trace-modules.ts`: `orchestrator`, `pi_session`, `context_engine`, `scheduler`, `extension`, `subagent`, `insight_engine`, `logger`, `user`, `tool:<name>`
 - **LLM config**: `OBSIDI_LLM_HOST` env var (must be set in `.env`). Defaults to `localhost:11434` which is wrong for this setup — always set explicitly
 
@@ -78,17 +79,17 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 
 ## Active Work
 
-### Phase A — Three-Tier Note System (`feature/3-tier-notes`)
-- [ ] A1. Extend `mirror-codebase.ts` to emit tier-1 symbol notes at `md_db/code/{dir}/{file}/{symbolName}.md` — one per exported function/class/type/interface/const
-- [ ] A2. Add tier-3 module notes (`md_db/code/{dir}/_module.md`) — one per directory containing source files
-- [ ] A3. Add tier metadata to all code notes: `tier: 1|2|3` in frontmatter; tier-2 gets `parentModule`, tier-1 gets `parentFile` + `symbolKind`
-- [ ] A4. Update Python indexer with typed edge labels: DEFINED_IN (symbol→file), CALLS (symbol→symbol), CONTAINS (module→file, file→symbol), BELONGS_TO (file→module), IMPORTS (file→file); LINKS_TO kept for concept/tool wikilinks
+### Phase A — Three-Tier Note System (`3-tier-markdown`) ✓
+- [x] A1. Extend `mirror-codebase.ts` to emit tier-1 symbol notes at `md_db/code/{dir}/{file}/{symbolName}.md` — one per exported function/class/type/interface/const
+- [x] A2. Add tier-3 module notes (`md_db/code/{dir}/{dirName}.md`) — one per directory containing source files (named after folder, not `_module`)
+- [x] A3. Add tier metadata to all code notes: `tier: 1|2|3` in frontmatter; tier-2 gets `parentModule`, tier-1 gets `parentFile` + `symbolKind`
+- [x] A4. Update Python indexer with typed edge labels: DEFINED_IN (symbol→file), CALLS (symbol→symbol), CONTAINS/CONTAINS_SYMBOL (module/file → children), BELONGS_TO (file→module), IMPORTS (file→file); LINKS_TO kept for concept/tool wikilinks
 - [ ] A5. Update summarizer to handle all three tiers: tier-3 modules get summaries from children's summaries; tier-1 symbols get one-sentence signature descriptions; tier-2 files unchanged
 
-### Phase B — Tier-Aware Retrieval (`feature/3-tier-notes`, continued)
-- [ ] B1. Add `tier` and `symbolKind` fields to ParsedNote and RetrievedNote in `models.py`; add `extract_tier()` to `markdown_utils.py`
-- [ ] B2. Rewrite `retriever.py` with tier-aware expansion: symbol → pull parent file + module (always); symbol → pull CALLS targets if name appears in query tokens; file → pull parent module always, child symbols only if query is specific; module → pull child files scored by relevance
-- [ ] B3. Score adjustments: going up = 0.8×, going sideways (CALLS) = 0.6×, going down (selective) = 0.9×; concept/tool notes keep current generic behavior
+### Phase B — Tier-Aware Retrieval (`3-tier-markdown`) ✓
+- [x] B1. Add `tier` and `symbolKind` fields to ParsedNote and RetrievedNote in `models.py`; add `extract_tier()` to `markdown_utils.py`
+- [x] B2. Rewrite `retriever.py` with tier-aware expansion: symbol → pull parent file + module (always); symbol → pull CALLS targets if name appears in query tokens; file → pull parent module always, child symbols only if query is specific; module → pull child files scored by relevance
+- [x] B3. Score adjustments: going up = 0.8×, going sideways (CALLS) = 0.6×, going down (selective) = 0.9×; concept/tool notes keep current generic behavior
 
 ### Phase C — Context Synthesizer Upgrade (`feature/synthesizer-upgrade`)
 - [ ] C1. Add `formatContextTiered()` to `context-engine.ts` — groups retrieved notes by tier, emits structured sections: `## Module Context` / `## File Context` / `## Symbol Details` / `## Call Relationships`
@@ -122,13 +123,17 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - Incremental reindex: chokidar watcher calls `engine.incrementalUpdate()` on live engine when md_db changes
 - MCP boundary: context engine only through MCP server
 - Comprehensive event logging: SQLite trace table + debug JSONL
+- Split databases: runs.db (operational log) + notes.db (retrieval analytics, 3-tier-aware schema, prune clusters, note lifecycle)
 - OS-delegated scheduler: schtasks, orphan auto-cleanup, job runs tracked in runs.db
 - Session/run/trace schema: sessions table, run_kind enum, parent linking, TraceEmitter
-- 63 tier-2 code mirror notes with AI summaries and domain tags; live reindex on md_db change
+- Three-tier code mirror notes: 191 tier-1 (codeSymbol), 77 tier-2 (codeUnit), 19 tier-3 (codeModule) — generated by `mirror-codebase.ts --force`
+- Typed graph edges: DEFINED_IN, BELONGS_TO, CONTAINS, CONTAINS_SYMBOL, CALLS, IMPORTS, LINKS_TO — all verified in indexer
+- Tier-aware retrieval: going-up always (0.8×/0.5×), going-down selective (≥0.6 seed threshold), sideways on query overlap (0.6×)
+- **Force-mirror:** `npx tsx automation/scripts/mirror-codebase.ts --force` (also `mirror-codebase-py.ts --force`)
+
 
 ## What's Broken / Unvalidated
-- **Tier-1 (symbol) and tier-3 (module) notes do not exist yet** — only flat file-level mirrors; no symbol or module granularity (Phase A)
-- **Retrieval is tier-unaware** — flat depth-1 BFS with generic LINKS_TO edges; no typed edge traversal (Phase B)
+- **Summarizer not yet tier-aware** — tier-1/tier-3 notes get same generic summary prompt as tier-2 (A5 pending)
 - **Context synthesizer sends undifferentiated flat dump to LLM** — no tiered sections, no explicit relationship statements (Phase C)
 - **Subagents feel flaky** — diagnose with debug JSONL (Phase 7, deprioritized)
 - **Post-session review not generating files** — `session_review.ts` runs but no output in md_db (Phase 8, deprioritized)
@@ -155,6 +160,14 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **Orphan job lifecycle**: schtasks entries auto-deleted during scheduler reconciliation (previously just warned)
 - **Force-summarize**: `automation/scripts/force-summarize.ts` — runs summarizer against all 63 mirrors, bypassing staleness. Fixed `qwen3.5:8b` → `qwen3:8b` in code-summarizer personality (model didn't exist)
 - **Learning Loop 1 closed**: code changes → mirror regeneration → summarizer enriches → live reindex → better retrieval. 63 notes summarized and tagged
+
+**2026-03-23 — Session 16 (Split notes.db)**
+- **Extracted note analytics from runs.db into notes.db**: `note_hits`, `synthesis_metrics`, `context_ratings` moved to dedicated `notes.db`. Added `note_lifecycle` table for tracking note creation/modification events. Absorbed `prune.db` tables (`prune_clusters`, `prune_cluster_members`) into `notes.db`
+- **3-tier-aware schema**: `note_hits` has `tier`, `note_type`, `symbol_kind`, `edge_label` columns; `synthesis_metrics` has `tier_1_count`, `tier_2_count`, `tier_3_count` — ready for Phase A/B without schema migration
+- **RetrievedNote TS type updated**: added `tier`, `symbolKind` fields matching Python model; NoteType expanded with `codeSymbol`, `codeModule`
+- **NoteMetricsLogger class**: new `logger/note-metrics.ts` — owns notes.db, provides `logRetrieval()`, `logRating()`, `logLifecycleEvent()`, exposes `pruneStorage`
+- **Stack wiring**: `NoteMetricsLogger` created in `createObsidiClawStack()`, threaded to MCP server, orchestrator, subagent runner
+- **Migration script**: `automation/scripts/migrate-notes-db.ts` — moved 1,017 note_hits + 119 synthesis_metrics + 25 context_ratings from runs.db to notes.db
 
 # End-of-Run Protocol
 Every agent session MUST close by doing all three:

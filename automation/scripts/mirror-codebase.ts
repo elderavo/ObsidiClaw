@@ -543,10 +543,15 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string): 
   //   path       → summarizer source lookup
   //   language   → mirror cleanup scoping
   //   generated  → mirror cleanup safety check
+  const dirRel = path.posix.dirname(file.relativePath);
+  const parentModuleLink = dirRel === "." ? `${MIRROR_PREFIX}/${moduleDirName(dirRel)}` : `${MIRROR_PREFIX}/${dirRel}/${moduleDirName(dirRel)}`;
+
   lines.push(
     "---",
     "type: codeUnit",
+    "tier: 2",
     `path: ${file.relativePath}`,
+    `parentModule: ${parentModuleLink}`,
     "language: ts",
     "generated: true",
     "tags:",
@@ -681,6 +686,159 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string): 
 }
 
 // ---------------------------------------------------------------------------
+// Tier-1: Symbol note generation
+// ---------------------------------------------------------------------------
+
+/** Safe filename for a symbol name (strips generics, spaces, etc.) */
+function sanitizeSymbolName(name: string): string {
+  return name.replace(/[<>,:.\s[\]]/g, "_").replace(/__+/g, "_").replace(/^_|_$/g, "");
+}
+
+/** Absolute path for a tier-1 symbol note. */
+function symbolNotePath(mirrorDir: string, relPath: string, symbolName: string): string {
+  const dirRel = path.posix.dirname(relPath);
+  const stem = mirrorStem(relPath);
+  const subdir = dirRel === "." ? stem : `${dirRel}/${stem}`;
+  return path.join(mirrorDir, subdir, sanitizeSymbolName(symbolName) + ".md");
+}
+
+function generateSymbolNote(file: FileData, exp: ExportInfo, today: string): string {
+  const lines: string[] = [];
+  const dirRel = path.posix.dirname(file.relativePath);
+  const stem = mirrorStem(file.relativePath);
+  const parentFileLink = dirRel === "." ? `${MIRROR_PREFIX}/${stem}` : `${MIRROR_PREFIX}/${dirRel}/${stem}`;
+  const parentModuleLink = dirRel === "." ? `${MIRROR_PREFIX}/${moduleDirName(dirRel)}` : `${MIRROR_PREFIX}/${dirRel}/${moduleDirName(dirRel)}`;
+
+  lines.push(
+    "---",
+    "type: codeSymbol",
+    "tier: 1",
+    `path: ${file.relativePath}`,
+    `parentFile: ${parentFileLink}`,
+    `parentModule: ${parentModuleLink}`,
+    `symbolKind: ${exp.kind}`,
+    "language: ts",
+    "generated: true",
+    "tags:",
+    "  - codeUnit",
+    "---",
+    ""
+  );
+
+  lines.push(`# ${exp.name}`, "");
+  lines.push(`**Kind:** \`${exp.kind}\`  `);
+  lines.push(`**File:** [[${parentFileLink}]]`, "");
+
+  if (exp.signature) {
+    lines.push("## Signature", "");
+    lines.push("```ts");
+    lines.push(exp.signature);
+    lines.push("```", "");
+  }
+
+  // Per-function calls (only for function/class)
+  if (exp.kind === "function" || exp.kind === "class") {
+    const fn = file.functions.find((f) => f.name === exp.name);
+    if (fn) {
+      const ownCalls = file.inRepoCalls.filter(
+        (c) => c.position >= fn.bodyStart && c.position <= fn.bodyEnd
+      );
+      if (ownCalls.length) {
+        lines.push("## Calls Into", "");
+        const bySource = new Map<string, string[]>();
+        for (const c of ownCalls) {
+          if (!bySource.has(c.sourceFile)) bySource.set(c.sourceFile, []);
+          bySource.get(c.sourceFile)!.push(c.calleeName);
+        }
+        for (const [srcFile, names] of bySource) {
+          lines.push(`- [[${toWikiLink(srcFile)}]] — \`${names.join("`, `")}\``);
+        }
+        lines.push("");
+      }
+    }
+  }
+
+  // Call-ins for this specific symbol
+  const callers = file.callIns.filter((c) => c.calledName === exp.name);
+  if (callers.length) {
+    lines.push("## Called By", "");
+    for (const c of callers) {
+      lines.push(`- [[${toWikiLink(c.callerFile)}]]`);
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Tier-3: Module note generation
+// ---------------------------------------------------------------------------
+
+/** Absolute path for a tier-3 module note. */
+function moduleDirName(dirRel: string): string {
+  return dirRel === "." ? "root" : path.posix.basename(dirRel);
+}
+
+function moduleNotePath(mirrorDir: string, dirRel: string): string {
+  const name = moduleDirName(dirRel) + ".md";
+  return dirRel === "."
+    ? path.join(mirrorDir, name)
+    : path.join(mirrorDir, dirRel, name);
+}
+
+function generateModuleNote(
+  dirRel: string,
+  fileStemsAndPaths: { relPath: string; stem: string }[],
+  today: string
+): string {
+  const lines: string[] = [];
+  const dirName = dirRel === "." ? "root" : path.posix.basename(dirRel);
+
+  lines.push(
+    "---",
+    "type: codeModule",
+    "tier: 3",
+    `path: ${dirRel}`,
+    `title: ${dirName}`,
+    "language: ts",
+    "generated: true",
+    "tags:",
+    "  - codeUnit",
+    "---",
+    ""
+  );
+
+  lines.push(`# ${dirName}`, "");
+  lines.push("*Module summary not yet generated.*", "");
+  lines.push("## Files", "");
+  for (const { relPath, stem } of fileStemsAndPaths) {
+    const d = path.posix.dirname(relPath);
+    const link = d === "." ? `${MIRROR_PREFIX}/${stem}` : `${MIRROR_PREFIX}/${d}/${stem}`;
+    lines.push(`- [[${link}]]`);
+  }
+  lines.push("");
+
+  return lines.join("\n");
+}
+
+/**
+ * Extract the file wikilinks listed in an existing _module.md's ## Files section.
+ * Returns null if the file doesn't exist.
+ */
+function extractModuleFileLinks(modulePath: string): string[] | null {
+  let content: string;
+  try {
+    content = fs.readFileSync(modulePath, "utf8");
+  } catch {
+    return null;
+  }
+  const section = content.match(/^## Files\s*\n((?:- \[\[.+\]\]\n?)*)/m);
+  if (!section) return null;
+  return section[1].trim().split("\n").map((l) => l.replace(/^- /, "").trim());
+}
+
+// ---------------------------------------------------------------------------
 // Summary preservation — survive mirror regeneration
 // ---------------------------------------------------------------------------
 
@@ -785,25 +943,84 @@ export async function runMirrorTs(
 
   let written = 0;
   let skipped = 0;
+
+  // ── Tier-2 file notes + Tier-1 symbol notes ──────────────────────────
+  const validMirrorPaths = new Set<string>();
+
   for (const file of files) {
+    let isStale = true;
     if (!opts.force) {
       try {
         const srcStat = fs.statSync(file.absolutePath);
         const mirrorStat = fs.statSync(file.mirrorPath);
-        if (mirrorStat.mtimeMs >= srcStat.mtimeMs) { skipped++; continue; }
+        if (mirrorStat.mtimeMs >= srcStat.mtimeMs) {
+          isStale = false;
+        }
       } catch { /* mirror doesn't exist yet — proceed */ }
     }
+
+    // Track valid tier-2 path
+    validMirrorPaths.add(path.resolve(file.mirrorPath));
+
+    // Track valid tier-1 symbol paths (even when skipping, so cleanup keeps them)
+    const definedSymbols = file.exports.filter((e) => e.kind !== "reexport");
+    for (const exp of definedSymbols) {
+      validMirrorPaths.add(path.resolve(symbolNotePath(opts.mirrorDir, file.relativePath, exp.name)));
+    }
+
+    if (!isStale) { skipped++; continue; }
+
+    // Write tier-2 note
     const markdown = generateMarkdown(file, files, today);
-    // Preserve any existing ## Summary section across regeneration
     const preserved = extractSummarySection(file.mirrorPath);
     const final = preserved ? markdown.trimEnd() + "\n\n" + preserved + "\n" : markdown;
     fs.mkdirSync(path.dirname(file.mirrorPath), { recursive: true });
     fs.writeFileSync(file.mirrorPath, final, "utf8");
     written++;
+
+    // Write tier-1 symbol notes (one per non-reexport export)
+    for (const exp of definedSymbols) {
+      const symPath = symbolNotePath(opts.mirrorDir, file.relativePath, exp.name);
+      const symMarkdown = generateSymbolNote(file, exp, today);
+      const symPreserved = extractSummarySection(symPath);
+      const symFinal = symPreserved ? symMarkdown.trimEnd() + "\n\n" + symPreserved + "\n" : symMarkdown;
+      fs.mkdirSync(path.dirname(symPath), { recursive: true });
+      fs.writeFileSync(symPath, symFinal, "utf8");
+    }
+  }
+
+  // ── Tier-3 module notes ───────────────────────────────────────────────
+  // Group files by their directory (relative to scanDir)
+  const byDir = new Map<string, { relPath: string; stem: string }[]>();
+  for (const file of files) {
+    const dirRel = path.posix.dirname(file.relativePath);
+    if (!byDir.has(dirRel)) byDir.set(dirRel, []);
+    byDir.get(dirRel)!.push({ relPath: file.relativePath, stem: mirrorStem(file.relativePath) });
+  }
+
+  for (const [dirRel, fileEntries] of byDir) {
+    const modPath = moduleNotePath(opts.mirrorDir, dirRel);
+    validMirrorPaths.add(path.resolve(modPath));
+
+    // Stale if: force, doesn't exist, or files list has changed
+    const existingLinks = extractModuleFileLinks(modPath);
+    const currentLinks = fileEntries.map(({ relPath, stem }) => {
+      const d = path.posix.dirname(relPath);
+      return d === "." ? `[[${MIRROR_PREFIX}/${stem}]]` : `[[${MIRROR_PREFIX}/${d}/${stem}]]`;
+    }).sort();
+    const needsWrite = opts.force || existingLinks === null
+      || JSON.stringify(existingLinks.sort()) !== JSON.stringify(currentLinks);
+
+    if (needsWrite) {
+      const modMarkdown = generateModuleNote(dirRel, fileEntries, today);
+      const modPreserved = extractSummarySection(modPath);
+      const modFinal = modPreserved ? modMarkdown.trimEnd() + "\n\n" + modPreserved + "\n" : modMarkdown;
+      fs.mkdirSync(path.dirname(modPath), { recursive: true });
+      fs.writeFileSync(modPath, modFinal, "utf8");
+    }
   }
 
   // ── Cleanup stale mirrors ──────────────────────────────────────────────
-  const validMirrorPaths = new Set(files.map((f) => path.resolve(f.mirrorPath)));
   const cleaned = cleanStaleMirrors(opts.mirrorDir, validMirrorPaths, "ts");
 
   if (parseErrors > 0) console.warn(`[mirror-ts] ${parseErrors} files failed to parse`);

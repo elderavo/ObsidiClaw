@@ -100,6 +100,8 @@ export interface ObsidiClawPaths {
   mdDbPath: string;
   /** SQLite runs.db path (run/trace logging). */
   dbPath: string;
+  /** SQLite notes.db path (note retrieval metrics, prune clusters). */
+  notesDbPath: string;
   /** SQLite graph.db path (knowledge graph store). */
   graphDbPath: string;
   /** Personality markdown files directory. */
@@ -116,6 +118,7 @@ export function resolvePaths(rootDir?: string): ObsidiClawPaths {
     rootDir: root,
     mdDbPath: join(root, "md_db"),
     dbPath: join(root, ".obsidi-claw", "runs.db"),
+    notesDbPath: join(root, ".obsidi-claw", "notes.db"),
     graphDbPath: join(root, ".obsidi-claw", "graph.db"),
     personalitiesDir: join(root, "agents", "subagent", "personalities"),
   };

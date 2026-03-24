@@ -26,6 +26,7 @@ import {
 } from "@mariozechner/pi-coding-agent";
 
 import { RunLogger } from "../../logger/index.js";
+import type { NoteMetricsLogger } from "../../logger/note-metrics.js";
 import type { ContextEngine } from "../../knowledge/engine/index.js";
 import { createContextEngineMcpServer } from "../../knowledge/engine/index.js";
 import { createObsidiClawExtension } from "../../entry/extension.js";
@@ -61,6 +62,7 @@ export class OrchestratorSession {
     private readonly logger: RunLogger,
     private readonly contextEngine?: ContextEngine,
     private readonly config: SessionConfig = {},
+    private readonly noteMetrics?: NoteMetricsLogger,
   ) {
     this.sessionId = crypto.randomUUID();
     // runKind takes precedence; fall back to isSubagent for backward compat
@@ -231,7 +233,7 @@ export class OrchestratorSession {
           runKind: "reviewer",
           parentRunId: this.currentRunId,
           parentSessionId: this.sessionId,
-        });
+        }, this.noteMetrics);
 
         return {
           runReview: async (userMessage: string) => {
@@ -261,28 +263,50 @@ export class OrchestratorSession {
       ? [createObsidiClawExtension({
           mcpServer: createContextEngineMcpServer({
             engine: this.contextEngine,
-            onContextBuilt: (pkg) => this.emit({
-              type: "context_retrieved",
-              sessionId: this.sessionId,
-              runId: this.currentRunId,
-              timestamp: Date.now(),
-              query: pkg.query,
-              seedCount: pkg.seedNoteIds?.length ?? 0,
-              expandedCount: pkg.expandedNoteIds?.length ?? 0,
-              toolCount: pkg.suggestedTools.length,
-              retrievalMs: pkg.retrievalMs,
-              rawChars: pkg.rawChars,
-              strippedChars: pkg.strippedChars,
-              estimatedTokens: pkg.estimatedTokens,
-              reviewMs: pkg.reviewResult?.reviewMs,
-              reviewSkipped: pkg.reviewResult?.skipped,
-              noteHits: pkg.retrievedNotes.map((n) => ({
+            pruneStorage: this.noteMetrics?.pruneStorage,
+            onContextBuilt: (pkg) => {
+              const noteHits = pkg.retrievedNotes.map((n) => ({
                 noteId: n.noteId,
                 score: n.score,
                 depth: n.depth ?? 0,
                 source: n.retrievalSource,
-              })),
-            }),
+                tier: n.tier,
+                noteType: n.type,
+                symbolKind: n.symbolKind,
+              }));
+              const ts = Date.now();
+              this.emit({
+                type: "context_retrieved",
+                sessionId: this.sessionId,
+                runId: this.currentRunId,
+                timestamp: ts,
+                query: pkg.query,
+                seedCount: pkg.seedNoteIds?.length ?? 0,
+                expandedCount: pkg.expandedNoteIds?.length ?? 0,
+                toolCount: pkg.suggestedTools.length,
+                retrievalMs: pkg.retrievalMs,
+                rawChars: pkg.rawChars,
+                strippedChars: pkg.strippedChars,
+                estimatedTokens: pkg.estimatedTokens,
+                reviewMs: pkg.reviewResult?.reviewMs,
+                reviewSkipped: pkg.reviewResult?.skipped,
+                noteHits,
+              });
+              this.noteMetrics?.logRetrieval({
+                sessionId: this.sessionId,
+                runId: this.currentRunId,
+                timestamp: ts,
+                query: pkg.query,
+                seedCount: pkg.seedNoteIds?.length ?? 0,
+                expandedCount: pkg.expandedNoteIds?.length ?? 0,
+                toolCount: pkg.suggestedTools.length,
+                retrievalMs: pkg.retrievalMs,
+                rawChars: pkg.rawChars,
+                strippedChars: pkg.strippedChars,
+                estimatedTokens: pkg.estimatedTokens,
+                noteHits,
+              });
+            },
             onSubagentPrepared: (pkg) => this.emit({
               type: "subagent_start",
               sessionId: this.sessionId,
@@ -294,16 +318,28 @@ export class OrchestratorSession {
               expandedCount: pkg.contextPackage.expandedNoteIds?.length ?? 0,
               estimatedTokens: pkg.contextPackage.estimatedTokens,
             }),
-            onContextRated: (rating) => this.emit({
-              type: "context_rated",
-              sessionId: this.sessionId,
-              runId: this.currentRunId,
-              timestamp: Date.now(),
-              query: rating.query,
-              score: rating.score,
-              missing: rating.missing,
-              helpful: rating.helpful,
-            }),
+            onContextRated: (rating) => {
+              const ts = Date.now();
+              this.emit({
+                type: "context_rated",
+                sessionId: this.sessionId,
+                runId: this.currentRunId,
+                timestamp: ts,
+                query: rating.query,
+                score: rating.score,
+                missing: rating.missing,
+                helpful: rating.helpful,
+              });
+              this.noteMetrics?.logRating({
+                sessionId: this.sessionId,
+                runId: this.currentRunId,
+                timestamp: ts,
+                query: rating.query,
+                score: rating.score,
+                missing: rating.missing,
+                helpful: rating.helpful,
+              });
+            },
           }),
         })]
       : [];

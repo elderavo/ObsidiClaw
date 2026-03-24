@@ -13,12 +13,9 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { join } from "path";
-import Database from "better-sqlite3";
 import type { ContextEngine } from "../context-engine.js";
 import type { ContextPackage, SubagentPackage, PruneMemberStatus } from "../types.js";
-import { PruneClusterStorage } from "../prune/prune-storage.js";
-import { resolvePaths } from "../../../core/config.js";
+import type { PruneClusterStorage } from "../prune/prune-storage.js";
 import { RATE_CONTEXT_REMINDER } from "../../../agents/prompts.js";
 
 export type OnContextBuilt = (pkg: ContextPackage) => void;
@@ -30,6 +27,8 @@ export interface McpServerOptions {
   onContextBuilt?: OnContextBuilt;
   onSubagentPrepared?: OnSubagentPrepared;
   onContextRated?: OnContextRated;
+  /** Shared prune cluster storage (from notes.db). Falls back to engine.buildPruneClusters() for build. */
+  pruneStorage?: PruneClusterStorage;
 }
 
 /**
@@ -49,7 +48,7 @@ export function createContextEngineMcpServer(
 }
 
 function _createMcpServer(opts: McpServerOptions): McpServer {
-  const { engine, onContextBuilt, onSubagentPrepared, onContextRated } = opts;
+  const { engine, onContextBuilt, onSubagentPrepared, onContextRated, pruneStorage } = opts;
   const server = new McpServer({ name: "obsidi-claw-context", version: "1.0.0" });
 
   // ── retrieve_context ──────────────────────────────────────────────────────
@@ -184,7 +183,7 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
         minClusterSize: input.min_cluster_size,
         includeNoteTypes: input.include_note_types as any,
         excludeTags: input.exclude_tags,
-      });
+      }, pruneStorage);
       return { content: [{ type: "text" as const, text: formatClusterListMarkdown(clusters) }] };
     },
   );
@@ -200,7 +199,8 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
       },
     },
     async ({ min_size, status }) => {
-      const storage = getPruneStorage(engine);
+      if (!pruneStorage) return { content: [{ type: "text" as const, text: "Prune storage not available." }] };
+      const storage = pruneStorage;
       const clusters = storage.listClusters({ minSize: min_size, status: status as PruneMemberStatus });
       return { content: [{ type: "text" as const, text: formatClusterListMarkdown(clusters) }] };
     },
@@ -216,7 +216,8 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
       },
     },
     async ({ cluster_id }) => {
-      const storage = getPruneStorage(engine);
+      if (!pruneStorage) return { content: [{ type: "text" as const, text: "Prune storage not available." }] };
+      const storage = pruneStorage;
       const cluster = storage.getCluster(cluster_id);
       if (!cluster) {
         return { content: [{ type: "text" as const, text: `No cluster found for id ${cluster_id}` }] };
@@ -237,7 +238,8 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
       },
     },
     async ({ cluster_id, note_id, status }) => {
-      const storage = getPruneStorage(engine);
+      if (!pruneStorage) return { content: [{ type: "text" as const, text: "Prune storage not available." }] };
+      const storage = pruneStorage;
       storage.updateMemberStatus(cluster_id, note_id, status as PruneMemberStatus);
       const cluster = storage.getCluster(cluster_id);
       return {
@@ -256,12 +258,6 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function getPruneStorage(_engine: ContextEngine): PruneClusterStorage {
-  const paths = resolvePaths();
-  const pruneDbPath = join(paths.rootDir, ".obsidi-claw", "prune.db");
-  const db = new Database(pruneDbPath);
-  return new PruneClusterStorage(db);
-}
 
 function formatClusterListMarkdown(clusters: import("../types.js").PruneCluster[]): string {
   if (clusters.length === 0) return "No prune clusters available.";

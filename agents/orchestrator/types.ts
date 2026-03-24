@@ -135,7 +135,7 @@ export type RunEvent =
   | { type: "pi_session_created";  sessionId: SessionId; runId: RunId; timestamp: number; contextInjected: boolean }
 
   // ── Context retrieval (fired by MCP server via onContextBuilt callback) ──
-  | { type: "context_retrieved"; sessionId: SessionId; runId: RunId; timestamp: number; query: string; seedCount: number; expandedCount: number; toolCount: number; retrievalMs: number; rawChars: number; strippedChars: number; estimatedTokens: number; reviewMs?: number; reviewSkipped?: boolean; noteHits?: Array<{ noteId: string; score: number; depth: number; source: string }> }
+  | { type: "context_retrieved"; sessionId: SessionId; runId: RunId; timestamp: number; query: string; seedCount: number; expandedCount: number; toolCount: number; retrievalMs: number; rawChars: number; strippedChars: number; estimatedTokens: number; reviewMs?: number; reviewSkipped?: boolean; noteHits?: Array<{ noteId: string; score: number; depth: number; source: string; tier?: string; noteType?: string; symbolKind?: string; edgeLabel?: string }> }
 
   // ── Subagent preparation (fired by MCP server via onSubagentPrepared callback) ──
   | { type: "subagent_start"; sessionId: SessionId; runId: RunId; timestamp: number; prompt: string; plan: string; seedCount: number; expandedCount: number; estimatedTokens: number }

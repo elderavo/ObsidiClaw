@@ -598,10 +598,15 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string): 
   const filename = path.basename(file.relativePath);
 
   // ── Frontmatter ───────────────────────────────────────────────────────────
+  const dirRel = path.posix.dirname(file.relativePath);
+  const parentModuleLink = dirRel === "." ? `${MIRROR_PREFIX}/${moduleDirName(dirRel)}` : `${MIRROR_PREFIX}/${dirRel}/${moduleDirName(dirRel)}`;
+
   lines.push(
     "---",
     "type: codeUnit",
+    "tier: 2",
     `path: ${file.relativePath}`,
+    `parentModule: ${parentModuleLink}`,
     "language: py",
     "generated: true",
     "tags:",
@@ -728,6 +733,68 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string): 
 }
 
 // ---------------------------------------------------------------------------
+// Tier-3: Module note generation (Python)
+// ---------------------------------------------------------------------------
+
+function moduleDirName(dirRel: string): string {
+  return dirRel === "." ? "root" : path.posix.basename(dirRel);
+}
+
+function moduleNotePath(mirrorDir: string, dirRel: string): string {
+  const name = moduleDirName(dirRel) + ".md";
+  return dirRel === "."
+    ? path.join(mirrorDir, name)
+    : path.join(mirrorDir, dirRel, name);
+}
+
+function generateModuleNote(
+  dirRel: string,
+  fileEntries: { relPath: string; stem: string }[],
+  today: string
+): string {
+  const lines: string[] = [];
+  const dirName = dirRel === "." ? "root" : path.posix.basename(dirRel);
+
+  lines.push(
+    "---",
+    "type: codeModule",
+    "tier: 3",
+    `path: ${dirRel}`,
+    `title: ${dirName}`,
+    "language: py",
+    "generated: true",
+    "tags:",
+    "  - codeUnit",
+    "---",
+    ""
+  );
+
+  lines.push(`# ${dirName}`, "");
+  lines.push("*Module summary not yet generated.*", "");
+  lines.push("## Files", "");
+  for (const { relPath, stem } of fileEntries) {
+    const d = path.posix.dirname(relPath);
+    const link = d === "." ? `${MIRROR_PREFIX}/${stem}` : `${MIRROR_PREFIX}/${d}/${stem}`;
+    lines.push(`- [[${link}]]`);
+  }
+  lines.push("");
+
+  return lines.join("\n");
+}
+
+function extractModuleFileLinks(modulePath: string): string[] | null {
+  let content: string;
+  try {
+    content = fs.readFileSync(modulePath, "utf8");
+  } catch {
+    return null;
+  }
+  const section = content.match(/^## Files\s*\n((?:- \[\[.+\]\]\n?)*)/m);
+  if (!section) return null;
+  return section[1].trim().split("\n").map((l) => l.replace(/^- /, "").trim());
+}
+
+// ---------------------------------------------------------------------------
 // Summary preservation — survive mirror regeneration
 // ---------------------------------------------------------------------------
 
@@ -828,7 +895,11 @@ export async function runMirrorPy(
 
   let written = 0;
   let skipped = 0;
+  const validMirrorPaths = new Set<string>();
+
   for (const file of files) {
+    validMirrorPaths.add(path.resolve(file.mirrorPath));
+
     if (!opts.force) {
       try {
         const srcStat = fs.statSync(file.absolutePath);
@@ -837,7 +908,6 @@ export async function runMirrorPy(
       } catch { /* mirror doesn't exist yet — proceed */ }
     }
     const markdown = generateMarkdown(file, files, today);
-    // Preserve any existing ## Summary section across regeneration
     const preserved = extractSummarySection(file.mirrorPath);
     const final = preserved ? markdown.trimEnd() + "\n\n" + preserved + "\n" : markdown;
     fs.mkdirSync(path.dirname(file.mirrorPath), { recursive: true });
@@ -845,8 +915,36 @@ export async function runMirrorPy(
     written++;
   }
 
+  // ── Tier-3 module notes ───────────────────────────────────────────────
+  const byDir = new Map<string, { relPath: string; stem: string }[]>();
+  for (const file of files) {
+    const dirRel = path.posix.dirname(file.relativePath);
+    if (!byDir.has(dirRel)) byDir.set(dirRel, []);
+    byDir.get(dirRel)!.push({ relPath: file.relativePath, stem: mirrorStem(file.relativePath) });
+  }
+
+  for (const [dirRel, fileEntries] of byDir) {
+    const modPath = moduleNotePath(opts.mirrorDir, dirRel);
+    validMirrorPaths.add(path.resolve(modPath));
+
+    const existingLinks = extractModuleFileLinks(modPath);
+    const currentLinks = fileEntries.map(({ relPath, stem }) => {
+      const d = path.posix.dirname(relPath);
+      return d === "." ? `[[${MIRROR_PREFIX}/${stem}]]` : `[[${MIRROR_PREFIX}/${d}/${stem}]]`;
+    }).sort();
+    const needsWrite = opts.force || existingLinks === null
+      || JSON.stringify(existingLinks.sort()) !== JSON.stringify(currentLinks);
+
+    if (needsWrite) {
+      const modMarkdown = generateModuleNote(dirRel, fileEntries, today);
+      const modPreserved = extractSummarySection(modPath);
+      const modFinal = modPreserved ? modMarkdown.trimEnd() + "\n\n" + modPreserved + "\n" : modMarkdown;
+      fs.mkdirSync(path.dirname(modPath), { recursive: true });
+      fs.writeFileSync(modPath, modFinal, "utf8");
+    }
+  }
+
   // ── Cleanup stale mirrors ──────────────────────────────────────────────
-  const validMirrorPaths = new Set(files.map((f) => path.resolve(f.mirrorPath)));
   const cleaned = cleanStaleMirrors(opts.mirrorDir, validMirrorPaths);
 
   if (parseErrors > 0) console.warn(`[mirror-py] ${parseErrors} files failed to parse`);

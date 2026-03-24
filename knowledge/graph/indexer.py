@@ -29,6 +29,10 @@ from llama_index.core.schema import TextNode
 from .markdown_utils import (
     collect_markdown_files,
     extract_tags,
+    extract_tier,
+    extract_parent_file,
+    extract_parent_module,
+    extract_symbol_kind,
     extract_title,
     extract_wikilinks,
     infer_note_type,
@@ -48,6 +52,8 @@ _LABEL_MAP: dict[str, str] = {
     "index": "INDEX",
     "codebase": "CODEBASE",
     "codeUnit": "CODEUNIT",
+    "codeSymbol": "CODESYMBOL",  # tier-1
+    "codeModule": "CODEMODULE",  # tier-3
 }
 
 
@@ -102,6 +108,10 @@ def _scan_md_db(md_db_path: str) -> list[ParsedNote]:
                 time_created=time_created,
                 last_edited=last_edited,
                 tags=tags,
+                tier=extract_tier(frontmatter),
+                symbol_kind=extract_symbol_kind(frontmatter),
+                parent_file=extract_parent_file(frontmatter),
+                parent_module=extract_parent_module(frontmatter),
             )
         )
 
@@ -174,8 +184,18 @@ def _build_graph_store(
 ) -> SimplePropertyGraphStore:
     """Build a SimplePropertyGraphStore from parsed notes.
 
-    Creates entity nodes and wikilink relations. Does NOT require an
+    Creates entity nodes and typed relations. Does NOT require an
     embedding provider — pure graph structure.
+
+    Typed edges for code notes (tiers 1/2/3):
+      DEFINED_IN      tier-1 → tier-2 (symbol lives in this file)
+      BELONGS_TO      tier-2 → tier-3 (file belongs to this module)
+      CONTAINS        tier-3 → tier-2 (module contains this file, inverse)
+      CONTAINS_SYMBOL tier-2 → tier-1 (file contains this symbol, inverse)
+      CALLS           tier-1 → tier-1 (symbol calls another symbol)
+      IMPORTS         tier-2 → tier-2 (file imports another file)
+
+    Non-code notes use LINKS_TO for all wikilinks.
     """
     graph_store = SimplePropertyGraphStore()
 
@@ -191,6 +211,10 @@ def _build_graph_store(
                 "tool_id": note.tool_id or "",
                 "tags": ",".join(note.tags),
                 "note_type": note.note_type,
+                "tier": note.tier,
+                "symbol_kind": note.symbol_kind,
+                "parent_file": note.parent_file,
+                "parent_module": note.parent_module,
             },
         )
         entity_nodes.append(entity)
@@ -199,14 +223,75 @@ def _build_graph_store(
 
     relations: list[Relation] = []
     for note in notes:
-        for link_target in note.links_out:
-            resolved = _resolve_link(link_target, notes_by_id)
-            if resolved and resolved != note.note_id:
+        is_code_note = note.note_type in ("codeSymbol", "codeUnit", "codeModule")
+
+        if is_code_note:
+            # --- Structural edges from frontmatter (authoritative, always added) ---
+
+            # Tier-1 (codeSymbol) → tier-2 (codeUnit): DEFINED_IN
+            if note.tier == "1" and note.parent_file:
+                resolved = _resolve_link(note.parent_file, notes_by_id)
+                if resolved and resolved != note.note_id:
+                    relations.append(Relation(
+                        label="DEFINED_IN",
+                        source_id=note.note_id,
+                        target_id=resolved,
+                    ))
+                    # Inverse: tier-2 CONTAINS_SYMBOL tier-1
+                    relations.append(Relation(
+                        label="CONTAINS_SYMBOL",
+                        source_id=resolved,
+                        target_id=note.note_id,
+                    ))
+
+            # Tier-2 (codeUnit) → tier-3 (codeModule): BELONGS_TO
+            if note.tier == "2" and note.parent_module:
+                resolved = _resolve_link(note.parent_module, notes_by_id)
+                if resolved and resolved != note.note_id:
+                    relations.append(Relation(
+                        label="BELONGS_TO",
+                        source_id=note.note_id,
+                        target_id=resolved,
+                    ))
+                    # Inverse: tier-3 CONTAINS tier-2
+                    relations.append(Relation(
+                        label="CONTAINS",
+                        source_id=resolved,
+                        target_id=note.note_id,
+                    ))
+
+            # --- Wikilink edges: CALLS (tier-1→tier-1) or IMPORTS (tier-2→tier-2) ---
+            for link_target in note.links_out:
+                resolved = _resolve_link(link_target, notes_by_id)
+                if not resolved or resolved == note.note_id:
+                    continue
+                target_note = notes_by_id.get(resolved)
+                if target_note is None:
+                    continue
+
+                if note.tier == "1" and target_note.tier == "1":
+                    edge_label = "CALLS"
+                elif note.tier == "2" and target_note.tier == "2":
+                    edge_label = "IMPORTS"
+                else:
+                    # Cross-tier wikilinks in code notes → generic
+                    edge_label = "LINKS_TO"
+
                 relations.append(Relation(
-                    label="LINKS_TO",
+                    label=edge_label,
                     source_id=note.note_id,
                     target_id=resolved,
                 ))
+        else:
+            # Non-code notes: all wikilinks → LINKS_TO
+            for link_target in note.links_out:
+                resolved = _resolve_link(link_target, notes_by_id)
+                if resolved and resolved != note.note_id:
+                    relations.append(Relation(
+                        label="LINKS_TO",
+                        source_id=note.note_id,
+                        target_id=resolved,
+                    ))
 
     if relations:
         graph_store.upsert_relations(relations)
