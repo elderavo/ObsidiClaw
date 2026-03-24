@@ -1,6 +1,7 @@
 .*
 !.pi
 !.pi/**
+.env
 node_modules
 __pycache__/
 md_db/

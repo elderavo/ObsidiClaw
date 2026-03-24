@@ -15,7 +15,7 @@ import { join } from "path";
 import { fileURLToPath } from "url";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
-import { getSharedScheduler, getSharedBackend } from "../../extension/factory.js";
+import { getSharedScheduler, getSharedBackend } from "../../entry/extension.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const rootDir = join(__dirname, "../..");
@@ -138,7 +138,7 @@ const extension: ExtensionFactory = async (pi) => {
       "For detailed usage, use retrieve_context with 'scheduler'.",
     promptSnippet: "run_job(job_name) — run a scheduler job now",
     parameters: Type.Object({
-      job_name: Type.String({ description: "Job name (e.g., 'reindex-md-db')." }),
+      job_name: Type.String({ description: "Job name (e.g., 'health-check')." }),
     }),
     async execute(_id, { job_name }) {
       try {

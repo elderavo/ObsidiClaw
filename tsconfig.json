@@ -13,15 +13,13 @@
     "sourceMap": true
   },
   "include": [
-    "orchestrator/**/*.ts",
-    "logger/**/*.ts",
-    "context_engine/**/*.ts",
-    "insight_engine/**/*.ts",
-    "extension/**/*.ts",
-    "pi_agent/**/*.ts",
-    "shared/**/*.ts",
-    "scripts/**/*.ts",
-    "jobs/**/*.ts"
+    "core/**/*.ts",
+    "knowledge/engine/**/*.ts",
+    "knowledge/markdown/**/*.ts",
+    "agents/**/*.ts",
+    "automation/**/*.ts",
+    "entry/**/*.ts",
+    "logger/**/*.ts"
   ],
-  "exclude": ["node_modules", "dist", "context_engine/_legacy"]
+  "exclude": ["node_modules", "dist"]
 }
