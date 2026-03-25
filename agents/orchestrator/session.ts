@@ -29,6 +29,7 @@ import { RunLogger } from "../../logger/index.js";
 import type { NoteMetricsLogger } from "../../logger/note-metrics.js";
 import type { ContextEngine } from "../../knowledge/engine/index.js";
 import { createContextEngineMcpServer } from "../../knowledge/engine/index.js";
+import type { WorkspaceRegistry } from "../../automation/workspaces/workspace-registry.js";
 import { createObsidiClawExtension } from "../../entry/extension.js";
 import { resolvePaths } from "../../core/config.js";
 import { getOllamaConfig } from "../../core/config.js";
@@ -63,6 +64,7 @@ export class OrchestratorSession {
     private readonly contextEngine?: ContextEngine,
     private readonly config: SessionConfig = {},
     private readonly noteMetrics?: NoteMetricsLogger,
+    private readonly workspaceRegistry?: WorkspaceRegistry,
   ) {
     this.sessionId = crypto.randomUUID();
     // runKind takes precedence; fall back to isSubagent for backward compat
@@ -233,7 +235,7 @@ export class OrchestratorSession {
           runKind: "reviewer",
           parentRunId: this.currentRunId,
           parentSessionId: this.sessionId,
-        }, this.noteMetrics);
+        }, this.noteMetrics, this.workspaceRegistry);
 
         return {
           runReview: async (userMessage: string) => {
@@ -264,6 +266,7 @@ export class OrchestratorSession {
           mcpServer: createContextEngineMcpServer({
             engine: this.contextEngine,
             pruneStorage: this.noteMetrics?.pruneStorage,
+            workspaceRegistry: this.workspaceRegistry,
             onContextBuilt: (pkg) => {
               const noteHits = pkg.retrievedNotes.map((n) => ({
                 noteId: n.noteId,

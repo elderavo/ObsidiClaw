@@ -130,6 +130,7 @@ export function createObsidiClawExtension(
       mcpServer = createContextEngineMcpServer({
         engine: stack.engine,
         pruneStorage: stack.noteMetrics.pruneStorage,
+        workspaceRegistry: stack.workspaceRegistry,
         onContextBuilt: (pkg) => {
           const noteHits = pkg.retrievedNotes.map((n) => ({
             noteId: n.noteId,
@@ -305,10 +306,16 @@ export function createObsidiClawExtension(
       promptGuidelines: [
         "Always call retrieve_context before answering questions about this project's tools, architecture, or patterns.",
         "When you need to know how to do something in this codebase, call retrieve_context first.",
+        "Name specific things in your query: symbols, functions, classes, files, concepts. The knowledge base indexes at symbol level — specific queries return sharper context than broad ones.",
+        "Include your intent alongside the subject: not just 'X' but 'how X is initialized', 'failure modes of X', 'what calls X', 'signature of X'. This helps the synthesizer surface the right information.",
+        "For control-flow questions, name both the entry point and the destination: 'how A triggers B' returns better results than 'how does B work'.",
       ],
       parameters: Type.Object({
         query: Type.String({
-          description: "What to search for in the knowledge base.",
+          description:
+            "What to search for. Name specific symbols, functions, classes, or concepts. Include your intent " +
+            "(e.g. 'signature of X', 'failure modes of Y', 'how A calls B'). " +
+            "Vague queries return vague context.",
         }),
       }),
       execute: async (_toolCallId, { query }, _signal, _onUpdate, _ctx) => {

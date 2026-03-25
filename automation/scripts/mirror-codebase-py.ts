@@ -548,10 +548,10 @@ const MIRROR_PREFIX = "code";
  *   "knowledge_graph/engine.py"    → "code/knowledge_graph/engine"
  *   "knowledge_graph/__init__.py"  → "code/knowledge_graph/knowledge_graph-init"
  */
-function toWikiLink(relPath: string): string {
+function toWikiLink(relPath: string, prefix = MIRROR_PREFIX): string {
   const dir = path.posix.dirname(relPath);
   const stem = mirrorStem(relPath);
-  return dir === "." ? `${MIRROR_PREFIX}/${stem}` : `${MIRROR_PREFIX}/${dir}/${stem}`;
+  return dir === "." ? `${prefix}/${stem}` : `${prefix}/${dir}/${stem}`;
 }
 
 /**
@@ -593,13 +593,13 @@ function resolveInternal(
   return files.find((f) => f.relativePath === initCandidate) ?? null;
 }
 
-function generateMarkdown(file: FileData, allFiles: FileData[], today: string): string {
+function generateMarkdown(file: FileData, allFiles: FileData[], today: string, prefix = MIRROR_PREFIX, workspace?: string): string {
   const lines: string[] = [];
   const filename = path.basename(file.relativePath);
 
   // ── Frontmatter ───────────────────────────────────────────────────────────
   const dirRel = path.posix.dirname(file.relativePath);
-  const parentModuleLink = dirRel === "." ? `${MIRROR_PREFIX}/${moduleDirName(dirRel)}` : `${MIRROR_PREFIX}/${dirRel}/${moduleDirName(dirRel)}`;
+  const parentModuleLink = dirRel === "." ? `${prefix}/${moduleDirName(dirRel)}` : `${prefix}/${dirRel}/${moduleDirName(dirRel)}`;
 
   lines.push(
     "---",
@@ -609,6 +609,7 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string): 
     `parentModule: ${parentModuleLink}`,
     "language: py",
     "generated: true",
+    ...(workspace ? [`workspace: ${workspace}`] : []),
     "tags:",
     "  - codeUnit",
     "---",
@@ -645,7 +646,7 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string): 
       for (const imp of internalImports) {
         const resolved = resolveInternal(file.relativePath, imp.specifier, allFiles);
         const linkTarget = resolved
-          ? `[[${toWikiLink(resolved.relativePath)}]]`
+          ? `[[${toWikiLink(resolved.relativePath, prefix)}]]`
           : `\`${imp.specifier}\``;
         const bindingStr = imp.bindings.length
           ? ` — \`${imp.bindings.join("`, `")}\``
@@ -691,7 +692,7 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string): 
         }
         const callParts: string[] = [];
         for (const [srcFile, names] of bySource) {
-          callParts.push(`[[${toWikiLink(srcFile)}]] (\`${names.join("`, `")}\`)`);
+          callParts.push(`[[${toWikiLink(srcFile, prefix)}]] (\`${names.join("`, `")}\`)`);
         }
         lines.push(`*Calls into: ${callParts.join(", ")}*`);
       }
@@ -709,7 +710,7 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string): 
       bySource.get(c.sourceFile)!.add(c.calleeName);
     }
     for (const [srcFile, names] of bySource) {
-      lines.push(`- [[${toWikiLink(srcFile)}]] — \`${[...names].join("`, `")}\``);
+      lines.push(`- [[${toWikiLink(srcFile, prefix)}]] — \`${[...names].join("`, `")}\``);
     }
     lines.push("");
   }
@@ -724,7 +725,7 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string): 
       byCaller.get(c.callerFile)!.add(c.calledName);
     }
     for (const [callerFile, names] of byCaller) {
-      lines.push(`- [[${toWikiLink(callerFile)}]] — calls \`${[...names].join("`, `")}\``);
+      lines.push(`- [[${toWikiLink(callerFile, prefix)}]] — calls \`${[...names].join("`, `")}\``);
     }
     lines.push("");
   }
@@ -750,7 +751,9 @@ function moduleNotePath(mirrorDir: string, dirRel: string): string {
 function generateModuleNote(
   dirRel: string,
   fileEntries: { relPath: string; stem: string }[],
-  today: string
+  today: string,
+  prefix = MIRROR_PREFIX,
+  workspace?: string,
 ): string {
   const lines: string[] = [];
   const dirName = dirRel === "." ? "root" : path.posix.basename(dirRel);
@@ -763,6 +766,7 @@ function generateModuleNote(
     `title: ${dirName}`,
     "language: py",
     "generated: true",
+    ...(workspace ? [`workspace: ${workspace}`] : []),
     "tags:",
     "  - codeUnit",
     "---",
@@ -774,7 +778,7 @@ function generateModuleNote(
   lines.push("## Files", "");
   for (const { relPath, stem } of fileEntries) {
     const d = path.posix.dirname(relPath);
-    const link = d === "." ? `${MIRROR_PREFIX}/${stem}` : `${MIRROR_PREFIX}/${d}/${stem}`;
+    const link = d === "." ? `${prefix}/${stem}` : `${prefix}/${d}/${stem}`;
     lines.push(`- [[${link}]]`);
   }
   lines.push("");
@@ -872,6 +876,10 @@ export interface MirrorPyOptions {
   mirrorDir: string;
   omitPatterns: string[];
   force: boolean;
+  /** Workspace name — written into frontmatter as `workspace: {name}`. */
+  workspace?: string;
+  /** Wikilink prefix for cross-note references. Default: "code". */
+  wikilinkPrefix?: string;
 }
 
 export async function runMirrorPy(
@@ -895,6 +903,7 @@ export async function runMirrorPy(
 
   let written = 0;
   let skipped = 0;
+  const prefix = opts.wikilinkPrefix ?? MIRROR_PREFIX;
   const validMirrorPaths = new Set<string>();
 
   for (const file of files) {
@@ -907,7 +916,7 @@ export async function runMirrorPy(
         if (mirrorStat.mtimeMs >= srcStat.mtimeMs) { skipped++; continue; }
       } catch { /* mirror doesn't exist yet — proceed */ }
     }
-    const markdown = generateMarkdown(file, files, today);
+    const markdown = generateMarkdown(file, files, today, prefix, opts.workspace);
     const preserved = extractSummarySection(file.mirrorPath);
     const final = preserved ? markdown.trimEnd() + "\n\n" + preserved + "\n" : markdown;
     fs.mkdirSync(path.dirname(file.mirrorPath), { recursive: true });
@@ -930,13 +939,13 @@ export async function runMirrorPy(
     const existingLinks = extractModuleFileLinks(modPath);
     const currentLinks = fileEntries.map(({ relPath, stem }) => {
       const d = path.posix.dirname(relPath);
-      return d === "." ? `[[${MIRROR_PREFIX}/${stem}]]` : `[[${MIRROR_PREFIX}/${d}/${stem}]]`;
+      return d === "." ? `[[${prefix}/${stem}]]` : `[[${prefix}/${d}/${stem}]]`;
     }).sort();
     const needsWrite = opts.force || existingLinks === null
       || JSON.stringify(existingLinks.sort()) !== JSON.stringify(currentLinks);
 
     if (needsWrite) {
-      const modMarkdown = generateModuleNote(dirRel, fileEntries, today);
+      const modMarkdown = generateModuleNote(dirRel, fileEntries, today, prefix, opts.workspace);
       const modPreserved = extractSummarySection(modPath);
       const modFinal = modPreserved ? modMarkdown.trimEnd() + "\n\n" + modPreserved + "\n" : modMarkdown;
       fs.mkdirSync(path.dirname(modPath), { recursive: true });

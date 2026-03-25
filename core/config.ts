@@ -106,6 +106,8 @@ export interface ObsidiClawPaths {
   graphDbPath: string;
   /** Personality markdown files directory. */
   personalitiesDir: string;
+  /** Workspace registry JSON path. */
+  workspacesPath: string;
 }
 
 /**
@@ -121,5 +123,6 @@ export function resolvePaths(rootDir?: string): ObsidiClawPaths {
     notesDbPath: join(root, ".obsidi-claw", "notes.db"),
     graphDbPath: join(root, ".obsidi-claw", "graph.db"),
     personalitiesDir: join(root, "agents", "subagent", "personalities"),
+    workspacesPath: join(root, ".obsidi-claw", "workspaces.json"),
   };
 }

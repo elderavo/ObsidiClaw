@@ -24,6 +24,7 @@ import type { ObsidiClawPaths } from "../../../core/config.js";
 import { loadPersonality } from "../../../agents/subagent/personality-loader.js";
 import { SUMMARIZE_CODE_SYSTEM_PROMPT } from "../../../agents/prompts.js";
 import { readText, writeText, fileExists, listDir } from "../../../core/os/fs.js";
+import { WorkspaceRegistry } from "../../workspaces/workspace-registry.js";
 
 const SUMMARY_HEADER = "## Summary";
 
@@ -57,7 +58,16 @@ export async function run(paths: ObsidiClawPaths): Promise<void> {
     return;
   }
 
-  const mirrors = collectMirrorFiles(mirrorDir, paths.rootDir);
+  // Load workspace registry for workspace-aware source path resolution
+  let registry: WorkspaceRegistry | undefined;
+  try {
+    registry = new WorkspaceRegistry(paths.workspacesPath, paths.mdDbPath);
+    registry.load();
+  } catch {
+    // Fallback: resolve all paths relative to rootDir
+  }
+
+  const mirrors = collectMirrorFiles(mirrorDir, paths.rootDir, registry);
   const stale = mirrors.filter((m) => isStale(m));
 
   if (stale.length === 0) {
@@ -100,7 +110,7 @@ interface MirrorEntry {
   mirrorMtime: number;
 }
 
-function collectMirrorFiles(mirrorDir: string, rootDir: string): MirrorEntry[] {
+function collectMirrorFiles(mirrorDir: string, rootDir: string, registry?: WorkspaceRegistry): MirrorEntry[] {
   const results: MirrorEntry[] = [];
 
   function walk(dir: string): void {
@@ -118,7 +128,7 @@ function collectMirrorFiles(mirrorDir: string, rootDir: string): MirrorEntry[] {
         if (stat.isDirectory()) {
           walk(full);
         } else if (name.endsWith(".md")) {
-          const sourcePath = resolveSourcePath(full, rootDir);
+          const sourcePath = resolveSourcePath(full, rootDir, registry);
           if (!sourcePath || !fileExists(sourcePath)) continue;
           results.push({
             mirrorPath: full,
@@ -137,8 +147,12 @@ function collectMirrorFiles(mirrorDir: string, rootDir: string): MirrorEntry[] {
   return results;
 }
 
-/** Extract `path:` from frontmatter and resolve to an absolute source path. */
-function resolveSourcePath(mirrorPath: string, rootDir: string): string | null {
+/**
+ * Extract `path:` from frontmatter and resolve to an absolute source path.
+ * If the note has a `workspace:` frontmatter field, look up the workspace
+ * in the registry to find the correct `sourceDir`. Falls back to `rootDir`.
+ */
+function resolveSourcePath(mirrorPath: string, rootDir: string, registry?: WorkspaceRegistry): string | null {
   let content: string;
   try {
     content = readText(mirrorPath);
@@ -146,10 +160,25 @@ function resolveSourcePath(mirrorPath: string, rootDir: string): string | null {
     return null;
   }
 
-  const match = content.match(/^---[\s\S]*?^path:\s*(.+)$/m);
-  if (!match) return null;
+  const pathMatch = content.match(/^---[\s\S]*?^path:\s*(.+)$/m);
+  if (!pathMatch) return null;
 
-  return join(rootDir, match[1].trim());
+  const relPath = pathMatch[1].trim();
+
+  // Try workspace-aware resolution first
+  if (registry) {
+    const wsMatch = content.match(/^---[\s\S]*?^workspace:\s*(.+)$/m);
+    if (wsMatch) {
+      const wsName = wsMatch[1].trim();
+      const entry = registry.getByName(wsName);
+      if (entry) {
+        return join(entry.sourceDir, relPath);
+      }
+    }
+  }
+
+  // Fallback: resolve relative to project root (backward compat)
+  return join(rootDir, relPath);
 }
 
 // ---------------------------------------------------------------------------

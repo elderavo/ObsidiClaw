@@ -249,6 +249,12 @@ def extract_symbol_kind(frontmatter: dict) -> str:
     return str(val).strip() if val else ""
 
 
+def extract_workspace(frontmatter: dict) -> str:
+    """Extract workspace name from frontmatter. Returns '' if absent."""
+    val = frontmatter.get("workspace")
+    return str(val).strip() if val else ""
+
+
 # ---------------------------------------------------------------------------
 # Title extraction
 # ---------------------------------------------------------------------------

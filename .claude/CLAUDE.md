@@ -17,10 +17,10 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 # Module Map
 | Directory | Role |
 |-----------|------|
-| `md_db/` | Flat-file markdown knowledge graph. Subdirs: `concepts/`, `tools/`, `code/` (code mirrors) |
+| `md_db/` | Flat-file markdown knowledge graph. Subdirs: `concepts/`, `tools/`, `code/{workspace}/` (code mirrors per workspace) |
 | `knowledge/graph/` | Python subprocess: LlamaIndex VectorStoreIndex + SimplePropertyGraphStore. JSON-RPC over stdin/stdout |
 | `knowledge/engine/` | TS bridge to Python subprocess + context formatting, synthesis, prune storage |
-| `knowledge/engine/mcp/` | MCP server — sole interface between retrieval and Pi. Tools: `retrieve_context`, `get_preferences`, `rate_context`, `context_feedback` |
+| `knowledge/engine/mcp/` | MCP server — sole interface between retrieval and Pi. Tools: `retrieve_context`, `get_preferences`, `rate_context`, `register_workspace`, `list_workspaces`, `unregister_workspace` |
 | `knowledge/engine/review/` | Context synthesis: LLM rewrites raw notes into query-focused markdown |
 | `knowledge/engine/prune/` | Vector-similarity clustering for note deduplication |
 | `knowledge/engine/link_graph/` | Wikilink graph: parsing, storage, validation, cycle detection |
@@ -31,8 +31,9 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 | `agents/subagent/` | First-class subagent entity: SubagentRunner, personality loader |
 | `agents/subagent/personalities/` | Personality markdown files (outside md_db, not indexed). Model config in frontmatter |
 | `agents/insight/` | Post-session review: captures transcripts, proposes preference updates + new concept notes |
+| `automation/workspaces/` | WorkspaceRegistry: persistent JSON registry of source directories, per-workspace mirror lifecycle + chokidar watchers |
 | `automation/jobs/` | OS-delegated scheduler (Windows Task Scheduler). Jobs: health-check, normalize-md-db, summarize-code |
-| `automation/jobs/watchers/` | Chokidar file watchers: md-db lint watcher, mirror watcher, reindex watcher (in stack.ts) |
+| `automation/jobs/watchers/` | Chokidar file watchers: md-db lint watcher, workspace mirror watcher, reindex watcher (in stack.ts) |
 | `automation/scripts/` | One-shot scripts: mirror-codebase (TS+Py), force-summarize, run_session_review |
 | `logger/` | SQLite runs.db (`sessions`, `runs`, `trace` + TraceEmitter) and notes.db (`note_hits`, `synthesis_metrics`, `context_ratings`, `note_lifecycle`, prune clusters via NoteMetricsLogger) |
 | `entry/` | Entry points: `stack.ts` (shared infrastructure factory), `extension.ts` (Pi TUI) |
@@ -49,7 +50,9 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **Two entry points**: `pi` (interactive, full stack) and `npx tsx agents/orchestrator/run.ts` (headless/scripting/gateway)
 - **Python owns retrieval**: `knowledge/graph/` runs as subprocess. VectorStoreIndex for vectors + SimplePropertyGraphStore for wikilink graph. TS bridge via JSON-RPC stdin/stdout. `conda run` doesn't forward stdin on Windows — spawn conda env Python directly
 - **Incremental reindex**: not a scheduled job. Chokidar watcher in `entry/stack.ts` watches `md_db/` and calls `engine.incrementalUpdate()` (1.5s debounce). Live only when Pi is running; full reindex on next startup otherwise
-- **Code mirror pipeline**: source → `mirror-codebase.ts/py` → `md_db/code/*.md` → `summarize-code` job (every 20min) adds `## Summary` + tags → chokidar watcher reindexes live
+- **Workspace registry**: persistent JSON at `.obsidi-claw/workspaces.json`. Agent registers/unregisters codebases via MCP tools at runtime. Stack auto-registers itself on first boot. Each workspace gets `md_db/{mode}/{name}/` subfolder. One unified graph with `workspace` metadata filtering in LlamaIndex
+- **Two workspace modes**: `"code"` runs the mirror pipeline + watcher; `"know"` is a future conversational knowledge mode (directory created, no pipeline yet)
+- **Code mirror pipeline**: source → `mirror-codebase.ts/py` → `md_db/code/{workspace}/*.md` → `summarize-code` job (every 20min) adds `## Summary` + tags → chokidar watcher reindexes live
 - **Staleness is mtime-only**: `source mtime > mirror mtime` → summarizer runs. No tracking files — filesystem is the state
 - **Scheduler**: OS-delegated via `PersistentScheduleBackend` (Windows Task Scheduler / schtasks). Orphaned tasks are auto-deleted during reconciliation. Jobs create `runs` rows with `run_kind="job"`
 - **Debug events**: `ContextEngine` emits `ce_*` events at every state transition. Debug JSONL ON by default (`OBSIDI_CLAW_DEBUG=0` to disable). All events → `trace` table + `.obsidi-claw/debug/{sessionId}.jsonl`
@@ -91,10 +94,19 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - [x] B2. Rewrite `retriever.py` with tier-aware expansion: symbol → pull parent file + module (always); symbol → pull CALLS targets if name appears in query tokens; file → pull parent module always, child symbols only if query is specific; module → pull child files scored by relevance
 - [x] B3. Score adjustments: going up = 0.8×, going sideways (CALLS) = 0.6×, going down (selective) = 0.9×; concept/tool notes keep current generic behavior
 
-### Phase C — Context Synthesizer Upgrade (`feature/synthesizer-upgrade`)
-- [ ] C1. Add `formatContextTiered()` to `context-engine.ts` — groups retrieved notes by tier, emits structured sections: `## Module Context` / `## File Context` / `## Symbol Details` / `## Call Relationships`
-- [ ] C2. Rewrite context-gardener personality — role changes from "synthesize" to "prune + executive summary": preserve section structure, write 2-3 sentence executive summary at top, remove irrelevant content
-- [ ] C3. Update ContextReviewer to use tiered format as both LLM input and fallback; add tier distribution metadata comment to MCP response
+### Phase W — Workspace Registry (`3-tier-markdown`) ✓
+- [x] W1. WorkspaceRegistry data layer: `automation/workspaces/workspace-registry.ts` — CRUD, JSON persistence, validation
+- [x] W2. Mirror scripts accept `workspace` + `wikilinkPrefix` params — all wikilinks use workspace-prefixed paths
+- [x] W3. Parameterize mirror watcher (`startWorkspaceMirrorWatcher`) + workspace-aware summarizer source resolution
+- [x] W4. Python graph workspace filtering: `workspace` field on ParsedNote/RetrievedNote, MetadataFilters in retriever, threaded through engine/server/context-engine
+- [x] W5. Wire registry to MCP (`register_workspace`, `list_workspaces`, `unregister_workspace` tools + `workspace` param on `retrieve_context`) + registry-driven stack boot (replaces hardcoded mirror)
+- [x] W6. Cleanup dead imports, update CLAUDE.md
+
+### Phase C — Context Synthesizer Upgrade (`3-tier-markdown`)
+- [x] C1. Rewrite `formatContext()` in `context-engine.ts` — groups retrieved notes by tier, emits structured sections: `## Module Context` / `## File Context` / `## Symbol Details` / `## Call Relationships` / `## Concepts & Patterns` / `## Suggested Tools`
+- [x] C2. Rewrite context-synthesizer personality (renamed from context-gardener) — understands 3-tier structure, output format mirrors tiered sections, preserves signatures, promotes call relationships
+- [x] C2b. Improve Pi's retrieve_context query guidelines — instruct Pi to name specific symbols + include intent
+- [ ] C3. Update ContextReviewer to add tier distribution metadata comment to MCP response
 
 ## Learning Loops
 
@@ -130,15 +142,19 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - Typed graph edges: DEFINED_IN, BELONGS_TO, CONTAINS, CONTAINS_SYMBOL, CALLS, IMPORTS, LINKS_TO — all verified in indexer
 - Tier-aware retrieval: going-up always (0.8×/0.5×), going-down selective (≥0.6 seed threshold), sideways on query overlap (0.6×)
 - **Force-mirror:** `npx tsx automation/scripts/mirror-codebase.ts --force` (also `mirror-codebase-py.ts --force`)
+- **Workspace registry**: persistent JSON at `.obsidi-claw/workspaces.json`. MCP tools: `register_workspace`, `list_workspaces`, `unregister_workspace`. Auto-registers self on first boot. `retrieve_context` accepts optional `workspace` param for scoped search
+- **Multi-codebase support**: each workspace gets its own `md_db/code/{name}/` subfolder with per-workspace wikilink prefixes. One unified graph with metadata-based workspace filtering
 
 
 ## What's Broken / Unvalidated
 - **Summarizer not yet tier-aware** — tier-1/tier-3 notes get same generic summary prompt as tier-2 (A5 pending)
-- **Context synthesizer sends undifferentiated flat dump to LLM** — no tiered sections, no explicit relationship statements (Phase C)
+- **Context synthesizer now receives tiered sections** — Module/File/Symbol/Call Relationships/Concepts; synthesizer personality updated to match (C3 tier distribution metadata still pending)
 - **Subagents feel flaky** — diagnose with debug JSONL (Phase 7, deprioritized)
 - **Post-session review not generating files** — `session_review.ts` runs but no output in md_db (Phase 8, deprioritized)
 - **Scheduler jobs unconfirmed** — registered and schtasks entries exist but never verified in production (Phase 10, deprioritized)
 - **Reindex gap when Pi is off** — summarizer/jobs write to md_db but live watcher only exists in running Pi process; reindex happens on next startup
+- **Workspace registry unvalidated end-to-end** — code compiles, all types check, but register/unregister/scoped-retrieval not yet tested with a live Pi session
+- **"know" mode stub only** — `register()` creates directory + logs message, no pipeline or watcher
 
 # Session Notes
 
@@ -168,6 +184,33 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **NoteMetricsLogger class**: new `logger/note-metrics.ts` — owns notes.db, provides `logRetrieval()`, `logRating()`, `logLifecycleEvent()`, exposes `pruneStorage`
 - **Stack wiring**: `NoteMetricsLogger` created in `createObsidiClawStack()`, threaded to MCP server, orchestrator, subagent runner
 - **Migration script**: `automation/scripts/migrate-notes-db.ts` — moved 1,017 note_hits + 119 synthesis_metrics + 25 context_ratings from runs.db to notes.db
+
+**2026-03-25 — Session 18 (Tiered Context Formatting + Synthesizer Upgrade)**
+- **Phase C1+C2 complete**: `formatContext()` rewritten to group notes by tier — `## Module Context` / `## File Context` / `## Symbol Details` / `## Call Relationships` / `## Concepts & Patterns` / `## Suggested Tools`. Seed notes marked with `*`. Call-relationship tier-1 notes (those whose linkedFrom includes another tier-1) separated into their own section with caller attribution.
+- **context-gardener → context-synthesizer**: renamed personality file to `context-synthesizer.md`. Personality rewritten to understand 3-tier structure and produce tier-aware output. Default in `context-reviewer.ts` updated. All example references in mcp-server.ts and subagent.ts updated.
+- **Pi query guidelines improved**: `promptGuidelines` now instruct Pi to name specific symbols + include intent ("signature of X", "what calls Y", "how A triggers B"). Query parameter description updated to discourage vague queries.
+- **Old `context-gardener.md` retained** for now (not deleted), but no longer referenced anywhere.
+
+**2026-03-25 — Session 19 (Workspace Registry — Phases W1–W6)**
+- **Phase W complete**: `automation/workspaces/workspace-registry.ts` — CRUD + JSON persistence + watcher lifecycle + `register()`/`unregister()` with full mirror pipeline
+- **Mirror scripts parameterized**: `mirror-codebase.ts` + `mirror-codebase-py.ts` accept `workspace`/`wikilinkPrefix` opts; all wikilinks use workspace-prefixed paths (`code/obsidi-claw/...`); frontmatter emits `workspace:` field
+- **Workspace mirror watcher**: `startWorkspaceMirrorWatcher(config)` replaces old `startMirrorWatcher(rootDir, mirrorDir)`. Config-driven: watches only configured languages, passes workspace/prefix params. Old wrapper kept for backward compat
+- **Summarizer workspace-aware**: reads `workspace:` from note frontmatter, looks up `sourceDir` from registry to resolve source file paths. Falls back to `rootDir` for pre-workspace notes
+- **Python graph workspace filtering**: `workspace` field added to `ParsedNote`/`RetrievedNote`, TextNode metadata, EntityNode properties, and `_note_to_dict()`. `retrieve()` accepts optional `workspace` param → `MetadataFilters` + post-filter graph expansion. Threaded through engine.py → server.py → context-engine.ts → `build()`
+- **MCP tools added**: `register_workspace`, `list_workspaces`, `unregister_workspace`. `retrieve_context` gains optional `workspace` param. `workspaceRegistry` threaded through `McpServerOptions` → extension.ts / orchestrator.ts / run.ts call sites
+- **Stack boot rewritten**: `initialize()` loads registry; auto-registers "obsidi-claw" on first boot; subsequent boots re-run mirrors (mtime-skipped) for all active workspaces. `workspaceRegistry.startAllWatchers()` replaces single `startMirrorWatcher()` call
+- **Cleanup**: removed dead `startMirrorWatcher` import and `mirrorWatcher` variable from `stack.ts`
+
+**2026-03-23 — Session 17 (Three-Tier Note System + Tier-Aware Retrieval)**
+- **Phases A1–A4 + B1–B3 complete**: `3-tier-markdown` branch
+- **Tier-1 symbol notes**: `mirror-codebase.ts` emits one `.md` per exported function/class/type/interface/const at `md_db/code/{dir}/{fileStem}/{symbolName}.md`. Frontmatter: `type: codeSymbol`, `tier: 1`, `parentFile`, `parentModule`, `symbolKind`
+- **Tier-3 module notes**: one `.md` per source directory named after the folder (`insight.md`, `agents.md`, etc.) — no more generic `_module.md`. Frontmatter: `type: codeModule`, `tier: 3`
+- **Tier-2 updated**: `parentModule` wikilink added to all file-level mirrors
+- **Python mirror updated**: `mirror-codebase-py.ts` emits tier-2 + tier-3 notes with same naming convention
+- **Typed graph edges** in `indexer.py`: DEFINED_IN (symbol→file), BELONGS_TO (file→module), CONTAINS (module→file), CONTAINS_SYMBOL (file→symbol), CALLS (symbol→symbol), IMPORTS (file→file), LINKS_TO (non-code)
+- **Tier-aware retriever** in `retriever.py`: going-up always (DEFINED_IN 0.8×, BELONGS_TO 0.5×), going-down selective above 0.6 threshold (CONTAINS 0.85×, CONTAINS_SYMBOL 0.9×), sideways only on query overlap (CALLS/IMPORTS 0.6×)
+- **Verified**: 342 notes (191 tier-1, 77 tier-2, 19 tier-3), all 6 typed edge labels confirmed in graph store
+- **Force-mirror command**: `npx tsx automation/scripts/mirror-codebase.ts --force`
 
 # End-of-Run Protocol
 Every agent session MUST close by doing all three:

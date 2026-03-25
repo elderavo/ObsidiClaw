@@ -24,9 +24,9 @@ import { resolvePaths, type ObsidiClawPaths } from "../core/config.js";
 import type { RunEvent } from "../agents/orchestrator/types.js";
 import { WindowsTaskSchedulerBackend } from "../core/os/scheduling-windows.js";
 import { startMdDbLintWatcher } from "../automation/jobs/watchers/md-db-lint-watcher.js";
-import { startMirrorWatcher } from "../automation/jobs/watchers/mirror-watcher.js";
 import { runMirrorTs } from "../automation/scripts/mirror-codebase.js";
 import { runMirrorPy } from "../automation/scripts/mirror-codebase-py.js";
+import { WorkspaceRegistry } from "../automation/workspaces/workspace-registry.js";
 
 // ---------------------------------------------------------------------------
 // Options
@@ -56,6 +56,7 @@ export interface ObsidiClawStack {
   readonly runner: SubagentRunner;
   readonly sessionId: string;
   readonly paths: ObsidiClawPaths;
+  readonly workspaceRegistry: WorkspaceRegistry;
   readonly persistentBackend?: import("../core/os/scheduling.js").PersistentScheduleBackend;
 
   /** Initialize the context engine and start the scheduler. */
@@ -92,6 +93,9 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
 
   // ── NoteMetricsLogger ──────────────────────────────────────────────────
   const noteMetrics = new NoteMetricsLogger(paths.notesDbPath);
+
+  // ── WorkspaceRegistry ─────────────────────────────────────────────────
+  const workspaceRegistry = new WorkspaceRegistry(paths.workspacesPath, paths.mdDbPath);
 
   // ── ContextEngine ───────────────────────────────────────────────────────
   const engine = new ContextEngine({
@@ -130,9 +134,6 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
   // ── md_db reindex watcher (incremental update on change) ────────────────
   let reindexWatcher: FSWatcher | undefined;
 
-  // ── mirror watcher (regenerate code notes on source change) ──────────────
-  let mirrorWatcher: ReturnType<typeof startMirrorWatcher> | undefined;
-
   // ── SubagentRunner ──────────────────────────────────────────────────────
   const runner = new SubagentRunner({
     dbPath: paths.dbPath,
@@ -143,25 +144,55 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
   async function initialize(): Promise<void> {
-    const mirrorDir = join(paths.mdDbPath, "code");
-
     // Engine is the only thing that must finish before accepting prompts.
-    // Scheduler install and mirror pass are independent — run in parallel,
-    // fire-and-forget so they don't block prompt readiness.
+    // Scheduler install and workspace registration are independent.
     const schedulerReady = scheduler
       ? scheduler.start().catch((err: unknown) => {
           console.warn("[obsidi-claw] scheduler.start() failed:", err);
         })
       : Promise.resolve();
 
-    const mirrorReady = (async () => {
+    // Load workspace registry and bootstrap self-registration if empty
+    workspaceRegistry.load();
+    const workspaceReady = (async () => {
       try {
-        await Promise.all([
-          runMirrorTs({ scanDir: paths.rootDir, mirrorDir, omitPatterns: ["dist", "node_modules", "_legacy", ".claude", "*.d.ts"], force: false }),
-          runMirrorPy({ scanDir: join(paths.rootDir, "knowledge", "graph"), mirrorDir, omitPatterns: ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist"], force: false }),
-        ]);
+        if (workspaceRegistry.list().length === 0) {
+          // First boot: auto-register ObsidiClaw's own source tree
+          await workspaceRegistry.register({
+            name: "obsidi-claw",
+            sourceDir: paths.rootDir,
+            mode: "code",
+            languages: ["ts", "py"],
+            active: true,
+          });
+        } else {
+          // Subsequent boots: re-run initial mirror for all active workspaces
+          // (mtime check makes this fast — skips up-to-date notes)
+          for (const entry of workspaceRegistry.list()) {
+            if (entry.active && entry.mode === "code") {
+              const mirrorDir = workspaceRegistry.mirrorDir(entry);
+              const prefix = WorkspaceRegistry.wikilinkPrefix(entry);
+              const promises: Promise<unknown>[] = [];
+              if (entry.languages.includes("ts")) {
+                promises.push(runMirrorTs({
+                  scanDir: entry.sourceDir, mirrorDir,
+                  omitPatterns: entry.omitPatterns?.ts ?? ["dist", "node_modules", "_legacy", ".claude", "*.d.ts"],
+                  force: false, workspace: entry.name, wikilinkPrefix: prefix,
+                }));
+              }
+              if (entry.languages.includes("py")) {
+                promises.push(runMirrorPy({
+                  scanDir: entry.sourceDir, mirrorDir,
+                  omitPatterns: entry.omitPatterns?.py ?? ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist"],
+                  force: false, workspace: entry.name, wikilinkPrefix: prefix,
+                }));
+              }
+              await Promise.all(promises);
+            }
+          }
+        }
       } catch (err) {
-        console.warn("[obsidi-claw] initial mirror run failed", err);
+        console.warn("[obsidi-claw] workspace initialization failed:", err);
       }
     })();
 
@@ -169,12 +200,12 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     await Promise.all([
       engine.initialize(),
       schedulerReady,
-      mirrorReady,
+      workspaceReady,
     ]);
 
     // Watchers are cheap — start after everything else is up.
     mdDbWatcher = startMdDbLintWatcher(paths.mdDbPath);
-    mirrorWatcher = startMirrorWatcher(paths.rootDir, mirrorDir);
+    workspaceRegistry.startAllWatchers();
     reindexWatcher = startMdDbReindexWatcher(paths.mdDbPath, engine);
   }
 
@@ -183,10 +214,7 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
       await reindexWatcher.close();
       reindexWatcher = undefined;
     }
-    if (mirrorWatcher) {
-      await mirrorWatcher.close();
-      mirrorWatcher = undefined;
-    }
+    await workspaceRegistry.stopAllWatchers();
     if (mdDbWatcher) {
       await mdDbWatcher.close();
       mdDbWatcher = undefined;
@@ -207,6 +235,7 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     runner,
     sessionId,
     paths,
+    workspaceRegistry,
     persistentBackend,
     initialize,
     shutdown,

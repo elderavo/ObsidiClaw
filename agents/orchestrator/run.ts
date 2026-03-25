@@ -42,7 +42,7 @@ const paths = resolvePaths(resolve(__dirname, __dirname.includes("dist") ? "../.
 const stack = createObsidiClawStack({ rootDir: paths.rootDir });
 await stack.initialize();
 
-const orchestrator = new Orchestrator(stack.logger, stack.engine, stack.noteMetrics);
+const orchestrator = new Orchestrator(stack.logger, stack.engine, stack.noteMetrics, stack.workspaceRegistry);
 
 // ── Start session ─────────────────────────────────────────────────────────
 

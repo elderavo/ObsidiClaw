@@ -114,17 +114,29 @@ class ObsidiClawRetriever:
         self.parsed_notes = parsed_notes
         self.similarity_top_k = similarity_top_k
 
-    def retrieve(self, query: str) -> tuple[list[RetrievedNote], list[RetrievedNote]]:
+    def retrieve(self, query: str, workspace: str | None = None) -> tuple[list[RetrievedNote], list[RetrievedNote]]:
         """Run hybrid retrieval.
 
         Returns (seed_notes, expanded_notes) — both lists filtered and scored.
+        If workspace is set, only notes from that workspace are returned as seeds.
+        Graph-expanded notes are also filtered to the same workspace.
         """
         query_tokens = set(
             normalize_token(w) for w in query.lower().split() if normalize_token(w)
         )
 
         # ── Step 1: Vector seeds ──────────────────────────────────────────
-        retriever = self.index.as_retriever(similarity_top_k=self.similarity_top_k)
+        retriever_kwargs: dict = {"similarity_top_k": self.similarity_top_k}
+        if workspace:
+            from llama_index.core.vector_stores.types import (
+                MetadataFilters,
+                MetadataFilter,
+                FilterOperator,
+            )
+            retriever_kwargs["filters"] = MetadataFilters(filters=[
+                MetadataFilter(key="workspace", value=workspace, operator=FilterOperator.EQ),
+            ])
+        retriever = self.index.as_retriever(**retriever_kwargs)
         raw_results = retriever.retrieve(query)
 
         seeds: list[RetrievedNote] = []
@@ -150,6 +162,8 @@ class ObsidiClawRetriever:
 
             boosted_score = self._apply_tag_boost(score, tags, query_tokens)
 
+            ws = parsed.workspace if parsed else str(metadata.get("workspace", ""))
+
             seeds.append(
                 RetrievedNote(
                     note_id=file_path,
@@ -163,6 +177,7 @@ class ObsidiClawRetriever:
                     linked_from=None,
                     depth=0,
                     tier=tier,
+                    workspace=ws,
                 )
             )
             seed_ids.add(file_path)
@@ -215,6 +230,10 @@ class ObsidiClawRetriever:
                         neighbor_score, neighbor_parsed.tags, query_tokens
                     )
 
+                    # Skip if workspace filter active and neighbor is from a different workspace
+                    if workspace and neighbor_parsed.workspace and neighbor_parsed.workspace != workspace:
+                        continue
+
                     expanded.append(
                         RetrievedNote(
                             note_id=neighbor_id,
@@ -228,6 +247,7 @@ class ObsidiClawRetriever:
                             linked_from=[seed_id],
                             depth=1,
                             tier=neighbor_parsed.tier,
+                            workspace=neighbor_parsed.workspace,
                         )
                     )
                     expanded_ids.add(neighbor_id)

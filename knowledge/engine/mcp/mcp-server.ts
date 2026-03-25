@@ -16,6 +16,7 @@ import { z } from "zod";
 import type { ContextEngine } from "../context-engine.js";
 import type { ContextPackage, SubagentPackage, PruneMemberStatus } from "../types.js";
 import type { PruneClusterStorage } from "../prune/prune-storage.js";
+import type { WorkspaceRegistry } from "../../../automation/workspaces/workspace-registry.js";
 import { RATE_CONTEXT_REMINDER } from "../../../agents/prompts.js";
 
 export type OnContextBuilt = (pkg: ContextPackage) => void;
@@ -29,6 +30,8 @@ export interface McpServerOptions {
   onContextRated?: OnContextRated;
   /** Shared prune cluster storage (from notes.db). Falls back to engine.buildPruneClusters() for build. */
   pruneStorage?: PruneClusterStorage;
+  /** Workspace registry for register/list/unregister workspace tools. */
+  workspaceRegistry?: WorkspaceRegistry;
 }
 
 /**
@@ -48,7 +51,7 @@ export function createContextEngineMcpServer(
 }
 
 function _createMcpServer(opts: McpServerOptions): McpServer {
-  const { engine, onContextBuilt, onSubagentPrepared, onContextRated, pruneStorage } = opts;
+  const { engine, onContextBuilt, onSubagentPrepared, onContextRated, pruneStorage, workspaceRegistry } = opts;
   const server = new McpServer({ name: "obsidi-claw-context", version: "1.0.0" });
 
   // ── retrieve_context ──────────────────────────────────────────────────────
@@ -67,10 +70,11 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
       inputSchema: {
         query: z.string().describe("What to search for in the knowledge base."),
         max_chars: z.number().optional().describe("Maximum characters to return (default: 3000). Use a smaller value for tighter context."),
+        workspace: z.string().optional().describe("Limit retrieval to a specific registered workspace by name. Omit to search all workspaces."),
       },
     },
-    async ({ query, max_chars }) => {
-      const pkg = await engine.build(query);
+    async ({ query, max_chars, workspace }) => {
+      const pkg = await engine.build(query, workspace);
       onContextBuilt?.(pkg);
       const budget = max_chars ?? DEFAULT_MAX_CHARS;
       let text = pkg.formattedContext.length <= budget
@@ -147,7 +151,7 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
         prompt: z.string().describe("Top-level task description for the subagent."),
         plan: z.string().describe("Detailed implementation plan from the main agent."),
         success_criteria: z.string().describe("Clear, measurable criteria for task completion."),
-        personality: z.string().optional().describe("Personality profile name (e.g., 'deep-researcher', 'code-reviewer', 'context-gardener')."),
+        personality: z.string().optional().describe("Personality profile name (e.g., 'deep-researcher', 'code-reviewer', 'context-synthesizer')."),
       },
     },
     async ({ prompt, plan, success_criteria, personality }) => {
@@ -248,6 +252,129 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
           text: cluster ? formatClusterDetail(cluster) : `Updated ${note_id} in ${cluster_id}.`,
         }],
       };
+    },
+  );
+
+  // ── Workspace tools ────────────────────────────────────────────────────
+
+  server.registerTool(
+    "register_workspace",
+    {
+      description:
+        "Register a source directory as a workspace for code mirroring. " +
+        "Runs an initial mirror pass and starts a file watcher for continuous updates. " +
+        "Mirrored notes become available via retrieve_context.",
+      inputSchema: {
+        name: z.string().describe("Unique slug (lowercase alphanumeric + hyphens, 2-64 chars). Used as folder name in md_db."),
+        source_dir: z.string().describe("Absolute path to the source directory to mirror."),
+        mode: z.enum(["code", "know"]).default("code").describe("'code' = mirror pipeline; 'know' = conversational knowledge (future)."),
+        languages: z.array(z.enum(["ts", "py"])).default(["ts"]).describe("Which languages to mirror. Default: TypeScript only."),
+      },
+    },
+    async ({ name, source_dir, mode, languages }) => {
+      if (!workspaceRegistry) {
+        return { content: [{ type: "text" as const, text: "Workspace registry not available." }] };
+      }
+      try {
+        const { entry, notesGenerated } = await workspaceRegistry.register({
+          name,
+          sourceDir: source_dir,
+          mode: mode as "code" | "know",
+          languages: languages as ("ts" | "py")[],
+          active: true,
+        });
+
+        // Trigger incremental reindex so new notes are immediately searchable
+        if (notesGenerated > 0) {
+          try {
+            await engine.reindex();
+          } catch {
+            // Non-fatal — notes will be indexed on next startup
+          }
+        }
+
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Workspace "${entry.name}" registered.\n` +
+              `Source: ${entry.sourceDir}\n` +
+              `Mode: ${entry.mode}\n` +
+              `Languages: ${entry.languages.join(", ")}\n` +
+              `Notes generated: ${notesGenerated}\n` +
+              `Watcher: active`,
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `Failed to register workspace: ${err}` }] };
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_workspaces",
+    {
+      description: "List all registered workspaces and their status.",
+      inputSchema: {},
+    },
+    async () => {
+      if (!workspaceRegistry) {
+        return { content: [{ type: "text" as const, text: "Workspace registry not available." }] };
+      }
+      const entries = workspaceRegistry.list();
+      if (entries.length === 0) {
+        return { content: [{ type: "text" as const, text: "No workspaces registered." }] };
+      }
+      const lines = [
+        "| Name | Mode | Languages | Source | Active | Registered |",
+        "|------|------|-----------|--------|--------|------------|",
+        ...entries.map((e) =>
+          `| ${e.name} | ${e.mode} | ${e.languages.join(", ")} | ${e.sourceDir} | ${e.active ? "yes" : "no"} | ${e.registeredAt.slice(0, 10)} |`,
+        ),
+      ];
+      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+    },
+  );
+
+  server.registerTool(
+    "unregister_workspace",
+    {
+      description:
+        "Unregister a workspace: stops watcher, optionally deletes mirrored notes, and removes from registry.",
+      inputSchema: {
+        name: z.string().describe("Workspace name to remove."),
+        delete_notes: z.boolean().default(true).describe("Delete mirrored notes from md_db (default: true)."),
+      },
+    },
+    async ({ name, delete_notes }) => {
+      if (!workspaceRegistry) {
+        return { content: [{ type: "text" as const, text: "Workspace registry not available." }] };
+      }
+      try {
+        const { removed, deletedPaths } = await workspaceRegistry.unregister(name, { deleteNotes: delete_notes });
+        if (!removed) {
+          return { content: [{ type: "text" as const, text: `Workspace "${name}" not found.` }] };
+        }
+
+        // Trigger incremental update with deleted paths
+        if (deletedPaths.length > 0) {
+          try {
+            await engine.incrementalUpdate([], deletedPaths);
+          } catch {
+            // Non-fatal
+          }
+        }
+
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Workspace "${name}" unregistered.\n` +
+              `Notes deleted: ${deletedPaths.length}\n` +
+              `Watcher: stopped`,
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `Failed to unregister workspace: ${err}` }] };
+      }
     },
   );
 

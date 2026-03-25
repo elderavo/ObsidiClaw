@@ -40,6 +40,7 @@ class ParsedNote:
     symbol_kind: str = ""    # "function" | "class" | "type" | "interface" | "const" | ""
     parent_file: str = ""    # tier-1 only: wikilink path to parent tier-2 note
     parent_module: str = ""  # tier-1/2: wikilink path to parent tier-3 note
+    workspace: str = ""      # workspace name from frontmatter (empty for non-workspace notes)
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +63,7 @@ class RetrievedNote:
     linked_from: Optional[list[str]] = None
     depth: Optional[int] = None  # 0 = seed, 1+ = graph expansion
     tier: str = ""               # "1" | "2" | "3" | ""
+    workspace: str = ""          # workspace name (empty for non-workspace notes)
 
 
 # ---------------------------------------------------------------------------

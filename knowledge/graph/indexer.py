@@ -34,6 +34,7 @@ from .markdown_utils import (
     extract_parent_module,
     extract_symbol_kind,
     extract_title,
+    extract_workspace,
     extract_wikilinks,
     infer_note_type,
     parse_frontmatter,
@@ -112,6 +113,7 @@ def _scan_md_db(md_db_path: str) -> list[ParsedNote]:
                 symbol_kind=extract_symbol_kind(frontmatter),
                 parent_file=extract_parent_file(frontmatter),
                 parent_module=extract_parent_module(frontmatter),
+                workspace=extract_workspace(frontmatter),
             )
         )
 
@@ -215,6 +217,7 @@ def _build_graph_store(
                 "symbol_kind": note.symbol_kind,
                 "parent_file": note.parent_file,
                 "parent_module": note.parent_module,
+                "workspace": note.workspace,
             },
         )
         entity_nodes.append(entity)
@@ -325,6 +328,7 @@ def _build_vector_index(
                 "title": note.title,
                 "tool_id": note.tool_id or "",
                 "tags": ",".join(note.tags),
+                "workspace": note.workspace,
             },
         ))
 

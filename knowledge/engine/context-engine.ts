@@ -180,7 +180,7 @@ export class ContextEngine {
    * Build a ContextPackage for the given prompt.
    * Sends `retrieve` RPC → formats context in TS → runs reviewer in TS.
    */
-  async build(prompt: string): Promise<ContextPackage> {
+  async build(prompt: string, workspace?: string): Promise<ContextPackage> {
     this.ensureInitialized();
 
     const t0 = Date.now();
@@ -191,6 +191,7 @@ export class ContextEngine {
     const rpcResult = await this.rpc("retrieve", {
       query: prompt,
       top_k: this.config.topK,
+      ...(workspace ? { workspace } : {}),
     }) as { seed_notes: RpcRetrievedNote[]; expanded_notes: RpcRetrievedNote[] };
 
     const seedNotes = rpcResult.seed_notes.map(rpcNoteToRetrievedNote);
@@ -795,7 +796,7 @@ function formatSubagentSystemPrompt(
 }
 
 // ---------------------------------------------------------------------------
-// Context formatting (unchanged from original)
+// Context formatting — tier-aware (Phase C1)
 // ---------------------------------------------------------------------------
 
 function formatContext(seedNotes: RetrievedNote[], expandedNotes: RetrievedNote[]): string {
@@ -812,51 +813,101 @@ function formatContext(seedNotes: RetrievedNote[], expandedNotes: RetrievedNote[
     "",
   ];
 
-  // Seed notes (non-tool)
-  const seedConcepts = seedNotes.filter((n) => n.type !== "tool");
-  if (seedConcepts.length > 0) {
-    lines.push("## Seed Notes");
-    lines.push("_Directly relevant notes retrieved by semantic similarity._");
+  // Partition by category
+  const tier3 = allNotes.filter((n) => n.tier === "3");
+  const tier2 = allNotes.filter((n) => n.tier === "2");
+  const tier1 = allNotes.filter((n) => n.tier === "1");
+  const concepts = allNotes.filter((n) => !n.tier && n.type === "concept");
+  const tools = allNotes.filter((n) => n.type === "tool");
+  const other = allNotes.filter(
+    (n) => !n.tier && n.type !== "concept" && n.type !== "tool",
+  );
+
+  // Render one note block. seedMark (*) signals direct vector retrieval.
+  const renderNote = (note: RetrievedNote, labelSuffix = "", extraMeta = "") => {
+    const seedMark = note.depth === 0 || note.retrievalSource === "vector" ? "*" : "";
+    const meta = [seedMark, `score: ${note.score.toFixed(3)}`, extraMeta].filter(Boolean).join(" | ");
+    lines.push(`### ${note.path}${labelSuffix} (${meta})`);
+    lines.push(stripFrontmatter(note.content));
     lines.push("");
-    for (const note of seedConcepts) {
-      lines.push(`### ${note.path} (score: ${note.score.toFixed(3)})`);
-      lines.push(stripFrontmatter(note.content));
-      lines.push("");
-    }
+  };
+
+  // ── Tier 3: Module Context ──────────────────────────────────────────────
+  if (tier3.length > 0) {
+    lines.push("## Module Context");
+    lines.push("_Architecture-level: what each subsystem/directory does._");
+    lines.push("");
+    for (const note of tier3) renderNote(note);
   }
 
-  // Graph-expanded notes (non-tool)
-  const expandedConcepts = expandedNotes.filter((n) => n.type !== "tool");
-  if (expandedConcepts.length > 0) {
-    lines.push("## Linked Supporting Notes");
-    lines.push("_Notes linked to seed notes via [[wikilinks]]._");
+  // ── Tier 2: File Context ────────────────────────────────────────────────
+  if (tier2.length > 0) {
+    lines.push("## File Context");
+    lines.push("_File-level: exports, imports, and role within the module._");
     lines.push("");
-    for (const note of expandedConcepts) {
-      const linkedFromPart =
-        note.linkedFrom && note.linkedFrom.length > 0
-          ? ` | Linked from: ${note.linkedFrom.join(", ")}`
-          : "";
-      lines.push(`### ${note.path} (score: ${note.score.toFixed(3)}${linkedFromPart})`);
-      lines.push(stripFrontmatter(note.content));
-      lines.push("");
-    }
+    for (const note of tier2) renderNote(note);
   }
 
-  // Tool nodes (both tiers)
-  const toolNotes = allNotes.filter((n) => n.type === "tool");
-  if (toolNotes.length > 0) {
-    lines.push("## Suggested Tools");
-    lines.push(
-      "_Tool nodes from the knowledge base._",
+  // ── Tier 1: Symbol Details + Call Relationships ─────────────────────────
+  if (tier1.length > 0) {
+    // Tier-1 notes whose linkedFrom references another tier-1 note arrived via a
+    // CALLS/IMPORTS edge — separate them so the synthesizer sees call topology.
+    const tier1Ids = new Set(tier1.map((n) => n.noteId));
+    const callRelated = tier1.filter(
+      (n) => n.linkedFrom && n.linkedFrom.some((id) => tier1Ids.has(id)),
     );
+    const callRelatedIds = new Set(callRelated.map((n) => n.noteId));
+    const directSymbols = tier1.filter((n) => !callRelatedIds.has(n.noteId));
+
+    lines.push("## Symbol Details");
+    lines.push("_Symbol-level: specific function/class/type signatures and behavior._");
     lines.push("");
-    for (const note of toolNotes) {
+    for (const note of directSymbols) {
+      const kindLabel = note.symbolKind ? ` [${note.symbolKind}]` : "";
+      renderNote(note, kindLabel);
+    }
+
+    if (callRelated.length > 0) {
+      lines.push("## Call Relationships");
+      lines.push("_Symbols reached via CALLS/IMPORTS edges from the above._");
+      lines.push("");
+      for (const note of callRelated) {
+        const kindLabel = note.symbolKind ? ` [${note.symbolKind}]` : "";
+        const callers = note.linkedFrom!.filter((id) => tier1Ids.has(id));
+        const callerMeta = callers.length > 0 ? `called by: ${callers.join(", ")}` : "";
+        renderNote(note, kindLabel, callerMeta);
+      }
+    }
+  }
+
+  // ── Concepts & Patterns ─────────────────────────────────────────────────
+  if (concepts.length > 0) {
+    lines.push("## Concepts & Patterns");
+    lines.push("_Design heuristics, failure modes, best practices._");
+    lines.push("");
+    for (const note of concepts) renderNote(note);
+  }
+
+  // ── Other non-tiered code notes ─────────────────────────────────────────
+  if (other.length > 0) {
+    lines.push("## Additional Context");
+    lines.push("");
+    for (const note of other) renderNote(note);
+  }
+
+  // ── Suggested Tools ─────────────────────────────────────────────────────
+  if (tools.length > 0) {
+    lines.push("## Suggested Tools");
+    lines.push("_Live tools for real-time data._");
+    lines.push("");
+    for (const note of tools) {
       lines.push(`### Tool: ${note.toolId} (${note.path})`);
       lines.push(stripFrontmatter(note.content));
       lines.push("");
     }
   }
 
+  lines.push("_* = directly retrieved by semantic similarity_");
   lines.push("<!-- End ObsidiClaw Context -->");
 
   return lines.join("\n");

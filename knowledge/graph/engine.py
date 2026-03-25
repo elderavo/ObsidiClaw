@@ -191,8 +191,11 @@ class KnowledgeGraphEngine:
     # Retrieve
     # ------------------------------------------------------------------
 
-    def retrieve(self, query: str, top_k: Optional[int] = None) -> dict[str, Any]:
-        """Run hybrid retrieval: vector seeds + graph expansion, with keyword fallback."""
+    def retrieve(self, query: str, top_k: Optional[int] = None, workspace: Optional[str] = None) -> dict[str, Any]:
+        """Run hybrid retrieval: vector seeds + graph expansion, with keyword fallback.
+
+        If workspace is set, only notes from that workspace are returned.
+        """
         k = top_k or self.top_k
         seed_notes: list[RetrievedNote] = []
         expanded_notes: list[RetrievedNote] = []
@@ -209,7 +212,7 @@ class KnowledgeGraphEngine:
                     parsed_notes=self._parsed_notes,
                     similarity_top_k=k,
                 )
-                seed_notes, expanded_notes = retriever.retrieve(query)
+                seed_notes, expanded_notes = retriever.retrieve(query, workspace=workspace)
             except Exception as exc:
                 log.warning("Vector retrieval failed, falling back to keyword: %s", exc)
                 seed_notes = []
@@ -385,6 +388,7 @@ class KnowledgeGraphEngine:
         from .markdown_utils import (
             extract_tags,
             extract_title,
+            extract_workspace,
             extract_wikilinks,
             infer_note_type,
             parse_frontmatter,
@@ -434,6 +438,7 @@ class KnowledgeGraphEngine:
                 time_created=None,
                 last_edited=None,
                 tags=tags,
+                workspace=extract_workspace(frontmatter),
             )
 
             is_new = rel_path not in self._parsed_notes
@@ -455,6 +460,7 @@ class KnowledgeGraphEngine:
                         "title": title,
                         "tool_id": tool_id or "",
                         "tags": ",".join(tags),
+                        "workspace": note.workspace,
                     },
                 )
                 doc = Document(text=f"{title}\n\n{body}", id_=rel_path)
@@ -595,4 +601,5 @@ class KnowledgeGraphEngine:
             "retrievalSource": note.retrieval_source,
             "linkedFrom": note.linked_from,
             "depth": note.depth,
+            "workspace": note.workspace,
         }
