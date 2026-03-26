@@ -185,7 +185,7 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
             if (entry.languages.includes("py")) {
               promises.push(runMirrorPy({
                 scanDir: entry.sourceDir, mirrorDir,
-                omitPatterns: entry.omitPatterns?.py ?? ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist"],
+                omitPatterns: entry.omitPatterns?.py ?? ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist", "node_modules"],
                 force: false, workspace: entry.name, wikilinkPrefix: prefix,
               }));
             }

@@ -13,7 +13,7 @@ import type { SummarizeWorkerConfig } from "../summarize-worker.js";
 // ---------------------------------------------------------------------------
 
 const DEFAULT_TS_OMIT = ["dist", "node_modules", "_legacy", ".claude", "*.d.ts"];
-const DEFAULT_PY_OMIT = ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist"];
+const DEFAULT_PY_OMIT = ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist", "node_modules"];
 
 // Glob patterns per language — appended to sourceDir
 const LANG_GLOBS: Record<WorkspaceLanguage, string> = {

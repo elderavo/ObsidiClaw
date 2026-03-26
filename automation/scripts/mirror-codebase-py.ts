@@ -116,7 +116,7 @@ function parseArgs(): CliArgs {
   const cwd = process.cwd();
   let scanDir = cwd;
   let mirrorDir = path.join(cwd, "md_db", "code");
-  let omitPatterns = ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist"];
+  let omitPatterns = ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist", "node_modules"];
   let force = false;
 
   for (let i = 0; i < args.length; i++) {
