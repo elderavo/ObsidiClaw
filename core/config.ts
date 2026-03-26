@@ -6,7 +6,7 @@
  *
  * Environment variables:
  *   OBSIDI_EMBED_PROVIDER  — "ollama" | "openai" | "local"  (default: "ollama")
- *   OBSIDI_EMBED_MODEL     — embedding model name            (default: "nomic-embed-text:v1.5")
+ *   OBSIDI_EMBED_MODEL     — embedding model name            (default: "nomic-embed-text:latest")
  *   OBSIDI_EMBED_HOST      — embedding provider host         (default: "http://localhost:11434")
  *   OBSIDI_LLM_PROVIDER    — "ollama" | "openai"             (default: "ollama")
  *   OBSIDI_LLM_MODEL       — LLM model name                  (default: "cogito:8b")
@@ -34,10 +34,10 @@ export interface EmbedConfig {
 export function getEmbedConfig(): EmbedConfig {
   return {
     provider: (process.env["OBSIDI_EMBED_PROVIDER"] as EmbedProvider) ?? "ollama",
-    model: process.env["OBSIDI_EMBED_MODEL"] ?? "nomic-embed-text:v1.5",
+    model: process.env["OBSIDI_EMBED_MODEL"] ?? "nomic-embed-text:latest",
     host: process.env["OBSIDI_EMBED_HOST"] ?? "http://localhost:11434",
     apiKey: process.env["OPENAI_API_KEY"],
-    contextLength: parseInt(process.env["OBSIDI_EMBED_CONTEXT_LENGTH"] ?? "8192", 10),
+    contextLength: parseInt(process.env["OBSIDI_EMBED_CONTEXT_LENGTH"] ?? "512", 10),
   };
 }
 

@@ -23,10 +23,10 @@ def get_embed_config() -> dict[str, Any]:
     """Read embedding config from environment variables with defaults."""
     return {
         "provider": os.environ.get("OBSIDI_EMBED_PROVIDER", "ollama"),
-        "model": os.environ.get("OBSIDI_EMBED_MODEL", "nomic-embed-text:v1.5"),
+        "model": os.environ.get("OBSIDI_EMBED_MODEL", "nomic-embed-text:latest"),
         "host": os.environ.get("OBSIDI_EMBED_HOST", "http://localhost:11434"),
         "api_key": os.environ.get("OPENAI_API_KEY", ""),
-        "context_length": int(os.environ.get("OBSIDI_EMBED_CONTEXT_LENGTH", "8192")),
+        "context_length": int(os.environ.get("OBSIDI_EMBED_CONTEXT_LENGTH", "512")),
     }
 
 
