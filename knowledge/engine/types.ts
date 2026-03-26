@@ -34,7 +34,7 @@ export interface RetrievedNote {
   tags?: string[];
 
   /** How this note entered the result set. */
-  retrievalSource: "vector" | "graph" | "hybrid" | "keyword";
+  retrievalSource: "vector" | "graph" | "hybrid" | "keyword" | "path";
 
   /**
    * NoteIds of notes that linked to this one.
@@ -138,6 +138,35 @@ export interface SubagentPackage {
 
   /** Unix timestamp (ms) when the package was built. */
   builtAt: number;
+}
+
+// ---------------------------------------------------------------------------
+// PathResult — graph path retrieval result
+// ---------------------------------------------------------------------------
+
+export interface PathStep {
+  nodeId: string;
+  edgeLabel: string;
+  edgeDirection: "outgoing" | "incoming" | "";
+  fromNodeId: string;
+}
+
+export interface PathResult {
+  startId: string;
+  endId: string;
+  startResolvedBy: "exact" | "vector" | "keyword" | "none";
+  endResolvedBy: "exact" | "vector" | "keyword" | "none";
+  pathLength: number;
+  pathSteps: PathStep[];
+  pathNotes: RetrievedNote[];
+  formattedContext: string;
+  retrievalMs: number;
+  noPath: boolean;
+  reviewResult?: {
+    reviewMs: number;
+    skipped: boolean;
+    skipReason?: string;
+  };
 }
 
 // ---------------------------------------------------------------------------

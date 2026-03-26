@@ -554,6 +554,159 @@ class KnowledgeGraphEngine:
                 log.warning("Failed to delete %s from vector index: %s", note_id, exc)
 
     # ------------------------------------------------------------------
+    # Graph path retrieval
+    # ------------------------------------------------------------------
+
+    def find_path(
+        self,
+        start_query: str,
+        end_query: str,
+        edge_types: Optional[list[str]] = None,
+        max_depth: int = 8,
+    ) -> dict[str, Any]:
+        """Find the shortest graph path between two endpoints.
+
+        Each endpoint is resolved: exact note_id match → vector similarity
+        (top-1) → keyword fallback. Returns path steps with edge labels
+        and the notes along the path.
+        """
+        if not self.md_db_path:
+            raise RuntimeError("Engine not initialized")
+        if not self.graph_store:
+            raise RuntimeError("Graph store not available")
+
+        t0 = time.time()
+        allowed = set(edge_types) if edge_types else None
+
+        # ── Resolve endpoints ─────────────────────────────────────────────
+        start_id, start_method = self._resolve_endpoint(start_query)
+        end_id, end_method = self._resolve_endpoint(end_query)
+
+        if start_id is None or end_id is None:
+            return {
+                "start_id": start_id or "",
+                "end_id": end_id or "",
+                "start_resolved_by": start_method,
+                "end_resolved_by": end_method,
+                "path_length": 0,
+                "path_steps": [],
+                "path_notes": [],
+                "no_path": True,
+                "duration_ms": int((time.time() - t0) * 1000),
+            }
+
+        # ── BFS shortest path ─────────────────────────────────────────────
+        from .pathfinder import find_shortest_path
+
+        steps = find_shortest_path(
+            self.graph_store, start_id, end_id,
+            allowed_edge_types=allowed,
+            max_depth=max_depth,
+        )
+
+        if steps is None:
+            return {
+                "start_id": start_id,
+                "end_id": end_id,
+                "start_resolved_by": start_method,
+                "end_resolved_by": end_method,
+                "path_length": 0,
+                "path_steps": [],
+                "path_notes": [],
+                "no_path": True,
+                "duration_ms": int((time.time() - t0) * 1000),
+            }
+
+        # ── Collect path notes ────────────────────────────────────────────
+        path_length = len(steps) - 1  # hops, not nodes
+        path_steps_dicts: list[dict[str, str]] = []
+        path_notes: list[dict[str, Any]] = []
+
+        for i, step in enumerate(steps):
+            path_steps_dicts.append({
+                "nodeId": step.node_id,
+                "edgeLabel": step.edge_label,
+                "edgeDirection": step.edge_direction,
+                "fromNodeId": step.from_node_id,
+            })
+
+            parsed = self._parsed_notes.get(step.node_id)
+            if parsed is None:
+                continue
+
+            # Score: 1.0 at endpoints, decaying toward middle
+            if path_length == 0:
+                score = 1.0
+            else:
+                dist_from_end = min(i, path_length - i)
+                score = max(0.5, 1.0 - (dist_from_end / path_length) * 0.5)
+
+            note = RetrievedNote(
+                note_id=parsed.note_id,
+                path=parsed.path,
+                content=parsed.body,
+                score=score,
+                type=parsed.note_type,
+                retrieval_source="path",
+                tool_id=parsed.tool_id,
+                tags=parsed.tags,
+                linked_from=[step.from_node_id] if step.from_node_id else None,
+                depth=i,
+                tier=parsed.tier,
+                workspace=parsed.workspace,
+            )
+            path_notes.append(self._note_to_dict(note))
+
+        return {
+            "start_id": start_id,
+            "end_id": end_id,
+            "start_resolved_by": start_method,
+            "end_resolved_by": end_method,
+            "path_length": path_length,
+            "path_steps": path_steps_dicts,
+            "path_notes": path_notes,
+            "no_path": False,
+            "duration_ms": int((time.time() - t0) * 1000),
+        }
+
+    def _resolve_endpoint(self, query: str) -> tuple[Optional[str], str]:
+        """Resolve a fuzzy query to a note_id.
+
+        Cascade: exact match → vector similarity (top-1) → keyword fallback.
+        Returns (note_id_or_None, resolution_method).
+        """
+        # 1. Exact match on note_id
+        if query in self._parsed_notes:
+            return query, "exact"
+
+        # 2. Partial path match (e.g. "context-engine.ts" matches
+        #    "code/obsidi-claw/knowledge/engine/context-engine.ts.md")
+        query_lower = query.lower()
+        for note_id in self._parsed_notes:
+            if query_lower in note_id.lower():
+                return note_id, "exact"
+
+        # 3. Vector similarity (top-1)
+        if self.index is not None:
+            try:
+                retriever = self.index.as_retriever(similarity_top_k=1)
+                results = retriever.retrieve(query)
+                if results:
+                    file_path = results[0].metadata.get("file_path", "")
+                    if file_path and file_path in self._parsed_notes:
+                        return file_path, "vector"
+            except Exception as exc:
+                log.warning("Vector endpoint resolution failed for '%s': %s", query, exc)
+
+        # 4. Keyword fallback
+        if self.keyword_retriever is not None:
+            kw_results = self.keyword_retriever.retrieve(query, top_k=1)
+            if kw_results:
+                return kw_results[0].note_id, "keyword"
+
+        return None, "none"
+
+    # ------------------------------------------------------------------
     # Graph stats
     # ------------------------------------------------------------------
 

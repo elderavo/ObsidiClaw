@@ -37,6 +37,8 @@ import type {
   ContextEngineConfig,
   ContextEngineEvent,
   ContextPackage,
+  PathResult,
+  PathStep,
   RetrievedNote,
   SubagentInput,
   SubagentPackage,
@@ -266,6 +268,74 @@ export class ContextEngine extends EventEmitter {
       rawChars,
       strippedChars: formattedContext.length,
       estimatedTokens: estimateTokens(formattedContext),
+      reviewResult,
+    };
+  }
+
+  /**
+   * Find the shortest graph path between two endpoints.
+   * Endpoints can be exact note paths or fuzzy text (resolved via embedding similarity).
+   */
+  async findPath(
+    start: string,
+    end: string,
+    options?: { edgeTypes?: string[]; maxDepth?: number },
+  ): Promise<PathResult> {
+    this.ensureInitialized();
+    const t0 = Date.now();
+
+    const rpcResult = await this.rpc("find_path", {
+      start,
+      end,
+      ...(options?.edgeTypes ? { edge_types: options.edgeTypes } : {}),
+      ...(options?.maxDepth ? { max_depth: options.maxDepth } : {}),
+    }) as {
+      start_id: string;
+      end_id: string;
+      start_resolved_by: string;
+      end_resolved_by: string;
+      path_length: number;
+      path_steps: Array<{ nodeId: string; edgeLabel: string; edgeDirection: string; fromNodeId: string }>;
+      path_notes: RpcRetrievedNote[];
+      no_path: boolean;
+      duration_ms: number;
+    };
+
+    const pathNotes = rpcResult.path_notes.map(rpcNoteToRetrievedNote);
+    const pathSteps: PathStep[] = rpcResult.path_steps.map((s) => ({
+      nodeId: s.nodeId,
+      edgeLabel: s.edgeLabel,
+      edgeDirection: s.edgeDirection as PathStep["edgeDirection"],
+      fromNodeId: s.fromNodeId,
+    }));
+
+    // Format path context
+    let formattedContext = rpcResult.no_path
+      ? `<!-- ObsidiClaw: no graph path found between "${start}" and "${end}" -->`
+      : formatPathContext(pathSteps, pathNotes);
+
+    // Run through synthesizer if available
+    let reviewResult: PathResult["reviewResult"];
+    if (!rpcResult.no_path && this.reviewer && pathNotes.length > 0) {
+      const pathQuery = `How does "${start}" connect to "${end}"?`;
+      const review = await this.reviewer.review(pathQuery, pathNotes, formattedContext);
+      reviewResult = { reviewMs: review.reviewMs, skipped: review.skipped, skipReason: review.skipReason };
+      if (!review.skipped && review.synthesizedContext) {
+        formattedContext = review.synthesizedContext;
+      }
+    }
+
+    return {
+      startId: rpcResult.start_id,
+      endId: rpcResult.end_id,
+      startResolvedBy: rpcResult.start_resolved_by as PathResult["startResolvedBy"],
+      endResolvedBy: rpcResult.end_resolved_by as PathResult["endResolvedBy"],
+      pathLength: rpcResult.path_length,
+      pathSteps,
+      pathNotes,
+      formattedContext,
+      retrievalMs: Date.now() - t0,
+      noPath: rpcResult.no_path,
       reviewResult,
     };
   }
@@ -918,6 +988,65 @@ function formatContext(seedNotes: RetrievedNote[], expandedNotes: RetrievedNote[
 
   lines.push("_* = directly retrieved by semantic similarity_");
   lines.push("<!-- End ObsidiClaw Context -->");
+
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// formatPathContext — graph path retrieval
+// ---------------------------------------------------------------------------
+
+function formatPathContext(pathSteps: PathStep[], pathNotes: RetrievedNote[]): string {
+  if (pathNotes.length === 0) {
+    return "<!-- ObsidiClaw: empty graph path -->";
+  }
+
+  const noteByPath = new Map(pathNotes.map((n) => [n.noteId, n]));
+  const startNote = pathNotes[0];
+  const endNote = pathNotes[pathNotes.length - 1];
+
+  const lines: string[] = [
+    "<!-- ObsidiClaw Knowledge Graph Path -->",
+    "",
+    `# Graph Path: ${startNote.path} → ${endNote.path}`,
+    `_Shortest path (${pathSteps.length - 1} hop${pathSteps.length - 1 === 1 ? "" : "s"})._`,
+    "",
+  ];
+
+  for (let i = 0; i < pathSteps.length; i++) {
+    const step = pathSteps[i];
+    const note = noteByPath.get(step.nodeId);
+
+    // Edge label between steps
+    if (i > 0 && step.edgeLabel) {
+      const arrow = step.edgeDirection === "outgoing" ? "→" : "←";
+      lines.push(`  ${arrow} **${step.edgeLabel}**`);
+      lines.push("");
+    }
+
+    // Step label
+    const posLabel = i === 0 ? " (start)" : i === pathSteps.length - 1 ? " (end)" : "";
+    lines.push(`## ${step.nodeId}${posLabel}`);
+
+    if (note) {
+      lines.push(stripFrontmatter(note.content));
+    } else {
+      lines.push("_(note not found in cache)_");
+    }
+    lines.push("");
+  }
+
+  // Summary line
+  const edgeSummary = pathSteps
+    .slice(1)
+    .map((s) => {
+      const arrow = s.edgeDirection === "outgoing" ? "→" : "←";
+      return `--${s.edgeLabel}${arrow}`;
+    });
+  if (edgeSummary.length > 0) {
+    lines.push(`_Path: ${pathSteps[0].nodeId} ${edgeSummary.map((e, i) => `${e} ${pathSteps[i + 1].nodeId}`).join(" ")}_`);
+  }
+  lines.push("<!-- End ObsidiClaw Path Context -->");
 
   return lines.join("\n");
 }

@@ -104,6 +104,15 @@ def handle_get_graph_stats(params: dict[str, Any]) -> dict[str, Any]:
     return engine.get_graph_stats()
 
 
+def handle_find_path(params: dict[str, Any]) -> dict[str, Any]:
+    return engine.find_path(
+        start_query=params["start"],
+        end_query=params["end"],
+        edge_types=params.get("edge_types"),
+        max_depth=params.get("max_depth", 8),
+    )
+
+
 def handle_shutdown(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True}
 
@@ -120,6 +129,7 @@ HANDLERS: dict[str, Any] = {
     "incremental_update": handle_incremental_update,
     "build_prune_clusters": handle_build_prune_clusters,
     "get_graph_stats": handle_get_graph_stats,
+    "find_path": handle_find_path,
     "shutdown": handle_shutdown,
 }
 

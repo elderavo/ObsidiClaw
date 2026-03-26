@@ -83,6 +83,7 @@ export default function subagentExtension(
       dbPath: paths.dbPath,
       contextEngine: engine,
       rootDir: paths.rootDir,
+      // TODO: investigate + fix.
     });
 
     return runner;

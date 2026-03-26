@@ -67,6 +67,21 @@ class RetrievedNote:
 
 
 # ---------------------------------------------------------------------------
+# Path types (graph path retrieval)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PathStep:
+    """One hop in a shortest-path result."""
+
+    node_id: str
+    edge_label: str        # "" for the start node
+    edge_direction: str    # "outgoing" | "incoming" | "" for start
+    from_node_id: str      # "" for start
+
+
+# ---------------------------------------------------------------------------
 # Prune types
 # ---------------------------------------------------------------------------
 

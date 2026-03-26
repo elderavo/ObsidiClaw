@@ -69,18 +69,61 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
         "For detailed tool usage examples, search for the tool name (e.g. 'spawn_subagent').",
       inputSchema: {
         query: z.string().describe("What to search for in the knowledge base."),
-        max_chars: z.number().optional().describe("Maximum characters to return (default: 10000). Use a smaller value for tighter context."),
         workspace: z.string().optional().describe("Limit retrieval to a specific registered workspace by name. Omit to search all workspaces."),
       },
     },
-    async ({ query, max_chars, workspace }) => {
+    async ({ query, workspace }) => {
       const pkg = await engine.build(query, workspace);
       onContextBuilt?.(pkg);
-      const budget = max_chars ?? DEFAULT_MAX_CHARS;
+      const budget = DEFAULT_MAX_CHARS;
       let text = pkg.formattedContext.length <= budget
         ? pkg.formattedContext
         : pkg.formattedContext.slice(0, budget) + "\n\n_(context truncated to fit budget)_\n<!-- End ObsidiClaw Context -->";
       text += "\n\n" + RATE_CONTEXT_REMINDER;
+      return { content: [{ type: "text" as const, text }] };
+    },
+  );
+
+  // ── find_path ───────────────────────────────────────────────────────────
+
+  server.registerTool(
+    "find_path",
+    {
+      description:
+        "Find the shortest path between two concepts in the knowledge graph. " +
+        "Use this when you need to understand how two parts of the codebase relate — " +
+        "e.g. how the logger connects to context retrieval. Endpoints can be note " +
+        "paths (e.g. 'code/obsidi-claw/logger/run-logger.ts.md') or natural language " +
+        "(e.g. 'logger subsystem'). Returns the chain of notes and edge types connecting them.",
+      inputSchema: {
+        start: z.string().describe("Starting concept, note path, or search query."),
+        end: z.string().describe("Ending concept, note path, or search query."),
+        edge_types: z.array(z.string()).optional().describe(
+          "Edge types to traverse. Default: all. Options: CALLS, DEFINED_IN, BELONGS_TO, CONTAINS, CONTAINS_SYMBOL, IMPORTS, LINKS_TO"
+        ),
+        max_depth: z.number().optional().describe("Maximum path length in hops (default: 8)."),
+      },
+    },
+    async ({ start, end, edge_types, max_depth }) => {
+      const result = await engine.findPath(start, end, {
+        edgeTypes: edge_types,
+        maxDepth: max_depth,
+      });
+      if (result.noPath) {
+        const parts = [`No path found between "${start}" and "${end}" in the knowledge graph.`];
+        if (result.startId) parts.push(`Start resolved to: ${result.startId} (${result.startResolvedBy})`);
+        else parts.push(`Could not resolve start: "${start}"`);
+        if (result.endId) parts.push(`End resolved to: ${result.endId} (${result.endResolvedBy})`);
+        else parts.push(`Could not resolve end: "${end}"`);
+        return { content: [{ type: "text" as const, text: parts.join("\n") }] };
+      }
+      let text = result.formattedContext;
+      if (text.length > DEFAULT_MAX_CHARS) {
+        text = text.slice(0, DEFAULT_MAX_CHARS) + "\n\n_(path context truncated)_\n<!-- End ObsidiClaw Path Context -->";
+      }
+      // Prepend resolution info so the agent can verify endpoint matching
+      const header = `_Start: "${start}" → ${result.startId} (${result.startResolvedBy}) | End: "${end}" → ${result.endId} (${result.endResolvedBy})_\n\n`;
+      text = header + text;
       return { content: [{ type: "text" as const, text }] };
     },
   );
