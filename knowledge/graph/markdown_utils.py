@@ -280,7 +280,7 @@ def extract_title(frontmatter: dict, body: str, relative_path: str) -> str:
 # md_db hash (MUST match TS byte-for-byte)
 # ---------------------------------------------------------------------------
 
-IGNORED_DIRS = frozenset({".obsidian"})
+IGNORED_DIRS = frozenset({".obsidian", "node_modules", ".venv", "__pycache__"})
 
 
 def collect_markdown_files(md_db_path: str) -> list[str]:

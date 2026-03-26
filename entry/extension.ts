@@ -43,6 +43,7 @@ import type { ToolContext } from "./tools/types.js";
 import { registerRetrieveContextTool } from "./tools/retrieve-context.js";
 import { registerRateContextTool } from "./tools/rate-context.js";
 import { registerWorkspaceTools } from "./tools/workspace.js";
+import { registerFindPathTool } from "./tools/find-path.js";
 
 // ---------------------------------------------------------------------------
 // Shared state — lets other extensions (subagent.ts) reuse the stack's engine
@@ -318,6 +319,7 @@ export function createObsidiClawExtension(
     registerRetrieveContextTool(pi, toolCtx);
     registerRateContextTool(pi, toolCtx);
     registerWorkspaceTools(pi, toolCtx);
+    registerFindPathTool(pi, toolCtx);
 
     // ── before_agent_start: inject preferences + standing tool reminder ─────
     // Calls MCP get_preferences so the engine stays behind the MCP boundary.

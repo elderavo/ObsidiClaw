@@ -82,6 +82,8 @@ export class WorkspaceRegistry {
     private readonly registryPath: string,
     /** Path to `md_db/`. */
     private readonly mdDbPath: string,
+    /** Personalities directory — enables tiered summarization in mirror watchers. */
+    private readonly personalitiesDir?: string,
   ) {}
 
   // ── Persistence ──────────────────────────────────────────────────────────
@@ -226,6 +228,10 @@ export class WorkspaceRegistry {
       wikilinkPrefix: WorkspaceRegistry.wikilinkPrefix(entry),
       languages: entry.languages,
       omitPatterns: entry.omitPatterns,
+      personalitiesDir: this.personalitiesDir,
+      mdDbPath: this.mdDbPath,
+      workspacesPath: this.registryPath,
+      registry: this,
     };
 
     const watcher = startWorkspaceMirrorWatcher(config);

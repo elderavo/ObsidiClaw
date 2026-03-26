@@ -961,7 +961,7 @@ export async function runMirrorPy(
 }
 
 // ---------------------------------------------------------------------------
-// CLI entry point
+// CLI entry point (only when executed directly via tsx/node)
 // ---------------------------------------------------------------------------
 
 async function main() {
@@ -969,7 +969,10 @@ async function main() {
   await runMirrorPy(args);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// Only run main() when this file is the entrypoint (e.g. npx tsx automation/scripts/mirror-codebase-py.ts)
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

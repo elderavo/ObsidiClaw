@@ -62,6 +62,7 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **Split databases**: `runs.db` owns operational event log (sessions, runs, trace). `notes.db` owns note retrieval analytics (note_hits, synthesis_metrics, context_ratings, note_lifecycle, prune clusters). Schema is 3-tier-aware from the start (tier, note_type, symbol_kind, edge_label columns)
 - **Trace modules**: canonical names in `core/trace-modules.ts`: `orchestrator`, `pi_session`, `context_engine`, `scheduler`, `extension`, `subagent`, `insight_engine`, `logger`, `user`, `tool:<name>`
 - **LLM config**: `OBSIDI_LLM_HOST` env var (must be set in `.env`). Defaults to `localhost:11434` which is wrong for this setup — always set explicitly
+- **No console.log/warn/error**: Pi TUI renders in a styled terminal — raw stdout pollutes the UI. Background/worker errors are swallowed silently, returned as null, or logged to SQLite. If something truly needs user attention it surfaces through Pi's UI layer, not stdout.
 
 # Build Order
 ## Foundation (Complete)
@@ -87,7 +88,7 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - [x] A2. Add tier-3 module notes (`md_db/code/{dir}/{dirName}.md`) — one per directory containing source files (named after folder, not `_module`)
 - [x] A3. Add tier metadata to all code notes: `tier: 1|2|3` in frontmatter; tier-2 gets `parentModule`, tier-1 gets `parentFile` + `symbolKind`
 - [x] A4. Update Python indexer with typed edge labels: DEFINED_IN (symbol→file), CALLS (symbol→symbol), CONTAINS/CONTAINS_SYMBOL (module/file → children), BELONGS_TO (file→module), IMPORTS (file→file); LINKS_TO kept for concept/tool wikilinks
-- [ ] A5. Update summarizer to handle all three tiers: tier-3 modules get summaries from children's summaries; tier-1 symbols get one-sentence signature descriptions; tier-2 files unchanged
+- [x] A5. Update summarizer to handle all three tiers: tier-3 modules get summaries from children's summaries; tier-1 symbols get one-sentence signature descriptions; tier-2 files unchanged
 
 ### Phase B — Tier-Aware Retrieval (`3-tier-markdown`) ✓
 - [x] B1. Add `tier` and `symbolKind` fields to ParsedNote and RetrievedNote in `models.py`; add `extract_tier()` to `markdown_utils.py`
@@ -151,11 +152,11 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 
 
 ## What's Broken / Unvalidated
-- **Summarizer not yet tier-aware** — tier-1/tier-3 notes get same generic summary prompt as tier-2 (A5 pending)
+- **Summarizer tier-aware** — three separate personalities (code-summarizer-t1/t2/t3.md). Bottom-up cascade: tier-1 → tier-2 (with tier-1 child summaries) → tier-3 (with tier-2 child summaries). Event-driven via chokidar mirror watcher after source file changes.
 - **Context synthesizer now receives tiered sections** — Module/File/Symbol/Call Relationships/Concepts; synthesizer personality updated to match (C3 tier distribution metadata still pending)
 - **Subagents feel flaky** — diagnose with debug JSONL (Phase 7, deprioritized)
 - **Post-session review not generating files** — `session_review.ts` runs but no output in md_db (Phase 8, deprioritized)
-- **Scheduler jobs unconfirmed** — registered and schtasks entries exist but never verified in production (Phase 10, deprioritized)
+- **summarize-code OS job removed** — replaced by chokidar-driven cascade in mirror-watcher. Scheduler jobs (health-check, normalize, merge-inbox) still unconfirmed in production (Phase 10, deprioritized)
 - **Reindex gap when Pi is off** — summarizer/jobs write to md_db but live watcher only exists in running Pi process; reindex happens on next startup
 - **Workspace registry unvalidated end-to-end** — code compiles, all types check, but register/unregister/scoped-retrieval not yet tested with a live Pi session
 - **"know" mode stub only** — `register()` creates directory + logs message, no pipeline or watcher
@@ -222,6 +223,21 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **Tier-aware retriever** in `retriever.py`: going-up always (DEFINED_IN 0.8×, BELONGS_TO 0.5×), going-down selective above 0.6 threshold (CONTAINS 0.85×, CONTAINS_SYMBOL 0.9×), sideways only on query overlap (CALLS/IMPORTS 0.6×)
 - **Verified**: 342 notes (191 tier-1, 77 tier-2, 19 tier-3), all 6 typed edge labels confirmed in graph store
 - **Force-mirror command**: `npx tsx automation/scripts/mirror-codebase.ts --force`
+
+**2026-03-26 — Session 23 (Summarizer Decoupled from TUI — Child Process)**
+- **TUI unresponsiveness fixed**: summarize cascade now runs in a detached child process (`automation/jobs/summarize-worker.ts`) spawned by the mirror watcher after mirrors complete. Synchronous file I/O and LLM calls no longer block the Pi TUI event loop.
+- **`summarize-worker.ts`**: standalone entry point reads `SummarizeWorkerConfig` from `argv[2]` as JSON, loads `WorkspaceRegistry` independently, calls `runCascadeForWorkspace()`, exits. Config is serializable (no live objects).
+- **Mirror watcher rewritten**: replaces `await runCascadeForWorkspace()` with `spawnSummarizeWorker()`. Uses tsx binary from `node_modules/.bin/` with `shell: true` for Windows .cmd compatibility. Stdout/stderr forwarded line-buffered to Pi console. `child.unref()` so Pi can exit without waiting for worker.
+- **Pile-up prevention**: `activeWorkers` and `pendingRerun` maps at module level. If a worker is already running for a workspace and another source change arrives, one deferred re-run is queued and spawned when the current worker exits.
+- **Staleness bug fixed**: cascade now summarizes notes with no `## Summary` section regardless of mtime — previously all notes were skipped because mirror mtime > source mtime after the mirror script ran.
+- **`WorkspaceMirrorConfig`** gains `workspacesPath?`. `WorkspaceRegistry.startWatcher()` threads `registryPath` into watcher config. Worker uses it to reload registry from disk independently.
+
+**2026-03-26 — Session 22 (Tiered Bottom-Up Summarizer + OS Job Removal)**
+- **Phase A5 complete**: tiered summarization now event-driven via chokidar mirror watcher. Three separate personalities replace the single `code-summarizer.md`: `code-summarizer-t1.md` (1 sentence, symbol-focused), `code-summarizer-t2.md` (2-3 sentences, file-focused, accepts child summaries), `code-summarizer-t3.md` (2-3 sentences, module-focused, requires child summaries)
+- **Bottom-up cascade**: `automation/jobs/summarize-lib.ts` implements 3-pass ordered processing. Pass 1: tier-1 stale notes (source + mirror). Pass 2: tier-2 stale OR tier-1 child just updated (source + mirror + child summaries). Pass 3: tier-3 no-summary OR tier-2 child just updated (mirror + child summaries only). Tier relationships derived from directory structure, no frontmatter parsing needed for associations.
+- **OS scheduler job removed**: `automation/jobs/scheduled/summarize-code.ts` deleted. `force-summarize.ts` deleted (was a workaround for the broken job). `run-job.ts` and `jobs/index.ts` cleaned up. `createSummarizeCodeJob` removed from stack.ts.
+- **Wiring**: `WorkspaceMirrorConfig` gains `personalitiesDir?`, `mdDbPath?`, `registry?`. `WorkspaceRegistry` constructor gains optional `personalitiesDir` arg, threads it into all watcher configs. `stack.ts` passes `paths.personalitiesDir` at registry construction.
+- **Entity extraction plan**: written to `.claude/entity-extraction-plan.md` for future implementation.
 
 **2026-03-26 — Session 21 (Critical Bug Fixes: Re-Embed Loop + TUI Freeze)**
 - **Re-embed loop fixed**: `compute_md_db_hash()` in `markdown_utils.py` changed from mtime-based to content-based hashing. Root cause: linter watcher rewrote frontmatter field order after engine init, bumping mtimes → hash mismatch → full re-embed every startup. Content hashing is immune to non-semantic changes
