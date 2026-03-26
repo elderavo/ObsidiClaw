@@ -276,7 +276,7 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
         return { content: [{ type: "text" as const, text: "Workspace registry not available." }] };
       }
       try {
-        const { entry, notesGenerated } = await workspaceRegistry.register({
+        const { entry, notesGenerated, notePaths } = await workspaceRegistry.register({
           name,
           sourceDir: source_dir,
           mode: mode as "code" | "know",
@@ -284,13 +284,13 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
           active: true,
         });
 
-        // Trigger incremental reindex so new notes are immediately searchable
-        if (notesGenerated > 0) {
-          try {
-            await engine.reindex();
-          } catch {
-            // Non-fatal — notes will be indexed on next startup
-          }
+        // Fire-and-forget incremental update — index only the new notes.
+        // Does NOT block the MCP response; Pi stays responsive immediately.
+        // Retrieval queries during indexing queue behind it on the Python pipe.
+        if (notePaths.length > 0) {
+          engine.incrementalUpdate(notePaths).catch((err) => {
+            console.warn("[mcp] background incremental update failed:", err);
+          });
         }
 
         return {
@@ -301,6 +301,7 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
               `Mode: ${entry.mode}\n` +
               `Languages: ${entry.languages.join(", ")}\n` +
               `Notes generated: ${notesGenerated}\n` +
+              `Indexing: running in background\n` +
               `Watcher: active`,
           }],
         };

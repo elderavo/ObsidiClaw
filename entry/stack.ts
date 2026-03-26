@@ -152,19 +152,24 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
         })
       : Promise.resolve();
 
-    // Load workspace registry and bootstrap self-registration if empty
+    // Load workspace registry and bootstrap self-registration if empty.
+    // Also collect all mirror paths written during startup so we can fire a
+    // targeted incremental index update after engine init completes.
     workspaceRegistry.load();
+    const startupMirrorPaths: string[] = [];
+
     const workspaceReady = (async () => {
       try {
         if (workspaceRegistry.list().length === 0) {
           // First boot: auto-register ObsidiClaw's own source tree
-          await workspaceRegistry.register({
+          const { notePaths } = await workspaceRegistry.register({
             name: "obsidi-claw",
             sourceDir: paths.rootDir,
             mode: "code",
             languages: ["ts", "py"],
             active: true,
           });
+          startupMirrorPaths.push(...notePaths);
         } else {
           // Subsequent boots: re-run initial mirror for all active workspaces
           // (mtime check makes this fast — skips up-to-date notes)
@@ -188,6 +193,8 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
                 }));
               }
               await Promise.all(promises);
+              // Collect all note paths for this workspace for post-init update
+              startupMirrorPaths.push(...workspaceRegistry.listNotePaths(entry));
             }
           }
         }
@@ -202,6 +209,15 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
       schedulerReady,
       workspaceReady,
     ]);
+
+    // Fire a background incremental update for any notes written by mirrors
+    // during startup that may not have been in the engine's initial scan.
+    // Uses content hashing — unchanged notes are skipped in ~1ms each.
+    if (startupMirrorPaths.length > 0) {
+      engine.incrementalUpdate(startupMirrorPaths).catch((err) => {
+        console.warn("[obsidi-claw] background startup incremental update failed:", err);
+      });
+    }
 
     // Watchers are cheap — start after everything else is up.
     mdDbWatcher = startMdDbLintWatcher(paths.mdDbPath);

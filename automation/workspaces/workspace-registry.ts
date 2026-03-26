@@ -261,16 +261,17 @@ export class WorkspaceRegistry {
 
   /**
    * Register a new workspace, run initial mirror, and start watcher.
-   * Returns the created entry and count of generated notes.
+   * Returns the created entry, count of generated notes, and their relative paths.
    */
   async register(
     input: Omit<WorkspaceEntry, "id" | "registeredAt">,
-  ): Promise<{ entry: WorkspaceEntry; notesGenerated: number }> {
+  ): Promise<{ entry: WorkspaceEntry; notesGenerated: number; notePaths: string[] }> {
     const entry = this.add(input);
     const mirrorDir = this.mirrorDir(entry);
     mkdirSync(mirrorDir, { recursive: true });
 
     let notesGenerated = 0;
+    const notePaths: string[] = [];
 
     if (entry.mode === "code") {
       const prefix = WorkspaceRegistry.wikilinkPrefix(entry);
@@ -307,6 +308,11 @@ export class WorkspaceRegistry {
       const results = await Promise.all(promises);
       notesGenerated = results.reduce((sum, r) => sum + r.written, 0);
 
+      // Collect paths of newly written notes for incremental index update
+      if (notesGenerated > 0) {
+        collectMdPaths(mirrorDir, this.mdDbPath, notePaths);
+      }
+
       // Start watcher for continuous updates
       this.startWatcher(entry);
     } else {
@@ -314,7 +320,18 @@ export class WorkspaceRegistry {
       console.log(`[workspace-registry] know mode workspace "${entry.name}" registered (pipeline not yet implemented)`);
     }
 
-    return { entry, notesGenerated };
+    return { entry, notesGenerated, notePaths };
+  }
+
+  /**
+   * Collect all note paths (relative to md_db) for an active workspace.
+   * Useful for triggering targeted incremental index updates at startup.
+   */
+  listNotePaths(entry: WorkspaceEntry): string[] {
+    const mirrorDir = this.mirrorDir(entry);
+    const paths: string[] = [];
+    collectMdPaths(mirrorDir, this.mdDbPath, paths);
+    return paths;
   }
 
   /**
