@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import json
 import sys
-import threading
 from dataclasses import dataclass
 from typing import Any, Optional
-
-_stdout_lock = threading.Lock()
 
 
 @dataclass
@@ -54,14 +51,12 @@ def send_response(resp: RpcResponse | RpcError) -> None:
     else:
         payload = {"id": resp.id, "result": resp.result}
     line = json.dumps(payload, separators=(",", ":")) + "\n"
-    with _stdout_lock:
-        sys.stdout.write(line)
-        sys.stdout.flush()
+    sys.stdout.write(line)
+    sys.stdout.flush()
 
 
 def send_notification(payload: dict) -> None:
     """Write a newline-delimited JSON notification to stdout (no id — not a response)."""
     line = json.dumps(payload, separators=(",", ":")) + "\n"
-    with _stdout_lock:
-        sys.stdout.write(line)
-        sys.stdout.flush()
+    sys.stdout.write(line)
+    sys.stdout.flush()

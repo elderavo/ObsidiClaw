@@ -2,15 +2,18 @@
 
 Reads newline-delimited JSON from stdin, dispatches to KnowledgeGraphEngine,
 writes responses to stdout. stderr is reserved for Python logging.
+
+Handlers run synchronously in the main thread — the TS bridge serializes
+requests via await, and stdin buffers any that arrive during a long-running
+handler. This avoids the deadlock risk of ThreadPoolExecutor + lock
+inversion between engine and stdout locks.
 """
 
 from __future__ import annotations
 
 import logging
 import sys
-import threading
 import traceback
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from typing import Any
 
@@ -30,7 +33,6 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 engine = KnowledgeGraphEngine()
-_engine_lock = threading.Lock()
 
 
 def handle_initialize(params: dict[str, Any]) -> dict[str, Any]:
@@ -139,63 +141,46 @@ HANDLERS: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 
 
-def _run_handler(req: RpcRequest, standalone: bool) -> None:
-    """Execute a single RPC handler in a worker thread and send the response.
-
-    All engine-touching handlers are serialized via _engine_lock so that a
-    long-running incremental_update never races with a concurrent retrieve.
-    The main stdin loop is unblocked immediately after submitting this task.
-    """
-    if standalone:
-        log.info("→ %s(%s)", req.method, req.params)
-
-    handler = HANDLERS.get(req.method)
-    if handler is None:
-        send_response(RpcError(id=req.id, code=-1, message=f"Unknown method: {req.method}"))
-        return
-
-    try:
-        with _engine_lock:
-            result = handler(req.params)
-        send_response(RpcResponse(id=req.id, result=result))
-    except Exception as exc:
-        tb = traceback.format_exc()
-        log.error("Handler %s failed:\n%s", req.method, tb)
-        send_response(RpcError(id=req.id, code=-1, message=str(exc)))
-
-
 def run_server(standalone: bool = False) -> None:
     """Run the JSON-RPC stdio loop.
 
-    Each request is dispatched to a ThreadPoolExecutor worker so that
-    long-running handlers (incremental_update, reindex) do not block the
-    read loop. All engine access is serialized by _engine_lock, so concurrent
-    retrieve calls queue behind an in-progress update and execute promptly
-    once it finishes.
-
-    In standalone mode, prints handler names to stderr for interactive testing.
+    Handlers run synchronously in the main thread. This avoids lock
+    inversion deadlocks between engine access and stdout writes (e.g.
+    progress notifications sent during incremental_update). The stdin
+    buffer naturally queues any requests that arrive mid-handler.
     """
     log.info("Knowledge graph server starting (standalone=%s)", standalone)
 
-    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="rpc-worker") as pool:
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
 
-            try:
-                req = parse_request(line)
-            except Exception as exc:
-                log.error("Failed to parse request: %s", exc)
-                # Can't send error without an id — skip
-                continue
+        try:
+            req = parse_request(line)
+        except Exception as exc:
+            log.error("Failed to parse request: %s", exc)
+            continue
 
-            pool.submit(_run_handler, req, standalone)
+        if standalone:
+            log.info("→ %s(%s)", req.method, req.params)
 
-            # Shutdown: stop reading stdin; pool drains in-flight handlers before exit
-            if req.method == "shutdown":
-                log.info("Shutdown requested, draining pool and exiting")
-                break
+        handler = HANDLERS.get(req.method)
+        if handler is None:
+            send_response(RpcError(id=req.id, code=-1, message=f"Unknown method: {req.method}"))
+            continue
+
+        try:
+            result = handler(req.params)
+            send_response(RpcResponse(id=req.id, result=result))
+        except Exception as exc:
+            tb = traceback.format_exc()
+            log.error("Handler %s failed:\n%s", req.method, tb)
+            send_response(RpcError(id=req.id, code=-1, message=str(exc)))
+
+        if req.method == "shutdown":
+            log.info("Shutdown requested, exiting")
+            break
 
     log.info("Server exiting")
 

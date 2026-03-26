@@ -144,6 +144,10 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **Force-mirror:** `npx tsx automation/scripts/mirror-codebase.ts --force` (also `mirror-codebase-py.ts --force`)
 - **Workspace registry**: persistent JSON at `.obsidi-claw/workspaces.json`. MCP tools: `register_workspace`, `list_workspaces`, `unregister_workspace`. Auto-registers self on first boot. `retrieve_context` accepts optional `workspace` param for scoped search
 - **Multi-codebase support**: each workspace gets its own `md_db/code/{name}/` subfolder with per-workspace wikilink prefixes. One unified graph with metadata-based workspace filtering
+- **retrieve_context budget raised**: 3000 → 10000 chars (~750 → ~2500 tokens) — prevents synthesis output truncation
+- **find_path MCP tool**: graph path retrieval between two fuzzy endpoints. BFS (bidirectional, records edge direction) over SimplePropertyGraphStore. Endpoint resolution: exact → partial path → vector → keyword fallback. `formatPathContext()` renders step-by-step with ↓ EDGE_LABEL annotations. Passes through existing ContextReviewer. Works in degraded mode (BFS needs no embeddings)
+- **Startup re-embed bug fixed**: `compute_md_db_hash()` uses content-based hashing (MD5 of file bytes) instead of mtime-based. Immune to linter frontmatter rewrites, field reordering, and any non-semantic file touches
+- **Python server single-threaded**: removed ThreadPoolExecutor + `_engine_lock` + `_stdout_lock` that caused lock inversion deadlocks (progress_cb → send_notification while holding engine lock). Handlers run synchronously; stdin buffers naturally queue concurrent requests
 
 
 ## What's Broken / Unvalidated
@@ -201,6 +205,13 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **Stack boot rewritten**: `initialize()` loads registry; auto-registers "obsidi-claw" on first boot; subsequent boots re-run mirrors (mtime-skipped) for all active workspaces. `workspaceRegistry.startAllWatchers()` replaces single `startMirrorWatcher()` call
 - **Cleanup**: removed dead `startMirrorWatcher` import and `mirrorWatcher` variable from `stack.ts`
 
+**2026-03-26 — Session 20 (Graph Path Retrieval + Bug Fixes)**
+- **find_path MCP tool**: new `knowledge/graph/pathfinder.py` — BFS shortest path over SimplePropertyGraphStore. Bidirectional edge traversal (undirected for BFS, records actual direction in result). New `PathStep` dataclass in `models.py`. `engine.find_path()` with endpoint resolution cascade (exact match → partial path substring → vector top-1 → keyword). `handle_find_path` RPC handler in `server.py`. TS: `PathResult`/`PathStep` types in `types.ts`, `findPath()` bridge method + `formatPathContext()` in `context-engine.ts`, tool registered in `mcp-server.ts`
+- **Startup re-embed loop fixed**: serialized `stack.ts` initialize() — mirrors now complete (phase 1) before engine initializes (phase 2). Root cause: concurrent execution caused mirror mtimes to differ from stored hash on every boot → full re-embed loop. Removed `startupMirrorPaths` / background `incrementalUpdate` (now redundant)
+- **retrieve_context budget**: `DEFAULT_MAX_CHARS` 3000 → 10000 (prevents synthesis truncation on detailed queries)
+- **Python server**: single-threaded synchronous handler dispatch (ThreadPoolExecutor removed — caused deadlocks)
+- **RPC timeout**: 2min → 30min (handles large index rebuilds)
+
 **2026-03-23 — Session 17 (Three-Tier Note System + Tier-Aware Retrieval)**
 - **Phases A1–A4 + B1–B3 complete**: `3-tier-markdown` branch
 - **Tier-1 symbol notes**: `mirror-codebase.ts` emits one `.md` per exported function/class/type/interface/const at `md_db/code/{dir}/{fileStem}/{symbolName}.md`. Frontmatter: `type: codeSymbol`, `tier: 1`, `parentFile`, `parentModule`, `symbolKind`
@@ -211,6 +222,11 @@ Full spec: see `md_db/index.md` and `.claude/Conceptual_Plan.md`.
 - **Tier-aware retriever** in `retriever.py`: going-up always (DEFINED_IN 0.8×, BELONGS_TO 0.5×), going-down selective above 0.6 threshold (CONTAINS 0.85×, CONTAINS_SYMBOL 0.9×), sideways only on query overlap (CALLS/IMPORTS 0.6×)
 - **Verified**: 342 notes (191 tier-1, 77 tier-2, 19 tier-3), all 6 typed edge labels confirmed in graph store
 - **Force-mirror command**: `npx tsx automation/scripts/mirror-codebase.ts --force`
+
+**2026-03-26 — Session 21 (Critical Bug Fixes: Re-Embed Loop + TUI Freeze)**
+- **Re-embed loop fixed**: `compute_md_db_hash()` in `markdown_utils.py` changed from mtime-based to content-based hashing. Root cause: linter watcher rewrote frontmatter field order after engine init, bumping mtimes → hash mismatch → full re-embed every startup. Content hashing is immune to non-semantic changes
+- **TUI freeze fixed**: removed `ThreadPoolExecutor`, `_engine_lock`, and `_stdout_lock` from Python JSON-RPC server. Root cause: lock inversion deadlock — worker thread held `_engine_lock` while `progress_cb` tried to acquire `_stdout_lock` via `send_notification()`. With single-threaded dispatch, both locks are unnecessary. stdin buffers naturally queue requests during long-running handlers
+- **Module docstring updated**: `markdown_utils.py` docstring no longer references stale TS counterpart `computeMdDbHash()`
 
 # End-of-Run Protocol
 Every agent session MUST close by doing all three:

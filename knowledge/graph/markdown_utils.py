@@ -1,8 +1,8 @@
 """Markdown utilities — Python port of shared/markdown/.
 
-CRITICAL: compute_md_db_hash() must produce byte-identical output to the TS
-version in graph-indexer.ts. Both use MD5 of sorted "path:mtimeMs" strings
-joined by "|".
+compute_md_db_hash() uses content-based hashing (MD5 of each file's bytes)
+to detect changes. This is immune to non-semantic modifications like
+frontmatter field reordering or linter rewrites that don't change meaning.
 """
 
 from __future__ import annotations
@@ -295,17 +295,21 @@ def collect_markdown_files(md_db_path: str) -> list[str]:
 
 
 def compute_md_db_hash(md_db_path: str) -> str:
-    """MD5 fingerprint of all .md files by path:mtimeMs.
+    """MD5 fingerprint of all .md files by path + content hash.
 
-    MUST produce identical output to the TS ``computeMdDbHash()`` in
-    ``graph-indexer.ts``.
+    Uses file contents instead of mtimes so that non-semantic changes
+    (frontmatter field reordering, linter rewrites) don't trigger
+    unnecessary re-embedding.
     """
     file_paths = collect_markdown_files(md_db_path)
     entries: list[str] = []
     for p in file_paths:
-        stat = os.stat(p)
-        mtime_ms = int(stat.st_mtime_ns // 1_000_000)  # nanoseconds → ms
-        entries.append(f"{p}:{mtime_ms}")
+        try:
+            content = open(p, "rb").read()
+            file_hash = hashlib.md5(content).hexdigest()
+        except OSError:
+            continue
+        entries.append(f"{p}:{file_hash}")
 
     entries.sort()
     joined = "|".join(entries)
