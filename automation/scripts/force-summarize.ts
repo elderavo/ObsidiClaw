@@ -11,7 +11,7 @@
 import { join } from "path";
 import { statSync } from "fs";
 import { llmChat, isLlmReachable } from "../../core/llm-client.js";
-import { loadPersonality } from "../../agents/subagent/personality-loader.js";
+import { loadPersonality, resolvePersonalityChatOptions } from "../../agents/subagent/personality-loader.js";
 import { SUMMARIZE_CODE_SYSTEM_PROMPT } from "../../agents/prompts.js";
 import { readText, writeText, fileExists, listDir } from "../../core/os/fs.js";
 import { resolvePaths } from "../../core/config.js";
@@ -82,8 +82,7 @@ async function main(): Promise<void> {
       sourceContent,
       mirrorContent,
       existingTags,
-      personality?.content,
-      personality?.provider,
+      personality,
     );
 
     if (!result) {
@@ -209,8 +208,7 @@ async function summarize(
   sourceContent: string,
   mirrorContent: string,
   existingTags: string[],
-  systemPrompt?: string,
-  providerOverride?: { model?: string; baseUrl?: string },
+  personality: import("../../agents/subagent/types.js").PersonalityConfig | null,
 ): Promise<SummarizeResult | null> {
   const tagList = existingTags.length > 0 ? existingTags.slice(0, 50).join(", ") : "(none yet)";
 
@@ -234,10 +232,10 @@ async function summarize(
   try {
     const result = await llmChat(
       [
-        { role: "system", content: systemPrompt ?? SUMMARIZE_CODE_SYSTEM_PROMPT },
+        { role: "system", content: personality?.content ?? SUMMARIZE_CODE_SYSTEM_PROMPT },
         { role: "user", content: userPrompt },
       ],
-      { model: providerOverride?.model, temperature: 0.2, numCtx: 16384, timeout: 60_000 },
+      { ...resolvePersonalityChatOptions(personality), timeout: 60_000 },
     );
     return parseResponse(result.content);
   } catch (err) {

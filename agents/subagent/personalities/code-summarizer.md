@@ -3,6 +3,8 @@ type: personality
 title: Code Summarizer
 provider:
   model: qwen3:8b
+  numCtx: 8192
+  temperature: 0.1
 ---
 You are a senior software engineer writing internal documentation.
 

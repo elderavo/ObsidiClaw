@@ -25,7 +25,6 @@
 import "dotenv/config";
 import { randomUUID } from "crypto";
 import { join } from "path";
-import { Type } from "@sinclair/typebox";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -40,6 +39,10 @@ import { mapPiEventToRunEvent } from "../agents/pi-event-mapper.js";
 import { buildDirectoryTree, stripDirectoryBlock } from "../automation/scripts/update-directory-tree.js";
 import { TOOL_REMINDER, ENGINE_UNAVAILABLE_WARNING } from "../agents/prompts.js";
 import type { RunEvent } from "../agents/orchestrator/types.js";
+import type { ToolContext } from "./tools/types.js";
+import { registerRetrieveContextTool } from "./tools/retrieve-context.js";
+import { registerRateContextTool } from "./tools/rate-context.js";
+import { registerWorkspaceTools } from "./tools/workspace.js";
 
 // ---------------------------------------------------------------------------
 // Shared state — lets other extensions (subagent.ts) reuse the stack's engine
@@ -145,7 +148,7 @@ export function createObsidiClawExtension(
           stack!.logger.logEvent({
             type: "context_retrieved",
             sessionId,
-            runId: currentRunId,
+            runId: toolCtx.currentRunId,
             timestamp: ts,
             query: pkg.query,
             seedCount: pkg.seedNoteIds?.length ?? 0,
@@ -161,7 +164,7 @@ export function createObsidiClawExtension(
           } as RunEvent);
           stack!.noteMetrics.logRetrieval({
             sessionId,
-            runId: currentRunId,
+            runId: toolCtx.currentRunId,
             timestamp: ts,
             query: pkg.query,
             seedCount: pkg.seedNoteIds?.length ?? 0,
@@ -178,7 +181,7 @@ export function createObsidiClawExtension(
           stack!.logger.logEvent({
             type: "subagent_start",
             sessionId,
-            runId: currentRunId,
+            runId: toolCtx.currentRunId,
             timestamp: Date.now(),
             prompt: pkg.input.prompt,
             plan: pkg.input.plan,
@@ -192,7 +195,7 @@ export function createObsidiClawExtension(
           stack!.logger.logEvent({
             type: "context_rated",
             sessionId,
-            runId: currentRunId,
+            runId: toolCtx.currentRunId,
             timestamp: ts,
             query: rating.query,
             score: rating.score,
@@ -201,7 +204,7 @@ export function createObsidiClawExtension(
           } as RunEvent);
           stack!.noteMetrics.logRating({
             sessionId,
-            runId: currentRunId,
+            runId: toolCtx.currentRunId,
             timestamp: ts,
             query: rating.query,
             score: rating.score,
@@ -215,16 +218,12 @@ export function createObsidiClawExtension(
     // Track latest transcript (updated on agent_end) for review hook
     let latestMessages: unknown[] = [];
 
-    // Current run ID — updated per before_agent_start for event attribution
-    let currentRunId = "";
-
-    // Engine availability state — drives system prompt warnings
-    let engineState: "ok" | "degraded" | "unavailable" = "ok";
-
     // MCP client — reassigned each session_start so transport is always fresh.
-    // Closures in registerTool/on() reference this variable (not the value at
-    // capture time), so reassignment is visible to all call sites.
     let client = new Client({ name: "obsidi-claw-ext", version: "1.0.0" });
+
+    // Shared mutable state for extracted tool files. Tools read properties at
+    // call time, so mutations here are visible to all registered tools.
+    const toolCtx: ToolContext = { client, currentRunId: "", engineState: "ok" };
 
     // ── session_start: initialize stack + connect MCP pair ───────────────────
     pi.on("session_start", async (_event, ctx) => {
@@ -239,6 +238,7 @@ export function createObsidiClawExtension(
       // Also recreate transport+client each session so shutdown→new-session works.
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       client = new Client({ name: "obsidi-claw-ext", version: "1.0.0" });
+      toolCtx.client = client;
       await mcpServer.connect(serverTransport);
       await client.connect(clientTransport);
 
@@ -248,7 +248,7 @@ export function createObsidiClawExtension(
 
           // Engine started but without embeddings — keyword + graph still work
           if (stack.engine.isDegraded) {
-            engineState = "degraded";
+            toolCtx.engineState = "degraded";
             const reason = stack.engine.degradedReasonMessage || "embedding provider unavailable";
             if (ctx.hasUI) {
               ctx.ui.notify(
@@ -260,7 +260,7 @@ export function createObsidiClawExtension(
             }
           }
         } catch (err) {
-          engineState = "unavailable";
+          toolCtx.engineState = "unavailable";
           const reason = err instanceof Error ? err.message : String(err);
           if (ctx.hasUI) {
             ctx.ui.notify(
@@ -293,99 +293,21 @@ export function createObsidiClawExtension(
       }
     });
 
-    // ── retrieve_context tool: Pi calls this when it decides it needs info ──
-    pi.registerTool({
-      name: "retrieve_context",
-      label: "Knowledge Base Retrieval",
-      description:
-        "Search the ObsidiClaw knowledge base. The knowledge base contains multiple " +
-        "workspaces — registered codebases (code mode) and knowledge collections " +
-        "(know mode) — all in one unified graph. Returns markdown-formatted context " +
-        "organized by tier: module overviews, file details, symbol signatures, call " +
-        "relationships, concepts, and suggested tools. Call this before relying on " +
-        "your own knowledge for any project-specific or domain-specific question.",
-      promptSnippet:
-        "retrieve_context(query, workspace?, max_chars?) — search the knowledge base. " +
-        "Omit workspace to search everything; pass a workspace name to scope results.",
-      promptGuidelines: [
-        "Always call retrieve_context before answering questions about project tools, architecture, patterns, or domain knowledge.",
-        "Name specific things in your query: symbols, functions, classes, files, concepts, topics. The knowledge base indexes at symbol level for code and at note level for concepts — specific queries return sharper context than broad ones.",
-        "Include your intent alongside the subject: not just 'X' but 'how X is initialized', 'failure modes of X', 'what calls X', 'signature of X'. This helps the synthesizer surface the right information.",
-        "For control-flow questions, name both the entry point and the destination: 'how A triggers B' returns better results than 'how does B work'.",
-        "Use the workspace parameter to scope results when you know which codebase or knowledge domain is relevant. Omit it to search across all registered workspaces.",
-        "Use list_workspaces to discover available workspaces if you're unsure what's registered.",
-      ],
-      parameters: Type.Object({
-        query: Type.String({
-          description:
-            "What to search for. Name specific symbols, functions, classes, concepts, or topics. " +
-            "Include your intent (e.g. 'signature of X', 'failure modes of Y', 'how A calls B'). " +
-            "Vague queries return vague context.",
-        }),
-        workspace: Type.Optional(Type.String({
-          description:
-            "Limit search to a specific registered workspace by name (e.g. 'obsidi-claw'). " +
-            "Omit to search all workspaces.",
-        })),
-        max_chars: Type.Optional(Type.Number({
-          description:
-            "Maximum characters to return (default: 3000). Use a smaller value for tighter, " +
-            "more focused context when you only need a quick answer.",
-        })),
-      }),
-      execute: async (_toolCallId, args, _signal, _onUpdate, _ctx) => {
-        const { query, workspace, max_chars } = args as { query: string; workspace?: string; max_chars?: number };
-        const mcpArgs: Record<string, unknown> = { query };
-        if (workspace) mcpArgs.workspace = workspace;
-        if (max_chars != null) mcpArgs.max_chars = max_chars;
-        const result = await client.callTool({ name: "retrieve_context", arguments: mcpArgs });
-        const text = extractMcpText(result);
-        return {
-          content: [{ type: "text" as const, text }],
-          details: { query, ...(workspace ? { workspace } : {}) },
-        };
-      },
-    });
-
-    // ── rate_context tool: model self-grades retrieved context quality ──────
-    pi.registerTool({
-      name: "rate_context",
-      label: "Rate Retrieved Context",
-      description:
-        "Rate how well the last retrieve_context result answered your query. " +
-        "Call this AFTER you've used the retrieved context to answer or act. " +
-        "Your rating helps the knowledge base improve over time.",
-      promptSnippet: "rate_context(query, score, missing, helpful) — rate last retrieval quality",
-      parameters: Type.Object({
-        query: Type.String({ description: "The original query you searched for." }),
-        score: Type.Number({
-          description: "1=irrelevant, 2=mostly unhelpful, 3=partial, 4=good, 5=exactly right.",
-          minimum: 1,
-          maximum: 5,
-        }),
-        missing: Type.String({ description: "What was missing? Empty string if nothing." }),
-        helpful: Type.String({ description: "Which notes/sections helped most? Empty string if none." }),
-      }),
-      execute: async (_toolCallId, args, _signal, _onUpdate, _ctx) => {
-        const result = await client.callTool({ name: "rate_context", arguments: args });
-        const text = extractMcpText(result);
-        return {
-          content: [{ type: "text" as const, text }],
-          details: { query: args.query, score: args.score },
-        };
-      },
-    });
+    // ── Tool registrations (extracted to entry/tools/) ──────────────────────
+    registerRetrieveContextTool(pi, toolCtx);
+    registerRateContextTool(pi, toolCtx);
+    registerWorkspaceTools(pi, toolCtx);
 
     // ── before_agent_start: inject preferences + standing tool reminder ─────
     // Calls MCP get_preferences so the engine stays behind the MCP boundary.
     pi.on("before_agent_start", async (event, ctx) => {
       // Generate new runId for this prompt (standalone mode logging)
       if (stack) {
-        currentRunId = randomUUID();
+        toolCtx.currentRunId = randomUUID();
         stack.logger.logEvent({
           type: "prompt_received",
           sessionId: stack.sessionId,
-          runId: currentRunId,
+          runId: toolCtx.currentRunId,
           timestamp: Date.now(),
           text: "(pi-tui-prompt)",
           isSubagent: false,
@@ -394,7 +316,7 @@ export function createObsidiClawExtension(
       }
 
       // Fast path: engine is completely unavailable — inject warning, skip MCP calls
-      if (engineState === "unavailable") {
+      if (toolCtx.engineState === "unavailable") {
         const treeContent = buildDirectoryTree(paths.rootDir);
         const treeBlock = `<!-- ObsidiClaw: Project Structure -->\n\n## Project directory structure\n\n${treeContent}\n\n<!-- End ObsidiClaw Project Structure -->`;
 
@@ -449,7 +371,7 @@ export function createObsidiClawExtension(
         const mapped = mapPiEventToRunEvent(
           event as { type: string; [key: string]: unknown },
           s.sessionId,
-          currentRunId,
+          toolCtx.currentRunId,
         );
         if (mapped) s.logger.logEvent(mapped);
       };
@@ -468,7 +390,7 @@ export function createObsidiClawExtension(
         const mapped = mapPiEventToRunEvent(
           event as unknown as { type: string; [key: string]: unknown },
           stack.sessionId,
-          currentRunId,
+          toolCtx.currentRunId,
         );
         if (mapped) stack.logger.logEvent(mapped);
       }
@@ -513,7 +435,7 @@ export function createObsidiClawExtension(
         }
       } catch (err) {
         if (stack) {
-          stack.logger.logEvent({ type: "diagnostic", sessionId: stack.sessionId, runId: currentRunId, timestamp: Date.now(), module: "extension", level: "error", message: `session_review enqueue failed: ${err instanceof Error ? err.message : String(err)}` } as RunEvent);
+          stack.logger.logEvent({ type: "diagnostic", sessionId: stack.sessionId, runId: toolCtx.currentRunId, timestamp: Date.now(), module: "extension", level: "error", message: `session_review enqueue failed: ${err instanceof Error ? err.message : String(err)}` } as RunEvent);
         }
       } finally {
         void client.close();

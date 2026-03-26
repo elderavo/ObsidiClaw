@@ -122,6 +122,9 @@ class KnowledgeGraphEngine:
         if "embed_model" in kwargs and kwargs["embed_model"]:
             embed_config["model"] = kwargs["embed_model"]
 
+        # Store context_length for chunking in vector index builds
+        self._embed_context_length: int = embed_config.get("context_length", 8192)
+
         # ── Step 6: Create embedding model ──────────────────────────────
         embed_model_obj = create_embedding(embed_config)
 
@@ -332,7 +335,7 @@ class KnowledgeGraphEngine:
         if self.embed_model is not None:
             try:
                 from .indexer import _build_vector_index
-                self.index = _build_vector_index(notes, self.embed_model, self.db_dir)
+                self.index = _build_vector_index(notes, self.embed_model, self.db_dir, self._embed_context_length)
                 self._mode = "full"
                 self._degraded_reason = ""
             except Exception as exc:
@@ -449,27 +452,44 @@ class KnowledgeGraphEngine:
             self.note_cache[rel_path] = body
             self._note_hashes[rel_path] = new_hash
 
-            # Update vector index
+            # Update vector index (with chunking for long notes)
             if self.index is not None:
-                text_node = TextNode(
-                    text=f"{title}\n\n{body}",
-                    id_=rel_path,
-                    metadata={
-                        "file_path": rel_path,
-                        "note_type": note_type,
-                        "title": title,
-                        "tool_id": tool_id or "",
-                        "tags": ",".join(tags),
-                        "workspace": note.workspace,
-                    },
-                )
-                doc = Document(text=f"{title}\n\n{body}", id_=rel_path)
+                from .indexer import _chunk_text
+                full_text = f"{title}\n\n{body}"
+                chunk_char_limit = self._embed_context_length * 3
+                metadata_base = {
+                    "file_path": rel_path,
+                    "note_type": note_type,
+                    "title": title,
+                    "tool_id": tool_id or "",
+                    "tags": ",".join(tags),
+                    "workspace": note.workspace,
+                }
+
+                if not is_new:
+                    # Delete old nodes (including any chunks)
+                    try:
+                        self.index.delete_ref_doc(rel_path, delete_from_docstore=True)
+                    except Exception:
+                        pass  # May not exist in docstore
+
+                if len(full_text) <= chunk_char_limit:
+                    nodes = [TextNode(text=full_text, id_=rel_path, metadata=metadata_base)]
+                else:
+                    chunks = _chunk_text(full_text, chunk_char_limit)
+                    nodes = [
+                        TextNode(
+                            text=chunk,
+                            id_=f"{rel_path}#chunk{i}",
+                            metadata={**metadata_base, "parent_note_id": rel_path, "chunk_index": i},
+                        )
+                        for i, chunk in enumerate(chunks)
+                    ]
+
+                self.index.insert_nodes(nodes)
                 if is_new:
-                    self.index.insert_nodes([text_node])
                     added += 1
                 else:
-                    # update_ref_doc deletes old nodes then inserts new
-                    self.index.update_ref_doc(doc)
                     updated += 1
             else:
                 if is_new:
@@ -574,7 +594,7 @@ class KnowledgeGraphEngine:
         else:
             # Slow path: full rebuild
             from .indexer import _build_vector_index
-            self.index = _build_vector_index(notes, embed_model, self.db_dir)
+            self.index = _build_vector_index(notes, embed_model, self.db_dir, self._embed_context_length)
             Path(hash_path).write_text(current_hash)
             log.info("Built vector index (slow path)")
 

@@ -21,7 +21,7 @@ import { statSync } from "fs";
 import { llmChat, isLlmReachable } from "../../../core/llm-client.js";
 import type { JobDefinition } from "../types.js";
 import type { ObsidiClawPaths } from "../../../core/config.js";
-import { loadPersonality } from "../../../agents/subagent/personality-loader.js";
+import { loadPersonality, resolvePersonalityChatOptions } from "../../../agents/subagent/personality-loader.js";
 import { SUMMARIZE_CODE_SYSTEM_PROMPT } from "../../../agents/prompts.js";
 import { readText, writeText, fileExists, listDir } from "../../../core/os/fs.js";
 import { WorkspaceRegistry } from "../../workspaces/workspace-registry.js";
@@ -86,7 +86,7 @@ export async function run(paths: ObsidiClawPaths): Promise<void> {
     const sourceContent = readText(entry.sourcePath);
     const mirrorContent = readText(entry.mirrorPath);
 
-    const result = await summarize(sourceContent, mirrorContent, existingTags, personality?.content, personality?.provider);
+    const result = await summarize(sourceContent, mirrorContent, existingTags, personality);
     if (!result) {
       failed++;
       continue;
@@ -303,8 +303,7 @@ async function summarize(
   sourceContent: string,
   mirrorContent: string,
   existingTags: string[],
-  systemPrompt?: string,
-  providerOverride?: { model?: string; baseUrl?: string },
+  personality: import("../../../agents/subagent/types.js").PersonalityConfig | null,
 ): Promise<SummarizeResult | null> {
   const tagList = existingTags.length > 0
     ? existingTags.slice(0, 50).join(", ")
@@ -331,13 +330,11 @@ async function summarize(
   try {
     const result = await llmChat(
       [
-        { role: "system", content: systemPrompt ?? SUMMARIZE_CODE_SYSTEM_PROMPT },
+        { role: "system", content: personality?.content ?? SUMMARIZE_CODE_SYSTEM_PROMPT },
         { role: "user", content: userPrompt },
       ],
       {
-        model: providerOverride?.model,
-        temperature: 0.2,
-        numCtx: 16384,
+        ...resolvePersonalityChatOptions(personality),
         timeout: 60_000,
       },
     );

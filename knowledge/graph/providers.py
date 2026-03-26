@@ -26,6 +26,7 @@ def get_embed_config() -> dict[str, Any]:
         "model": os.environ.get("OBSIDI_EMBED_MODEL", "nomic-embed-text:v1.5"),
         "host": os.environ.get("OBSIDI_EMBED_HOST", "http://localhost:11434"),
         "api_key": os.environ.get("OPENAI_API_KEY", ""),
+        "context_length": int(os.environ.get("OBSIDI_EMBED_CONTEXT_LENGTH", "8192")),
     }
 
 

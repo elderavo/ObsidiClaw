@@ -27,6 +27,8 @@ export interface EmbedConfig {
   model: string;
   host: string;
   apiKey?: string;
+  /** Max token context length for the embedding model. Default: 8192. */
+  contextLength: number;
 }
 
 export function getEmbedConfig(): EmbedConfig {
@@ -35,6 +37,7 @@ export function getEmbedConfig(): EmbedConfig {
     model: process.env["OBSIDI_EMBED_MODEL"] ?? "nomic-embed-text:v1.5",
     host: process.env["OBSIDI_EMBED_HOST"] ?? "http://localhost:11434",
     apiKey: process.env["OPENAI_API_KEY"],
+    contextLength: parseInt(process.env["OBSIDI_EMBED_CONTEXT_LENGTH"] ?? "8192", 10),
   };
 }
 
@@ -42,7 +45,7 @@ export function getEmbedConfig(): EmbedConfig {
 // LLM provider config
 // ---------------------------------------------------------------------------
 
-export type LlmProvider = "ollama" | "openai";
+export type LlmProvider = "ollama" | "openai" | "anthropic";
 
 export interface LlmConfig {
   provider: LlmProvider;
@@ -59,8 +62,8 @@ export function getLlmConfig(): LlmConfig {
     model: process.env["OBSIDI_LLM_MODEL"] ?? process.env["OLLAMA_MODEL"] ?? "cogito:8b",
     host: process.env["OBSIDI_LLM_HOST"] ?? process.env["OLLAMA_BASE_URL"]?.replace(/\/v1\/?$/, "") ?? "http://localhost:11434",
     apiKey: process.env["OPENAI_API_KEY"],
-    contextWindow: 32768,
-    maxTokens: 4096,
+    contextWindow: parseInt(process.env["OBSIDI_LLM_CONTEXT_WINDOW"] ?? "32768", 10),
+    maxTokens: parseInt(process.env["OBSIDI_LLM_MAX_TOKENS"] ?? "4096", 10),
   };
 }
 

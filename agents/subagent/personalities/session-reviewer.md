@@ -3,6 +3,8 @@ type: personality
 title: Session Reviewer
 provider:
   model: qwen3:8b
+  numCtx: 16384
+  temperature: 0.1
 ---
 You analyze conversations between a user and an AI coding agent to extract preferences and behavioral signals.
 

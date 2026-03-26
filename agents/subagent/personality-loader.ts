@@ -22,6 +22,8 @@
 import { join } from "path";
 import { readText, fileExists, listDir } from "../../core/os/fs.js";
 import { parseFrontmatter } from "../../knowledge/markdown/frontmatter.js";
+import { getLlmConfig } from "../../core/config.js";
+import type { ChatOptions } from "../../core/llm-client.js";
 import type { PersonalityConfig } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -67,6 +69,31 @@ export function listPersonalities(personalitiesDir: string): string[] {
 }
 
 /**
+ * Resolve LLM chat options from personality config with cascade:
+ * .env global defaults → personality frontmatter overrides.
+ *
+ * Call sites should use this instead of manually constructing ChatOptions.
+ */
+export function resolvePersonalityChatOptions(
+  personality: PersonalityConfig | null,
+): ChatOptions {
+  const defaults = getLlmConfig();
+  const p = personality?.provider;
+  return {
+    model: p?.model ?? defaults.model,
+    temperature: p?.temperature,
+    numCtx: p?.numCtx,
+    maxTokens: p?.maxTokens ?? defaults.maxTokens,
+    providerType: p?.type,
+    apiKey: p?.apiKey,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/**
  * Extract provider config from parsed frontmatter.
  * Handles both flat and nested formats:
  *   provider:
@@ -80,10 +107,22 @@ function extractProvider(
   if (!provider || typeof provider !== "object") return undefined;
 
   const p = provider as Record<string, unknown>;
+  const type = typeof p["type"] === "string" ? p["type"] as "ollama" | "openai" | "anthropic" : undefined;
   const model = typeof p["model"] === "string" ? p["model"] : undefined;
   const baseUrl = typeof p["baseUrl"] === "string" ? p["baseUrl"] : undefined;
+  const numCtx = typeof p["numCtx"] === "number" ? p["numCtx"] : undefined;
+  const maxTokens = typeof p["maxTokens"] === "number" ? p["maxTokens"] : undefined;
+  const temperature = typeof p["temperature"] === "number" ? p["temperature"] : undefined;
 
-  if (!model && !baseUrl) return undefined;
+  // Resolve apiKey — supports "env:VAR_NAME" pattern
+  let apiKey: string | undefined;
+  if (typeof p["apiKey"] === "string") {
+    const raw = p["apiKey"];
+    apiKey = raw.startsWith("env:") ? process.env[raw.slice(4)] : raw;
+  }
 
-  return { model, baseUrl };
+  const hasAny = type || model || baseUrl || apiKey || numCtx !== undefined || maxTokens !== undefined || temperature !== undefined;
+  if (!hasAny) return undefined;
+
+  return { type, model, baseUrl, apiKey, numCtx, maxTokens, temperature };
 }

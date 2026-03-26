@@ -3,6 +3,8 @@ type: personality
 title: Code Reviewer
 provider:
   model: qwen3:8b
+  numCtx: 16384
+  temperature: 0.3
 ---
 # Code Reviewer
 

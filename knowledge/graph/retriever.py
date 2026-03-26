@@ -146,10 +146,25 @@ class ObsidiClawRetriever:
         for r in raw_results:
             node = r.node
             score = r.score or 0.0
-            note_id = node.id_ or ""
+            raw_id = node.id_ or ""
             metadata = getattr(node, "metadata", {}) or {}
+
+            # Chunk dedup: map chunk IDs back to parent note
+            parent_id = str(metadata.get("parent_note_id", ""))
+            note_id = parent_id if parent_id else raw_id
             file_path = str(metadata.get("file_path", note_id))
             note_type_str = str(metadata.get("note_type", "concept"))
+
+            # If we already have a seed for this note (from another chunk), keep highest score
+            if file_path in seed_ids:
+                if score > seed_scores.get(file_path, 0.0):
+                    seed_scores[file_path] = score
+                    # Update the existing seed's score
+                    for s in seeds:
+                        if s.note_id == file_path:
+                            s.score = score
+                            break
+                continue
 
             if note_type_str == "index":
                 continue

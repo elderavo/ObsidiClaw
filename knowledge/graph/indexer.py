@@ -308,29 +308,64 @@ def _build_graph_store(
 # ---------------------------------------------------------------------------
 
 
+def _chunk_text(text: str, max_chars: int, overlap: int = 200) -> list[str]:
+    """Split text into overlapping chunks that fit the embedding context."""
+    if len(text) <= max_chars:
+        return [text]
+    chunks: list[str] = []
+    start = 0
+    while start < len(text):
+        end = start + max_chars
+        chunks.append(text[start:end])
+        start = end - overlap
+    return chunks
+
+
 def _build_vector_index(
     notes: list[ParsedNote],
     embed_model: Any,
     db_dir: str,
+    context_length: int = 8192,
 ) -> VectorStoreIndex:
     """Build a VectorStoreIndex from parsed notes and persist to disk.
 
     Requires a working embedding provider (OllamaEmbedding, OpenAIEmbedding, etc).
+    Long notes are split into overlapping chunks to fit within the embedding
+    model's context window.
     """
+    # Conservative chars-to-tokens ratio (most models ~4 chars/token)
+    chunk_char_limit = context_length * 3
+
     text_nodes: list[TextNode] = []
     for note in notes:
-        text_nodes.append(TextNode(
-            text=f"{note.title}\n\n{note.body}",
-            id_=note.note_id,
-            metadata={
-                "file_path": note.path,
-                "note_type": note.note_type,
-                "title": note.title,
-                "tool_id": note.tool_id or "",
-                "tags": ",".join(note.tags),
-                "workspace": note.workspace,
-            },
-        ))
+        full_text = f"{note.title}\n\n{note.body}"
+        metadata = {
+            "file_path": note.path,
+            "note_type": note.note_type,
+            "title": note.title,
+            "tool_id": note.tool_id or "",
+            "tags": ",".join(note.tags),
+            "workspace": note.workspace,
+        }
+
+        if len(full_text) <= chunk_char_limit:
+            text_nodes.append(TextNode(
+                text=full_text,
+                id_=note.note_id,
+                metadata=metadata,
+            ))
+        else:
+            chunks = _chunk_text(full_text, chunk_char_limit)
+            for i, chunk in enumerate(chunks):
+                text_nodes.append(TextNode(
+                    text=chunk,
+                    id_=f"{note.note_id}#chunk{i}",
+                    metadata={
+                        **metadata,
+                        "parent_note_id": note.note_id,
+                        "chunk_index": i,
+                    },
+                ))
 
     vector_index = VectorStoreIndex(
         nodes=text_nodes,

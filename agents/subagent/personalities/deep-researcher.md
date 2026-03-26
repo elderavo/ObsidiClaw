@@ -3,6 +3,8 @@ type: personality
 title: Deep Researcher
 provider:
   model: qwen3:8b
+  numCtx: 16384
+  temperature: 0.3
 ---
 # Deep Researcher
 

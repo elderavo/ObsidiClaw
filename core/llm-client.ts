@@ -29,6 +29,10 @@ export interface ChatOptions {
   numCtx?: number;
   /** Request timeout in ms. */
   timeout?: number;
+  /** Override provider type (from personality config). */
+  providerType?: "ollama" | "openai" | "anthropic";
+  /** Override API key (from personality config). */
+  apiKey?: string;
 }
 
 export interface ChatResult {
@@ -86,11 +90,15 @@ export async function llmChat(
   const timeout = opts?.timeout ?? 120_000;
 
   try {
-    if (config.provider === "openai") {
-      return await callOpenAI(config, model, messages, opts, timeout);
+    const effectiveProvider = opts?.providerType ?? config.provider;
+    switch (effectiveProvider) {
+      case "anthropic":
+        return await callAnthropic(config, model, messages, opts, timeout);
+      case "openai":
+        return await callOpenAI(config, model, messages, opts, timeout);
+      default:
+        return await callOllama(config, model, messages, opts, timeout);
     }
-    // Default: ollama
-    return await callOllama(config, model, messages, opts, timeout);
   } catch (err) {
     if (err instanceof ProviderUnreachableError) throw err;
     if (isNetworkError(err)) {
@@ -196,6 +204,67 @@ async function callOpenAI(
     content: choice?.message?.content ?? "",
     model: response.data?.model ?? model,
     provider: "openai",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic
+// ---------------------------------------------------------------------------
+
+async function callAnthropic(
+  config: LlmConfig,
+  model: string,
+  messages: ChatMessage[],
+  opts: ChatOptions | undefined,
+  timeout: number,
+): Promise<ChatResult> {
+  const apiKey = opts?.apiKey ?? config.apiKey ?? process.env["ANTHROPIC_API_KEY"];
+  if (!apiKey) {
+    throw new Error("Anthropic API key not configured. Set ANTHROPIC_API_KEY or provider.apiKey in personality.");
+  }
+
+  // Separate system messages from conversation messages
+  const systemParts: string[] = [];
+  const convMessages: { role: string; content: string }[] = [];
+  for (const msg of messages) {
+    if (msg.role === "system") {
+      systemParts.push(msg.content);
+    } else {
+      convMessages.push({ role: msg.role, content: msg.content });
+    }
+  }
+
+  const body: Record<string, unknown> = {
+    model,
+    max_tokens: opts?.maxTokens ?? config.maxTokens ?? 4096,
+    messages: convMessages,
+  };
+  if (systemParts.length > 0) body.system = systemParts.join("\n\n");
+  if (opts?.temperature !== undefined) body.temperature = opts.temperature;
+
+  const response = await axios.post(
+    "https://api.anthropic.com/v1/messages",
+    body,
+    {
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      timeout,
+      signal: AbortSignal.timeout(timeout),
+    },
+  );
+
+  const content = response.data?.content;
+  const text = Array.isArray(content)
+    ? content.filter((b: { type: string }) => b.type === "text").map((b: { text: string }) => b.text).join("")
+    : "";
+
+  return {
+    content: text,
+    model: response.data?.model ?? model,
+    provider: "anthropic",
   };
 }
 

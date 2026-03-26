@@ -19,8 +19,20 @@ export interface PersonalityConfig {
 
   /** LLM provider override for this personality. */
   provider?: {
+    /** Provider type — overrides global OBSIDI_LLM_PROVIDER. */
+    type?: "ollama" | "openai" | "anthropic";
+    /** Model name — overrides global OBSIDI_LLM_MODEL. */
     model?: string;
+    /** Base URL for ollama/openai providers. */
     baseUrl?: string;
+    /** API key (literal or "env:VAR_NAME" to read from env). */
+    apiKey?: string;
+    /** Context window size (Ollama num_ctx). */
+    numCtx?: number;
+    /** Max output tokens. */
+    maxTokens?: number;
+    /** Sampling temperature (0–2). */
+    temperature?: number;
   };
 }
 

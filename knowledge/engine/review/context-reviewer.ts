@@ -16,7 +16,7 @@
  */
 
 import { llmChat } from "../../../core/llm-client.js";
-import { loadPersonality } from "../../../agents/subagent/personality-loader.js";
+import { loadPersonality, resolvePersonalityChatOptions } from "../../../agents/subagent/personality-loader.js";
 import { CONTEXT_REVIEW_FALLBACK_SYSTEM_PROMPT } from "../../../agents/prompts.js";
 import type { PersonalityConfig } from "../../../agents/subagent/types.js";
 import type { RetrievedNote } from "../types.js";
@@ -29,7 +29,7 @@ export interface ContextReviewConfig {
   /** Whether review is enabled. Default: true (always-on). */
   enabled: boolean;
 
-  /** Personality name to use for the review. Default: "context-gardener". */
+  /** Personality name to use for the review. Default: "context-synthesizer". */
   personality: string;
 
   /** Max time for the review call in ms. Default: 15000. */
@@ -59,7 +59,7 @@ export interface ReviewResult {
 
 const DEFAULTS: ContextReviewConfig = {
   enabled: true,
-  personality: "context-gardener",
+  personality: "context-synthesizer",
   maxLatencyMs: 120_000,
   personalitiesDir: "",
 };
@@ -146,9 +146,7 @@ export class ContextReviewer {
         { role: "user", content: userPrompt },
       ],
       {
-        model: personality?.provider?.model,
-        temperature: 0.1,
-        numCtx: 16384,
+        ...resolvePersonalityChatOptions(personality),
         timeout: this.config.maxLatencyMs,
       },
     );
