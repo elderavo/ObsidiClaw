@@ -22,6 +22,7 @@
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
+import { EventEmitter } from "events";
 import { spawn, execSync, type ChildProcess } from "child_process";
 import { createInterface, type Interface as ReadlineInterface } from "readline";
 import { existsSync, readFileSync, writeFileSync } from "fs";
@@ -53,7 +54,7 @@ const DEFAULT_PRUNE_CONFIG: PruneConfig = {
   excludeTags: [],
 };
 
-const RPC_TIMEOUT_MS = 120_000; // 2 minutes for long operations (indexing)
+const RPC_TIMEOUT_MS = 1_800_000; // 30 minutes for long operations (indexing)
 
 // ---------------------------------------------------------------------------
 // RPC types
@@ -69,7 +70,7 @@ interface RpcPending {
 // ContextEngine — subprocess bridge
 // ---------------------------------------------------------------------------
 
-export class ContextEngine {
+export class ContextEngine extends EventEmitter {
   private subprocess: ChildProcess | null = null;
   private rl: ReadlineInterface | null = null;
   private subprocessExitPromise: Promise<void> | null = null;
@@ -94,6 +95,7 @@ export class ContextEngine {
   private readonly pruneConfig: PruneConfig;
 
   constructor(config: ContextEngineConfig) {
+    super();
     const mdDbPath = config.mdDbPath;
     const defaultDbPath = join(dirname(mdDbPath), ".obsidi-claw", "knowledge_graph");
 
@@ -698,7 +700,14 @@ export class ContextEngine {
       return;
     }
 
-    if (!data.id) return;
+    if (!data.id) {
+      // Notification (no id) — check for known types
+      const n = data as Record<string, unknown>;
+      if (n["type"] === "index_progress") {
+        this.emit("indexProgress", n["done"] as number, n["total"] as number);
+      }
+      return;
+    }
 
     const pending = this.pendingRpc.get(data.id);
     if (!pending) return;

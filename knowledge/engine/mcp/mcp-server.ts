@@ -56,8 +56,8 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
 
   // ── retrieve_context ──────────────────────────────────────────────────────
 
-  // Default budget: ~750 tokens. Keeps total prompt well under 4k context models.
-  const DEFAULT_MAX_CHARS = 3000;
+  // Default budget: ~2500 tokens. Generous enough for multi-tier symbol + call context.
+  const DEFAULT_MAX_CHARS = 10000;
 
   server.registerTool(
     "retrieve_context",
@@ -69,7 +69,7 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
         "For detailed tool usage examples, search for the tool name (e.g. 'spawn_subagent').",
       inputSchema: {
         query: z.string().describe("What to search for in the knowledge base."),
-        max_chars: z.number().optional().describe("Maximum characters to return (default: 3000). Use a smaller value for tighter context."),
+        max_chars: z.number().optional().describe("Maximum characters to return (default: 10000). Use a smaller value for tighter context."),
         workspace: z.string().optional().describe("Limit retrieval to a specific registered workspace by name. Omit to search all workspaces."),
       },
     },

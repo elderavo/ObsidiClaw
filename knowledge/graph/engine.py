@@ -15,7 +15,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from llama_index.core import VectorStoreIndex, Settings
 from llama_index.core.graph_stores import SimplePropertyGraphStore
@@ -363,6 +363,7 @@ class KnowledgeGraphEngine:
         self,
         changed_paths: list[str],
         deleted_paths: list[str],
+        progress_cb: Optional[Callable[[int, int], None]] = None,
     ) -> dict[str, Any]:
         """Update only the notes that changed/were added/deleted.
 
@@ -398,19 +399,24 @@ class KnowledgeGraphEngine:
         )
 
         new_notes: list[ParsedNote] = []
-        for rel_path in changed_paths:
+        total_changed = len(changed_paths)
+        for _idx, rel_path in enumerate(changed_paths):
             abs_path = os.path.join(self.md_db_path, rel_path.replace("/", os.sep))
             if not os.path.isfile(abs_path):
                 # File listed as changed but doesn't exist — treat as delete
                 if rel_path in self._parsed_notes:
                     self._remove_note(rel_path)
                     removed += 1
+                if progress_cb:
+                    progress_cb(_idx + 1, total_changed)
                 continue
 
             try:
                 content = Path(abs_path).read_text(encoding="utf-8")
             except Exception as exc:
                 log.warning("Failed to read %s: %s", abs_path, exc)
+                if progress_cb:
+                    progress_cb(_idx + 1, total_changed)
                 continue
 
             frontmatter, body = parse_frontmatter(content)
@@ -418,6 +424,8 @@ class KnowledgeGraphEngine:
 
             # Skip if content hasn't actually changed
             if rel_path in self._note_hashes and self._note_hashes[rel_path] == new_hash:
+                if progress_cb:
+                    progress_cb(_idx + 1, total_changed)
                 continue
 
             note_type = infer_note_type(frontmatter, rel_path)
@@ -496,6 +504,9 @@ class KnowledgeGraphEngine:
                     added += 1
                 else:
                     updated += 1
+
+            if progress_cb:
+                progress_cb(_idx + 1, total_changed)
 
         # ── Rebuild graph store (cheap — no embeddings) ──────────────────
         # Graph edges depend on cross-note wikilinks, so after any note

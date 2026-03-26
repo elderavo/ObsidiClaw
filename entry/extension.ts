@@ -112,6 +112,10 @@ export function createObsidiClawExtension(
     const paths = resolvePaths(config.rootDir);
     const mdDbPath = config.mdDbPath ?? paths.mdDbPath;
 
+    // Tracks the current session's UI handle so the index progress listener
+    // (registered once per factory) can update the status bar.
+    let latestCtxUI: { setStatus(key: string, text: string | undefined): void } | undefined;
+
     // ── Engine + MCP server setup ────────────────────────────────────────────
 
     let stack: ObsidiClawStack | undefined;
@@ -215,6 +219,22 @@ export function createObsidiClawExtension(
       });
     }
 
+    // ── Index progress bar (standalone mode only) ────────────────────────────
+    // Python emits index_progress notifications during incremental_update.
+    // We render a status bar entry so the user sees progress on large workspaces.
+    if (stack) {
+      stack.engine.on("indexProgress", (done: number, total: number) => {
+        if (!latestCtxUI) return;
+        if (done >= total) {
+          latestCtxUI.setStatus("indexing", undefined);
+        } else {
+          const filled = Math.round((done / total) * 20);
+          const bar = "█".repeat(filled) + "░".repeat(20 - filled);
+          latestCtxUI.setStatus("indexing", `Indexing ${done}/${total} [${bar}]`);
+        }
+      });
+    }
+
     // Track latest transcript (updated on agent_end) for review hook
     let latestMessages: unknown[] = [];
 
@@ -227,6 +247,7 @@ export function createObsidiClawExtension(
 
     // ── session_start: initialize stack + connect MCP pair ───────────────────
     pi.on("session_start", async (_event, ctx) => {
+      latestCtxUI = ctx.hasUI ? ctx.ui : undefined;
       ensureDir(join(paths.rootDir, ".obsidi-claw"));
 
       // One-time migration: strip directory tree block from preferences.md if present.
@@ -398,6 +419,8 @@ export function createObsidiClawExtension(
 
     // ── session_shutdown ─────────────────────────────────────────────────────
     pi.on("session_shutdown", async () => {
+      latestCtxUI?.setStatus("indexing", undefined);
+      latestCtxUI = undefined;
       try {
         // Only queue review when this extension owns the stack (Pi TUI path).
         if (stack) {

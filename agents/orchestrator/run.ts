@@ -18,7 +18,7 @@
  *   OBSIDI_LLM_MODEL     — LLM model      (default: cogito:8b)
  *   OBSIDI_EMBED_PROVIDER — embed provider (default: ollama)
  *   OBSIDI_EMBED_HOST    — embed endpoint  (default: http://localhost:11434)
- *   OBSIDI_EMBED_MODEL   — embed model     (default: nomic-embed-text:v1.5)
+ *   OBSIDI_EMBED_MODEL   — embed model     (default: nomic-embed-text:latest)
  *   OBSIDI_CLAW_DEBUG    — set to 0/false to disable debug JSONL (ON by default)
  */
 

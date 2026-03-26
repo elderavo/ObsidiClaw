@@ -144,80 +144,63 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
   async function initialize(): Promise<void> {
-    // Engine is the only thing that must finish before accepting prompts.
-    // Scheduler install and workspace registration are independent.
+    // ── Phase 1: mirrors + scheduler (independent of each other) ──────────
+    // Mirrors MUST finish before the engine initializes. The engine computes
+    // an mtime-based hash of md_db/ on startup to decide fast vs. slow path.
+    // If mirrors run concurrently with engine init, file writes bump mtimes
+    // after the hash is stored, so the next startup always sees a different
+    // hash → full re-embed every time (self-perpetuating loop).
+    workspaceRegistry.load();
+
     const schedulerReady = scheduler
       ? scheduler.start().catch((err: unknown) => {
           console.warn("[obsidi-claw] scheduler.start() failed:", err);
         })
       : Promise.resolve();
 
-    // Load workspace registry and bootstrap self-registration if empty.
-    // Also collect all mirror paths written during startup so we can fire a
-    // targeted incremental index update after engine init completes.
-    workspaceRegistry.load();
-    const startupMirrorPaths: string[] = [];
-
-    const workspaceReady = (async () => {
-      try {
-        if (workspaceRegistry.list().length === 0) {
-          // First boot: auto-register ObsidiClaw's own source tree
-          const { notePaths } = await workspaceRegistry.register({
-            name: "obsidi-claw",
-            sourceDir: paths.rootDir,
-            mode: "code",
-            languages: ["ts", "py"],
-            active: true,
-          });
-          startupMirrorPaths.push(...notePaths);
-        } else {
-          // Subsequent boots: re-run initial mirror for all active workspaces
-          // (mtime check makes this fast — skips up-to-date notes)
-          for (const entry of workspaceRegistry.list()) {
-            if (entry.active && entry.mode === "code") {
-              const mirrorDir = workspaceRegistry.mirrorDir(entry);
-              const prefix = WorkspaceRegistry.wikilinkPrefix(entry);
-              const promises: Promise<unknown>[] = [];
-              if (entry.languages.includes("ts")) {
-                promises.push(runMirrorTs({
-                  scanDir: entry.sourceDir, mirrorDir,
-                  omitPatterns: entry.omitPatterns?.ts ?? ["dist", "node_modules", "_legacy", ".claude", "*.d.ts"],
-                  force: false, workspace: entry.name, wikilinkPrefix: prefix,
-                }));
-              }
-              if (entry.languages.includes("py")) {
-                promises.push(runMirrorPy({
-                  scanDir: entry.sourceDir, mirrorDir,
-                  omitPatterns: entry.omitPatterns?.py ?? ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist"],
-                  force: false, workspace: entry.name, wikilinkPrefix: prefix,
-                }));
-              }
-              await Promise.all(promises);
-              // Collect all note paths for this workspace for post-init update
-              startupMirrorPaths.push(...workspaceRegistry.listNotePaths(entry));
+    try {
+      if (workspaceRegistry.list().length === 0) {
+        // First boot: auto-register ObsidiClaw's own source tree
+        await workspaceRegistry.register({
+          name: "obsidi-claw",
+          sourceDir: paths.rootDir,
+          mode: "code",
+          languages: ["ts", "py"],
+          active: true,
+        });
+      } else {
+        // Subsequent boots: re-run mirrors for all active workspaces
+        // (mtime check makes this fast — skips up-to-date notes)
+        for (const entry of workspaceRegistry.list()) {
+          if (entry.active && entry.mode === "code") {
+            const mirrorDir = workspaceRegistry.mirrorDir(entry);
+            const prefix = WorkspaceRegistry.wikilinkPrefix(entry);
+            const promises: Promise<unknown>[] = [];
+            if (entry.languages.includes("ts")) {
+              promises.push(runMirrorTs({
+                scanDir: entry.sourceDir, mirrorDir,
+                omitPatterns: entry.omitPatterns?.ts ?? ["dist", "node_modules", "_legacy", ".claude", "*.d.ts"],
+                force: false, workspace: entry.name, wikilinkPrefix: prefix,
+              }));
             }
+            if (entry.languages.includes("py")) {
+              promises.push(runMirrorPy({
+                scanDir: entry.sourceDir, mirrorDir,
+                omitPatterns: entry.omitPatterns?.py ?? ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist"],
+                force: false, workspace: entry.name, wikilinkPrefix: prefix,
+              }));
+            }
+            await Promise.all(promises);
           }
         }
-      } catch (err) {
-        console.warn("[obsidi-claw] workspace initialization failed:", err);
       }
-    })();
-
-    // All three run concurrently; we only await the engine.
-    await Promise.all([
-      engine.initialize(),
-      schedulerReady,
-      workspaceReady,
-    ]);
-
-    // Fire a background incremental update for any notes written by mirrors
-    // during startup that may not have been in the engine's initial scan.
-    // Uses content hashing — unchanged notes are skipped in ~1ms each.
-    if (startupMirrorPaths.length > 0) {
-      engine.incrementalUpdate(startupMirrorPaths).catch((err) => {
-        console.warn("[obsidi-claw] background startup incremental update failed:", err);
-      });
+    } catch (err) {
+      console.warn("[obsidi-claw] workspace initialization failed:", err);
     }
+
+    // ── Phase 2: engine init (sees settled md_db, hash is stable) ─────────
+    // Scheduler is also awaited here; it started concurrently in phase 1.
+    await Promise.all([engine.initialize(), schedulerReady]);
 
     // Watchers are cheap — start after everything else is up.
     mdDbWatcher = startMdDbLintWatcher(paths.mdDbPath);
