@@ -229,9 +229,9 @@ function spawnSummarizeWorker(config: WorkspaceMirrorConfig): void {
 
   activeWorkers.set(workspace, child);
 
-  // Drain stdout/stderr to prevent the pipe buffer from blocking the worker
-  child.stdout?.resume();
-  child.stderr?.resume();
+  // Forward worker output to parent console so summarization progress/errors are visible
+  child.stdout?.on("data", (chunk: Buffer) => process.stdout.write(chunk));
+  child.stderr?.on("data", (chunk: Buffer) => process.stderr.write(chunk));
 
   child.on("exit", () => {
     activeWorkers.delete(workspace);

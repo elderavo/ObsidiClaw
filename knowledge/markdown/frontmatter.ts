@@ -86,7 +86,7 @@ function parseFrontmatterLines(lines: string[]): Record<string, unknown> {
 
     if (rawValue) {
       // Inline value: key: value
-      result[key] = rawValue;
+      result[key] = coerceScalar(rawValue);
       i++;
     } else {
       // Check for nested block or list
@@ -110,7 +110,7 @@ function parseFrontmatterLines(lines: string[]): Record<string, unknown> {
           if (nestedColon > 0) {
             const nKey = nextTrimmed.slice(0, nestedColon).trim();
             const nVal = nextTrimmed.slice(nestedColon + 1).trim();
-            nested[nKey] = nVal || null;
+            nested[nKey] = nVal ? coerceScalar(nVal) : null;
           }
         }
         j++;
@@ -129,6 +129,23 @@ function parseFrontmatterLines(lines: string[]): Record<string, unknown> {
   }
 
   return result;
+}
+
+/**
+ * Coerce a raw YAML scalar string to its native type.
+ * Handles: integers, floats, booleans, null. Falls back to string.
+ */
+function coerceScalar(raw: string): unknown {
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  if (raw === "null" || raw === "~") return null;
+  if (/^-?\d+$/.test(raw)) return parseInt(raw, 10);
+  if (/^-?\d+\.\d+$/.test(raw)) return parseFloat(raw);
+  // Strip surrounding quotes
+  if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
+    return raw.slice(1, -1);
+  }
+  return raw;
 }
 
 // ---------------------------------------------------------------------------

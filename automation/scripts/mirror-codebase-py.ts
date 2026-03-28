@@ -38,6 +38,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
+import { cleanMirrorDir } from "./mirror-codebase.js";
 
 const __filename = fileURLToPath(import.meta.url);
 
@@ -579,7 +580,6 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string, p
     `path: ${file.relativePath}`,
     `parentModule: ${parentModuleLink}`,
     "language: py",
-    "generated: true",
     ...(workspace ? [`workspace: ${workspace}`] : []),
     "tags:",
     "  - codeUnit",
@@ -738,7 +738,6 @@ function generateModuleNote(
     `path: ${dirRel}`,
     `title: ${dirName}`,
     "language: py",
-    "generated: true",
     ...(workspace ? [`workspace: ${workspace}`] : []),
     "tags:",
     "  - codeUnit",
@@ -796,49 +795,7 @@ function extractSummarySection(mirrorPath: string): string | null {
 // Stale mirror cleanup
 // ---------------------------------------------------------------------------
 
-/**
- * Walk the mirror directory and delete any .md files that are not in the set
- * of valid mirror paths. Only deletes files with `generated: true` AND
- * `language: py` in frontmatter, so Python cleanup won't touch TS mirrors.
- * Also removes empty directories left behind.
- */
-function cleanStaleMirrors(mirrorDir: string, validPaths: Set<string>): number {
-  let cleaned = 0;
 
-  function walkClean(dir: string): void {
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-
-    for (const entry of entries) {
-      const absPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        walkClean(absPath);
-        try {
-          const remaining = fs.readdirSync(absPath);
-          if (remaining.length === 0) fs.rmdirSync(absPath);
-        } catch { /* ignore */ }
-      } else if (entry.isFile() && entry.name.endsWith(".md")) {
-        const resolved = path.resolve(absPath);
-        if (!validPaths.has(resolved)) {
-          try {
-            const content = fs.readFileSync(absPath, "utf8");
-            if (content.includes("generated: true") && content.includes("language: py")) {
-              fs.unlinkSync(absPath);
-              cleaned++;
-            }
-          } catch { /* can't read — skip */ }
-        }
-      }
-    }
-  }
-
-  walkClean(mirrorDir);
-  return cleaned;
-}
 
 // ---------------------------------------------------------------------------
 // Public API (used by mirror-watcher and CLI)
@@ -857,7 +814,7 @@ export interface MirrorPyOptions {
 
 export async function runMirrorPy(
   opts: MirrorPyOptions,
-): Promise<{ written: number; skipped: number; cleaned: number }> {
+): Promise<{ written: number; skipped: number; validPaths: Set<string> }> {
   const today = new Date().toISOString().slice(0, 10);
   const discovered = collectFiles(opts.scanDir, opts.mirrorDir, opts.omitPatterns);
 
@@ -926,11 +883,8 @@ export async function runMirrorPy(
     }
   }
 
-  // ── Cleanup stale mirrors ──────────────────────────────────────────────
-  const cleaned = cleanStaleMirrors(opts.mirrorDir, validMirrorPaths);
-
   if (parseErrors > 0) console.warn(`[mirror-py] ${parseErrors} files failed to parse`);
-  return { written, skipped, cleaned };
+  return { written, skipped, validPaths: validMirrorPaths };
 }
 
 // ---------------------------------------------------------------------------
@@ -949,8 +903,8 @@ async function main() {
     workspaces = JSON.parse(raw).filter((w: { active: boolean }) => w.active);
   } catch {
     console.log("[mirror-py] no workspaces.json found, running against cwd");
-    const { written, skipped, cleaned } = await runMirrorPy({ scanDir: cwd, mirrorDir: path.join(mdDbPath, "code"), omitPatterns: DEFAULT_OMIT, force });
-    console.log(`  written=${written} skipped=${skipped} cleaned=${cleaned}`);
+    const { written, skipped } = await runMirrorPy({ scanDir: cwd, mirrorDir: path.join(mdDbPath, "code"), omitPatterns: DEFAULT_OMIT, force });
+    console.log(`  written=${written} skipped=${skipped}`);
     return;
   }
 
@@ -958,7 +912,7 @@ async function main() {
     if (!ws.languages.includes("py")) continue;
     const mirrorDir = path.join(mdDbPath, "code", ws.name);
     console.log(`[mirror-py] ${ws.name} (${ws.sourceDir})`);
-    const { written, skipped, cleaned } = await runMirrorPy({
+    const { written, skipped } = await runMirrorPy({
       scanDir: ws.sourceDir,
       mirrorDir,
       omitPatterns: DEFAULT_OMIT,
@@ -966,7 +920,7 @@ async function main() {
       workspace: ws.name,
       wikilinkPrefix: `code/${ws.name}`,
     });
-    console.log(`  written=${written} skipped=${skipped} cleaned=${cleaned}`);
+    console.log(`  written=${written} skipped=${skipped}`);
   }
 }
 
