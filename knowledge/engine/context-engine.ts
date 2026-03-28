@@ -456,47 +456,24 @@ export class ContextEngine extends EventEmitter {
    * listed files. Unchanged files are skipped via content hash comparison
    * on the Python side.
    */
-  async incrementalUpdate(changedPaths: string[], deletedPaths: string[] = []): Promise<{
-    added: number;
-    updated: number;
-    removed: number;
-    durationMs: number;
-  }> {
+  /**
+   * Queue an incremental index update. Returns immediately — the Python
+   * background indexer thread does the actual embedding + graph work so
+   * the main RPC loop stays free for retrieve/find_path requests.
+   */
+  async incrementalUpdate(changedPaths: string[], deletedPaths: string[] = []): Promise<void> {
     this.ensureInitialized();
-
-    const t0 = Date.now();
 
     const result = await this.rpc("incremental_update", {
       changed_paths: changedPaths,
       deleted_paths: deletedPaths,
-    }) as {
-      added: number;
-      updated: number;
-      removed: number;
-      duration_ms: number;
-      note_count: number;
-      note_cache: Record<string, string>;
-    };
+    }) as { queued: boolean; queue_depth: number };
 
-    // Sync local note cache with Python's updated state
-    this.noteCache.clear();
-    for (const [key, val] of Object.entries(result.note_cache)) {
-      this.noteCache.set(key, val);
-    }
-
-    const durationMs = Date.now() - t0;
     this.debug({
       type: "ce_subprocess_log",
       timestamp: Date.now(),
-      message: `Incremental update: +${result.added} ~${result.updated} -${result.removed} in ${durationMs}ms`,
+      message: `Incremental update queued (queue_depth=${result.queue_depth})`,
     });
-
-    return {
-      added: result.added,
-      updated: result.updated,
-      removed: result.removed,
-      durationMs,
-    };
   }
 
   /**

@@ -328,8 +328,7 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
         });
 
         // Fire-and-forget incremental update — index only the new notes.
-        // Does NOT block the MCP response; Pi stays responsive immediately.
-        // Retrieval queries during indexing queue behind it on the Python pipe.
+        // Returns immediately; Python background thread does the actual work.
         if (notePaths.length > 0) {
           engine.incrementalUpdate(notePaths).catch((err) => {
             console.warn("[mcp] background incremental update failed:", err);
