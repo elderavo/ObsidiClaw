@@ -53,6 +53,10 @@ interface SummarizeResult {
   tags: string[];
 }
 
+type LlmOutcome =
+  | { ok: true; result: SummarizeResult }
+  | { ok: false; connection: boolean }; // connection=true → network error, false → bad content
+
 interface MirrorEntry {
   mirrorPath: string;
   sourcePath: string;
@@ -102,8 +106,10 @@ export async function runCascadeForWorkspace(
   // ── Pass 1: Tier-1 symbol notes ──────────────────────────────────────────
   const justSummarizedT1 = new Set<string>();
   const tier1Notes = collectNotesByTier(config.mirrorDir, 1, config.rootDir, config.registry);
+  process.stderr.write(`[summarize] tier-1: ${tier1Notes.length} notes found\n`);
   let t1done = 0;
   let t1fail = 0;
+  let connFails = 0;
 
   for (const entry of tier1Notes) {
     let mirrorContent: string;
@@ -117,27 +123,32 @@ export async function runCascadeForWorkspace(
     // Summarize if: no existing summary OR source is newer than mirror
     if (extractSummary(mirrorContent) && !isStale(entry)) continue;
 
-    const result = await llmSummarize(
+    const outcome = await llmSummarize(
       mirrorContent.slice(0, TIER1_MIRROR_TRUNCATE),
       {},
       existingTags,
       t1Personality,
     );
 
-    if (result) {
-      writeResult(entry.mirrorPath, mirrorContent, result.summary, result.tags);
+    if (outcome.ok) {
+      writeResult(entry.mirrorPath, mirrorContent, outcome.result.summary, outcome.result.tags);
       justSummarizedT1.add(entry.mirrorPath);
       t1done++;
+      connFails = 0;
     } else {
       t1fail++;
+      if (outcome.connection && ++connFails >= 2) break;
     }
   }
+  process.stderr.write(`[summarize] tier-1: done=${t1done} fail=${t1fail}\n`);
 
   // ── Pass 2: Tier-2 file notes ─────────────────────────────────────────────
   const justSummarizedT2 = new Set<string>();
   const tier2Notes = collectNotesByTier(config.mirrorDir, 2, config.rootDir, config.registry);
+  process.stderr.write(`[summarize] tier-2: ${tier2Notes.length} notes found\n`);
   let t2done = 0;
   let t2fail = 0;
+  connFails = 0;
 
   for (const entry of tier2Notes) {
     let sourceContent: string;
@@ -157,25 +168,29 @@ export async function runCascadeForWorkspace(
     if (extractSummary(mirrorContent) && !isStale(entry) && !hasUpdatedChild) continue;
 
     const childSummaries = collectChildSummaries(childPaths);
-    const result = await llmSummarize(
+    const outcome = await llmSummarize(
       mirrorContent.slice(0, TIER2_MIRROR_TRUNCATE),
       { sourceContent: sourceContent.slice(0, SOURCE_TRUNCATE_T2), childSummaries },
       existingTags,
       t2Personality,
     );
 
-    if (result) {
-      writeResult(entry.mirrorPath, mirrorContent, result.summary, result.tags);
+    if (outcome.ok) {
+      writeResult(entry.mirrorPath, mirrorContent, outcome.result.summary, outcome.result.tags);
       justSummarizedT2.add(entry.mirrorPath);
       t2done++;
+      connFails = 0;
     } else {
       t2fail++;
+      if (outcome.connection && ++connFails >= 2) break;
     }
   }
+  process.stderr.write(`[summarize] tier-2: done=${t2done} fail=${t2fail}\n`);
 
   // ── Pass 3: Tier-3 module notes ───────────────────────────────────────────
   let t3done = 0;
   let t3fail = 0;
+  connFails = 0;
   const tier3Paths = deriveTier3Paths(tier2Notes.map((e) => e.mirrorPath));
 
   for (const tier3Path of tier3Paths) {
@@ -197,20 +212,23 @@ export async function runCascadeForWorkspace(
     const childSummaries = collectChildSummaries(childPaths);
     if (childSummaries.length === 0) continue;
 
-    const result = await llmSummarize(
+    const outcome = await llmSummarize(
       mirrorContent,
       { childSummaries },
       existingTags,
       t3Personality,
     );
 
-    if (result) {
-      writeResult(tier3Path, mirrorContent, result.summary, result.tags);
+    if (outcome.ok) {
+      writeResult(tier3Path, mirrorContent, outcome.result.summary, outcome.result.tags);
       t3done++;
+      connFails = 0;
     } else {
       t3fail++;
+      if (outcome.connection && ++connFails >= 2) break;
     }
   }
+  process.stderr.write(`[summarize] tier-3: done=${t3done} fail=${t3fail}\n`);
 }
 
 // ---------------------------------------------------------------------------
@@ -465,7 +483,10 @@ function writeResult(
   tags: string[],
 ): void {
   let content = updateFrontmatterTags(existingContent, tags);
-  content = stripSummarySection(content).trimEnd() + `\n\n${SUMMARY_HEADER}\n\n${summary}\n`;
+  content = stripSummarySection(content);
+  // Remove the mirror-generated placeholder that appears before the summary
+  content = content.replace(/\n\*Module summary not yet generated\.\*\n*/g, "\n\n");
+  content = content.trimEnd() + `\n\n${SUMMARY_HEADER}\n\n${summary}\n`;
   writeText(mirrorPath, content);
 }
 
@@ -496,12 +517,15 @@ function stripSummarySection(content: string): string {
 // LLM call
 // ---------------------------------------------------------------------------
 
+// Error message substrings that indicate a connection-level failure (vs. bad model output)
+const CONNECTION_ERROR_PATTERNS = ["ETIMEDOUT", "ENETUNREACH", "ECONNRESET", "ECONNREFUSED", "unreachable", "canceled"];
+
 async function llmSummarize(
   mirrorContent: string,
   opts: SummarizeOpts,
   existingTags: string[],
   personality: PersonalityConfig | null,
-): Promise<SummarizeResult | null> {
+): Promise<LlmOutcome> {
   const tagList = existingTags.length > 0 ? existingTags.slice(0, 50).join(", ") : "(none yet)";
 
   const parts: string[] = ["## Mirror Note", mirrorContent];
@@ -525,16 +549,24 @@ async function llmSummarize(
   );
 
   try {
-    const result = await llmChat(
+    const raw = await llmChat(
       [
         { role: "system", content: personality?.content ?? "" },
         { role: "user", content: parts.join("\n") },
       ],
       { ...resolvePersonalityChatOptions(personality), timeout: 60_000 },
     );
-    return parseResponse(result.content);
-  } catch {
-    return null;
+    const parsed = parseResponse(raw.content);
+    if (parsed) return { ok: true, result: parsed };
+    process.stderr.write(
+      `[summarize] LLM returned unparseable response (${raw.content.length} chars). First 200: ${raw.content.slice(0, 200)}\n`,
+    );
+    return { ok: false, connection: false };
+  } catch (err) {
+    const msg = String(err);
+    const isConn = CONNECTION_ERROR_PATTERNS.some((p) => msg.includes(p));
+    process.stderr.write(`[summarize] LLM call failed: ${msg}\n`);
+    return { ok: false, connection: isConn };
   }
 }
 
