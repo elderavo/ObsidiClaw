@@ -28,11 +28,12 @@ import { join } from "path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { type ExtensionFactory } from "@mariozechner/pi-coding-agent";
+import { type ExtensionFactory, type ExtensionUIContext } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
 import { createContextEngineMcpServer } from "../knowledge/engine/index.js";
 import { resolvePaths, getEmbedConfig } from "../core/config.js";
 import { extractMcpText } from "../core/text-utils.js";
-import { ensureDir, writeText } from "../core/os/fs.js";
+import { ensureDir, writeText, readText, listDir, fileExists } from "../core/os/fs.js";
 import { spawnProcess, getExecPath } from "../core/os/process.js";
 import { createObsidiClawStack, type ObsidiClawStack } from "./stack.js";
 import { mapPiEventToRunEvent } from "../agents/pi-event-mapper.js";
@@ -44,6 +45,7 @@ import { registerRetrieveContextTool } from "./tools/retrieve-context.js";
 import { registerRateContextTool } from "./tools/rate-context.js";
 import { registerWorkspaceTools } from "./tools/workspace.js";
 import { registerFindPathTool } from "./tools/find-path.js";
+import type { WorkspaceEntry } from "../automation/workspaces/workspace-registry.js";
 
 // ---------------------------------------------------------------------------
 // Shared state — lets other extensions (subagent.ts) reuse the stack's engine
@@ -58,6 +60,82 @@ export function getSharedEngine() { return _sharedStack?.engine; }
 /** SubagentRunner from the standalone stack. */
 export function getSharedRunner() { return _sharedStack?.runner; }
 
+
+// ---------------------------------------------------------------------------
+// TUI helpers
+// ---------------------------------------------------------------------------
+
+/** Strip ANSI escape sequences to measure visible string length. */
+function visibleLen(s: string): number {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
+}
+
+async function showStartupSplash(
+  ui: ExtensionUIContext,
+  stats: { noteCount: number; edgeCount: number; indexLoaded: boolean },
+  activeWs: readonly WorkspaceEntry[],
+): Promise<void> {
+  await ui.custom(
+    (_tui, theme, _keybindings, done) => {
+      const W = 52; // inner content width (border chars excluded from visible measure)
+
+      const engineStatus = stats.indexLoaded
+        ? theme.fg(theme.success, "● OK")
+        : theme.fg(theme.warning, "● degraded (keyword-only)");
+
+      const wsLines =
+        activeWs.length === 0
+          ? ["  none registered"]
+          : activeWs.map((w) => `  ${w.name}  (${w.mode}, ${w.languages.join("+")})`);
+
+      const pad = (s: string, n: number) => s + " ".repeat(Math.max(0, n - visibleLen(s)));
+      const border = theme.fg(theme.border, "│");
+      const line = (content: string) => `${border} ${pad(content, W)} ${border}`;
+      const divider = theme.fg(theme.border, "├" + "─".repeat(W + 2) + "┤");
+
+      const rows = [
+        theme.fg(theme.border, "╭" + "─".repeat(W + 2) + "╮"),
+        line(""),
+        line(theme.fg(theme.accent, "  ObsidiClaw") + theme.fg(theme.muted, "  memory system")),
+        line(""),
+        divider,
+        line(""),
+        line(`  Engine      ${engineStatus}`),
+        line(
+          `  Graph       ${theme.fg(theme.text, String(stats.noteCount))} notes` +
+          `  ·  ${theme.fg(theme.text, String(stats.edgeCount))} edges`,
+        ),
+        line(""),
+        divider,
+        line(""),
+        ...wsLines.map((l) => line(theme.fg(theme.muted, "  Workspace  ") + l)),
+        line(""),
+        divider,
+        line(""),
+        line(theme.fg(theme.dim, "  any key to dismiss · auto-closes in 4s")),
+        line(""),
+        theme.fg(theme.border, "╰" + "─".repeat(W + 2) + "╯"),
+      ];
+
+      const text = new Text(rows.join("\n"), 0, 0);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      timer = setTimeout(() => done(undefined), 4000);
+
+      return Object.assign(text, {
+        handleInput: (_data: string) => {
+          clearTimeout(timer);
+          done(undefined);
+        },
+        dispose: () => clearTimeout(timer),
+      });
+    },
+    {
+      overlay: true,
+      overlayOptions: { anchor: "center", width: 58, margin: 1 },
+    },
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Config
@@ -94,6 +172,56 @@ export interface ObsidiClawExtensionConfig {
 // ---------------------------------------------------------------------------
 // Standing system-prompt instruction (appended on every before_agent_start)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Concepts index builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Scans md_db/concepts/ and returns a compact block listing each concept note
+ * by filename + H1 title. Injected at session start so Pi always knows which
+ * design principles exist and can retrieve the full note on demand.
+ */
+function buildConceptsIndex(conceptsDir: string): string {
+  if (!fileExists(conceptsDir)) return "";
+
+  let entries: string[];
+  try {
+    entries = listDir(conceptsDir).filter((n) => n.endsWith(".md")).sort();
+  } catch {
+    return "";
+  }
+
+  const lines: string[] = [];
+  for (const name of entries) {
+    const fullPath = join(conceptsDir, name);
+    let title = name.replace(/\.md$/, "").replace(/_/g, " ");
+    try {
+      const content = readText(fullPath);
+      const h1 = content.match(/^#\s+(.+)$/m);
+      if (h1) title = h1[1]!.trim();
+    } catch {
+      // fall back to filename stem
+    }
+    lines.push(`- **${name}** — ${title}`);
+  }
+
+  if (lines.length === 0) return "";
+
+  return [
+    "<!-- ObsidiClaw: Design Principles -->",
+    "",
+    "## Design Principles on file",
+    "",
+    "The following concept notes are in `md_db/concepts/`. When one seems relevant to",
+    "the current work — or when a proposal might violate one — retrieve the full note",
+    "with `retrieve_context` before proceeding.",
+    "",
+    ...lines,
+    "",
+    "<!-- End ObsidiClaw Design Principles -->",
+  ].join("\n");
+}
 
 // ---------------------------------------------------------------------------
 // Factory
@@ -298,6 +426,17 @@ export function createObsidiClawExtension(
         }
       }
 
+      // ── Window title + startup splash ─────────────────────────────────────
+      if (stack && ctx.hasUI) {
+        const stats = await stack.engine.getGraphStats().catch(() => ({
+          noteCount: 0, edgeCount: 0, indexLoaded: false,
+        }));
+        const activeWs = stack.workspaceRegistry.list().filter((w) => w.active);
+        const wsLabel = activeWs.map((w) => w.name).join(", ") || "no workspaces";
+        ctx.ui.setTitle(`ObsidiClaw — ${wsLabel} — ${stats.noteCount} notes`);
+        showStartupSplash(ctx.ui, stats, activeWs).catch(() => {});
+      }
+
       if (stack) {
         stack.logger.logEvent({
           type: "session_start",
@@ -351,6 +490,8 @@ export function createObsidiClawExtension(
           ? `<!-- ObsidiClaw: Preferences -->\n\n${prefsContent}\n\n<!-- End ObsidiClaw Preferences -->`
           : "";
 
+        const conceptsBlock = buildConceptsIndex(join(paths.mdDbPath, "concepts"));
+
         const treeContent = buildDirectoryTree(paths.rootDir);
         const treeBlock = `<!-- ObsidiClaw: Project Structure -->\n\n## Project directory structure\n\n${treeContent}\n\n<!-- End ObsidiClaw Project Structure -->`;
 
@@ -358,6 +499,7 @@ export function createObsidiClawExtension(
           systemPrompt:
             event.systemPrompt +
             (prefsBlock ? "\n\n" + prefsBlock : "") +
+            (conceptsBlock ? "\n\n" + conceptsBlock : "") +
             "\n\n" + treeBlock +
             "\n\n" +
             TOOL_REMINDER,
