@@ -8,7 +8,6 @@
  *
  *   OrchestratorSession.emit()       → ORCHESTRATOR
  *   OrchestratorSession.handlePiEvent() → PI_SESSION (source), ORCHESTRATOR (target)
- *   JobScheduler.emitEvent()         → SCHEDULER
  *   ContextEngine.onDebug()          → CONTEXT_ENGINE
  *   Extension factory (standalone)   → EXTENSION
  *   SubagentRunner                   → SUBAGENT
@@ -33,9 +32,6 @@ export const PI_SESSION = "pi_session" as const;
 
 /** Context engine — hybrid RAG retrieval, graph expansion, review/synthesis. */
 export const CONTEXT_ENGINE = "context_engine" as const;
-
-/** Scheduler — in-process job scheduler (setInterval-based). */
-export const SCHEDULER = "scheduler" as const;
 
 /** Extension — MCP extension factory (both orchestrator and standalone/Pi TUI paths). */
 export const EXTENSION = "extension" as const;
@@ -71,7 +67,6 @@ export type TraceModule =
   | typeof ORCHESTRATOR
   | typeof PI_SESSION
   | typeof CONTEXT_ENGINE
-  | typeof SCHEDULER
   | typeof EXTENSION
   | typeof SUBAGENT
   | typeof INSIGHT_ENGINE

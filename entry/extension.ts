@@ -58,11 +58,6 @@ export function getSharedEngine() { return _sharedStack?.engine; }
 /** SubagentRunner from the standalone stack. */
 export function getSharedRunner() { return _sharedStack?.runner; }
 
-/** JobScheduler from the standalone stack. */
-export function getSharedScheduler() { return _sharedStack?.scheduler; }
-
-/** PersistentScheduleBackend from the standalone stack. */
-export function getSharedBackend() { return _sharedStack?.persistentBackend; }
 
 // ---------------------------------------------------------------------------
 // Config
@@ -94,8 +89,6 @@ export interface ObsidiClawExtensionConfig {
    */
   sessionId?: string;
 
-  /** Enable the in-process job scheduler (default: true). Standalone mode only. */
-  enableScheduler?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -129,7 +122,6 @@ export function createObsidiClawExtension(
       // Standalone / Pi TUI path — create the full stack.
       stack = createObsidiClawStack({
         rootDir: paths.rootDir,
-        enableScheduler: config.enableScheduler,
       });
       _sharedStack = stack;
 

@@ -71,9 +71,8 @@ interface SummarizeOpts {
 
 const SUMMARY_HEADER = "## Summary";
 const MAX_CHILD_SUMMARIES = 15;
-const TIER1_MIRROR_TRUNCATE = 2000;
+const TIER1_MIRROR_TRUNCATE = 12_000;
 const TIER2_MIRROR_TRUNCATE = 2000;
-const SOURCE_TRUNCATE_T1 = 4000;
 const SOURCE_TRUNCATE_T2 = 3000;
 
 // ---------------------------------------------------------------------------
@@ -107,10 +106,8 @@ export async function runCascadeForWorkspace(
   let t1fail = 0;
 
   for (const entry of tier1Notes) {
-    let sourceContent: string;
     let mirrorContent: string;
     try {
-      sourceContent = readText(entry.sourcePath);
       mirrorContent = readText(entry.mirrorPath);
     } catch {
       t1fail++;
@@ -122,7 +119,7 @@ export async function runCascadeForWorkspace(
 
     const result = await llmSummarize(
       mirrorContent.slice(0, TIER1_MIRROR_TRUNCATE),
-      { sourceContent: sourceContent.slice(0, SOURCE_TRUNCATE_T1) },
+      {},
       existingTags,
       t1Personality,
     );
@@ -290,9 +287,9 @@ function deriveTier3Paths(tier2Paths: string[]): string[] {
 // Path helpers
 // ---------------------------------------------------------------------------
 
-/** tier-2 → tier-3: dirname(tier2Path) + ".md" */
+/** tier-2 → tier-3: dirname(tier2Path) + "_module.md" */
 function tier2ToTier3(tier2Path: string): string {
-  return dirname(tier2Path) + ".md";
+  return dirname(tier2Path) + "_module.md";
 }
 
 /**
@@ -320,11 +317,11 @@ function getTier1Children(tier2Path: string): string[] {
 
 /**
  * Get tier-2 child mirror paths for a tier-3 note.
- * Children live in the directory with the same stem as the tier-3 file.
+ * Tier-3 notes live at {parent}/{dirName}_module.md; children live in {parent}/{dirName}/.
  * Filtered to tier-2 only — avoids including nested tier-3 notes.
  */
 function getTier2Children(tier3Path: string): string[] {
-  const dir = tier3Path.replace(/\.md$/, "");
+  const dir = tier3Path.replace(/_module\.md$/, "");
   if (!fileExists(dir)) return [];
   try {
     return listDir(dir)

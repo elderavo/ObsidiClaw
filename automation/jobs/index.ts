@@ -1,9 +1,10 @@
 /**
  * Jobs — re-exports.
+ *
+ * In-runtime automation only: chokidar-based file watchers + summarizer.
+ * Out-of-runtime automation lives in automation/scripts/ as standalone scripts.
  */
 
-export { JobScheduler } from "./schedule-job.js";
-export { createHealthCheckJob } from "./scheduled/health-check.js";
-export { createNormalizeJob } from "./scheduled/normalize.js";
-export { createMergeInboxJob } from "./scheduled/merge-inbox.js";
-export type { JobDefinition, JobContext, JobState, JobStatus, ReconciliationStatus } from "./types.js";
+export { startMdDbLintWatcher } from "./watchers/md-db-lint-watcher.js";
+export { startWorkspaceMirrorWatcher } from "./watchers/mirror-watcher.js";
+export { runCascadeForWorkspace } from "./summarize-lib.js";

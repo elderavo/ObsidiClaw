@@ -24,7 +24,3 @@ export {
   listDir,
 } from "./fs.js";
 
-export {
-  type PersistentScheduleBackend,
-  type ScheduledJob,
-} from "./scheduling.js";

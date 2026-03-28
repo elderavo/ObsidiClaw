@@ -184,8 +184,8 @@ export class RunLogger {
   }
 
   /**
-   * Insert a run row for a scheduler job execution.
-   * Called by JobScheduler when a job starts.
+   * Insert a run row for an out-of-runtime script execution.
+   * Called by standalone scripts (setup-tasks.ts, force-summarize.ts, etc.).
    */
   insertJobRun(runId: string, sessionId: string, startTime: number, jobName: string): void {
     this._insertRun(runId, sessionId, startTime, "job");
@@ -194,7 +194,6 @@ export class RunLogger {
 
   /**
    * Returns the most recent run record per job name, plus a run count.
-   * Used by JobScheduler.getStates() to surface last-run info via MCP list_jobs.
    */
   getLastJobRuns(): Map<string, { status: string; startTime: number; durationMs: number | null; error: string | null; runCount: number }> {
     const rows = this.db.prepare(`
@@ -226,7 +225,6 @@ export class RunLogger {
 
   /**
    * Finalize a run row (set status + end_time).
-   * Used by JobScheduler to close job runs.
    */
   finalizeRun(runId: string, status: string, endTime: number): void {
     this._finalizeRun(runId, status, endTime);

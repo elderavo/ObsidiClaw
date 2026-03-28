@@ -41,6 +41,8 @@ import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 
+const DEFAULT_OMIT = ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist", "node_modules"];
+
 // ---------------------------------------------------------------------------
 // Types (same shape as mirror-codebase.ts for consistency)
 // ---------------------------------------------------------------------------
@@ -111,39 +113,8 @@ interface FileData {
 // CLI
 // ---------------------------------------------------------------------------
 
-function parseArgs(): CliArgs {
-  const args = process.argv.slice(2);
-  const cwd = process.cwd();
-  let scanDir = cwd;
-  let mirrorDir = path.join(cwd, "md_db", "code");
-  let omitPatterns = ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist", "node_modules"];
-  let force = false;
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "--scan-dir" && args[i + 1]) {
-      scanDir = path.resolve(args[++i]);
-    } else if (arg === "--mirror-dir" && args[i + 1]) {
-      mirrorDir = path.resolve(args[++i]);
-    } else if (arg === "--omit" && args[i + 1]) {
-      omitPatterns = args[++i].split(",").map((s) => s.trim());
-    } else if (arg === "--force") {
-      force = true;
-    } else if (arg === "--help" || arg === "-h") {
-      console.log(`Usage: npx tsx scripts/mirror-codebase-py.ts [options]
-
-Options:
-  --scan-dir <path>    Root directory to scan (default: cwd)
-  --mirror-dir <path>  Output directory (default: md_db/code)
-  --omit <globs>       Comma-separated patterns to exclude
-                       (default: __pycache__,*.pyi,.venv,env,venv,dist)
-  --force              Regenerate all files even if mirror is up-to-date
-  --help               Show this help`);
-      process.exit(0);
-    }
-  }
-
-  return { scanDir, mirrorDir, omitPatterns, force };
+function parseCliForce(): boolean {
+  return process.argv.includes("--force");
 }
 
 // ---------------------------------------------------------------------------
@@ -599,7 +570,7 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string, p
 
   // ── Frontmatter ───────────────────────────────────────────────────────────
   const dirRel = path.posix.dirname(file.relativePath);
-  const parentModuleLink = dirRel === "." ? `${prefix}/${moduleDirName(dirRel)}` : `${prefix}/${dirRel}/${moduleDirName(dirRel)}`;
+  const parentModuleLink = dirRel === "." ? `${prefix}/root_module` : `${prefix}/${dirRel}_module`;
 
   lines.push(
     "---",
@@ -737,15 +708,17 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string, p
 // Tier-3: Module note generation (Python)
 // ---------------------------------------------------------------------------
 
-function moduleDirName(dirRel: string): string {
-  return dirRel === "." ? "root" : path.posix.basename(dirRel);
-}
-
+/**
+ * Absolute path for a tier-3 module note.
+ * Tier-3 notes live ALONGSIDE their directory (at the parent level) to avoid
+ * collisions with same-named tier-2 notes (e.g. orchestrator.py inside orchestrator/).
+ *   root dir  → {mirrorDir}/root_module.md
+ *   voyager/htn/ → {mirrorDir}/voyager/htn_module.md
+ */
 function moduleNotePath(mirrorDir: string, dirRel: string): string {
-  const name = moduleDirName(dirRel) + ".md";
   return dirRel === "."
-    ? path.join(mirrorDir, name)
-    : path.join(mirrorDir, dirRel, name);
+    ? path.join(mirrorDir, "root_module.md")
+    : path.join(mirrorDir, dirRel + "_module.md");
 }
 
 function generateModuleNote(
@@ -965,8 +938,36 @@ export async function runMirrorPy(
 // ---------------------------------------------------------------------------
 
 async function main() {
-  const args = parseArgs();
-  await runMirrorPy(args);
+  const force = parseCliForce();
+  const cwd = process.cwd();
+  const registryPath = path.join(cwd, ".obsidi-claw", "workspaces.json");
+  const mdDbPath = path.join(cwd, "md_db");
+
+  let workspaces: Array<{ name: string; sourceDir: string; languages: string[]; active: boolean }> = [];
+  try {
+    const raw = fs.readFileSync(registryPath, "utf8");
+    workspaces = JSON.parse(raw).filter((w: { active: boolean }) => w.active);
+  } catch {
+    console.log("[mirror-py] no workspaces.json found, running against cwd");
+    const { written, skipped, cleaned } = await runMirrorPy({ scanDir: cwd, mirrorDir: path.join(mdDbPath, "code"), omitPatterns: DEFAULT_OMIT, force });
+    console.log(`  written=${written} skipped=${skipped} cleaned=${cleaned}`);
+    return;
+  }
+
+  for (const ws of workspaces) {
+    if (!ws.languages.includes("py")) continue;
+    const mirrorDir = path.join(mdDbPath, "code", ws.name);
+    console.log(`[mirror-py] ${ws.name} (${ws.sourceDir})`);
+    const { written, skipped, cleaned } = await runMirrorPy({
+      scanDir: ws.sourceDir,
+      mirrorDir,
+      omitPatterns: DEFAULT_OMIT,
+      force,
+      workspace: ws.name,
+      wikilinkPrefix: `code/${ws.name}`,
+    });
+    console.log(`  written=${written} skipped=${skipped} cleaned=${cleaned}`);
+  }
 }
 
 // Only run main() when this file is the entrypoint (e.g. npx tsx automation/scripts/mirror-codebase-py.ts)

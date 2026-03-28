@@ -2,8 +2,8 @@
  * ObsidiClawStack — shared infrastructure factory.
  *
  * Creates and manages the core runtime components (ContextEngine, RunLogger,
- * JobScheduler, SubagentRunner) that all entry points need. Each process
- * creates its own stack instance; SQLite WAL mode handles concurrent access.
+ * SubagentRunner) that all entry points need. Each process creates its own
+ * stack instance; SQLite WAL mode handles concurrent access.
  *
  * Consumers:
  *   - extension/factory.ts   (Pi TUI path)
@@ -18,11 +18,9 @@ import chokidar, { type FSWatcher } from "chokidar";
 import { RunLogger } from "../logger/run-logger.js";
 import { NoteMetricsLogger } from "../logger/note-metrics.js";
 import { ContextEngine } from "../knowledge/engine/context-engine.js";
-import { JobScheduler, createHealthCheckJob, createNormalizeJob, createMergeInboxJob } from "../automation/jobs/index.js";
 import { SubagentRunner } from "../agents/subagent/subagent-runner.js";
 import { resolvePaths, type ObsidiClawPaths } from "../core/config.js";
 import type { RunEvent } from "../agents/orchestrator/types.js";
-import { WindowsTaskSchedulerBackend } from "../core/os/scheduling-windows.js";
 import { startMdDbLintWatcher } from "../automation/jobs/watchers/md-db-lint-watcher.js";
 import { runMirrorTs } from "../automation/scripts/mirror-codebase.js";
 import { runMirrorPy } from "../automation/scripts/mirror-codebase-py.js";
@@ -35,8 +33,6 @@ import { WorkspaceRegistry } from "../automation/workspaces/workspace-registry.j
 export interface StackOptions {
   /** Project root directory. Falls back to process.cwd(). */
   rootDir?: string;
-  /** Enable the in-process job scheduler (default: true). */
-  enableScheduler?: boolean;
   /**
    * Enable debug JSONL. Default: ON (set OBSIDI_CLAW_DEBUG=0 to disable).
    * When true, all events are also written to .obsidi-claw/debug/{sessionId}.jsonl.
@@ -52,16 +48,14 @@ export interface ObsidiClawStack {
   readonly engine: ContextEngine;
   readonly logger: RunLogger;
   readonly noteMetrics: NoteMetricsLogger;
-  readonly scheduler: JobScheduler | undefined;
   readonly runner: SubagentRunner;
   readonly sessionId: string;
   readonly paths: ObsidiClawPaths;
   readonly workspaceRegistry: WorkspaceRegistry;
-  readonly persistentBackend?: import("../core/os/scheduling.js").PersistentScheduleBackend;
 
-  /** Initialize the context engine and start the scheduler. */
+  /** Initialize the context engine and start all watchers. */
   initialize(): Promise<void>;
-  /** Graceful shutdown: stop scheduler, close engine + logger. */
+  /** Graceful shutdown: close engine + logger. */
   shutdown(): Promise<void>;
 }
 
@@ -109,24 +103,6 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     },
   });
 
-  // ── Persistent backend (Windows Task Scheduler) ────────────────────────
-  const persistentBackend = process.platform === "win32"
-    ? new WindowsTaskSchedulerBackend(paths.rootDir)
-    : undefined;
-
-  // ── JobScheduler (optional) ─────────────────────────────────────────────
-  const enableScheduler = opts.enableScheduler ?? true;
-  let scheduler: JobScheduler | undefined;
-
-  if (enableScheduler && persistentBackend) {
-    scheduler = new JobScheduler(logger, persistentBackend, paths.rootDir, sessionId);
-    scheduler.register(createHealthCheckJob());
-    scheduler.register(createNormalizeJob());
-    scheduler.register(createMergeInboxJob());
-  } else if (enableScheduler && !persistentBackend) {
-    console.warn("[obsidi-claw] no persistent schedule backend available — scheduler disabled");
-  }
-
   // ── md_db watcher (lint on change) ───────────────────────────────────────
   let mdDbWatcher: ReturnType<typeof startMdDbLintWatcher> | undefined;
 
@@ -143,19 +119,12 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
   async function initialize(): Promise<void> {
-    // ── Phase 1: mirrors + scheduler (independent of each other) ──────────
+    // ── Phase 1: mirrors ───────────────────────────────────────────────────
     // Mirrors MUST finish before the engine initializes. The engine computes
-    // an mtime-based hash of md_db/ on startup to decide fast vs. slow path.
-    // If mirrors run concurrently with engine init, file writes bump mtimes
-    // after the hash is stored, so the next startup always sees a different
-    // hash → full re-embed every time (self-perpetuating loop).
+    // a content hash of md_db/ on startup to decide fast vs. slow path.
+    // If mirrors run concurrently with engine init, file writes change content
+    // after the hash is stored → full re-embed every startup.
     workspaceRegistry.load();
-
-    const schedulerReady = scheduler
-      ? scheduler.start().catch((err: unknown) => {
-          console.warn("[obsidi-claw] scheduler.start() failed:", err);
-        })
-      : Promise.resolve();
 
     try {
       if (workspaceRegistry.list().length === 0) {
@@ -198,8 +167,7 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     }
 
     // ── Phase 2: engine init (sees settled md_db, hash is stable) ─────────
-    // Scheduler is also awaited here; it started concurrently in phase 1.
-    await Promise.all([engine.initialize(), schedulerReady]);
+    await engine.initialize();
 
     // Watchers are cheap — start after everything else is up.
     mdDbWatcher = startMdDbLintWatcher(paths.mdDbPath);
@@ -217,9 +185,6 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
       await mdDbWatcher.close();
       mdDbWatcher = undefined;
     }
-    if (scheduler) {
-      await scheduler.stop();
-    }
     await engine.close();
     noteMetrics.close();
     logger.close();
@@ -229,12 +194,10 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     engine,
     logger,
     noteMetrics,
-    scheduler,
     runner,
     sessionId,
     paths,
     workspaceRegistry,
-    persistentBackend,
     initialize,
     shutdown,
   };

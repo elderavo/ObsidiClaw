@@ -111,20 +111,21 @@ export async function llmChat(
 /**
  * Quick check whether the LLM provider is reachable.
  *
- * @returns `true` if a minimal chat succeeds, `false` on ProviderUnreachableError.
- * @throws on non-network errors (auth, model-not-found, etc.)
+ * For Ollama: GETs /api/tags — model-agnostic, no inference cost.
+ * For other providers: minimal 1-token chat call.
+ *
+ * @returns `true` if the server responds, `false` on any error.
  */
 export async function isLlmReachable(): Promise<boolean> {
+  const config = getLlmConfig();
   try {
-    await llmChat(
-      [{ role: "user", content: "ping" }],
-      { maxTokens: 1, timeout: 5000 },
-    );
+    if ((config.provider ?? "ollama") === "ollama") {
+      await axios.get(`${config.host}/api/tags`, { timeout: 5000 });
+    } else {
+      await llmChat([{ role: "user", content: "ping" }], { maxTokens: 1, timeout: 5000 });
+    }
     return true;
-  } catch (err) {
-    if (err instanceof ProviderUnreachableError) return false;
-    // For other errors (e.g. 404, 401) — provider is reachable but misconfigured.
-    // Still treat as "unreachable" for job gating purposes since we can't use it.
+  } catch {
     return false;
   }
 }

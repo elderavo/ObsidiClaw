@@ -42,6 +42,8 @@ import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 
+const DEFAULT_OMIT = ["dist", "node_modules", "_legacy", ".claude", "*.d.ts"];
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -65,6 +67,7 @@ interface ExportInfo {
   name: string;
   kind: "function" | "class" | "const" | "type" | "interface" | "enum" | "reexport";
   signature?: string;      // full text signature for functions
+  body?: string;           // full source text of the symbol declaration, capped at MAX_BODY_CHARS
 }
 
 interface FunctionInfo {
@@ -110,39 +113,8 @@ interface FileData {
 // CLI
 // ---------------------------------------------------------------------------
 
-function parseArgs(): CliArgs {
-  const args = process.argv.slice(2);
-  const cwd = process.cwd();
-  let scanDir = cwd;
-  let mirrorDir = path.join(cwd, "md_db", "code");
-  let omitPatterns = ["dist", "node_modules", "_legacy", ".claude", "*.d.ts"];
-  let force = false;
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "--scan-dir" && args[i + 1]) {
-      scanDir = path.resolve(args[++i]);
-    } else if (arg === "--mirror-dir" && args[i + 1]) {
-      mirrorDir = path.resolve(args[++i]);
-    } else if (arg === "--omit" && args[i + 1]) {
-      omitPatterns = args[++i].split(",").map((s) => s.trim());
-    } else if (arg === "--force") {
-      force = true;
-    } else if (arg === "--help" || arg === "-h") {
-      console.log(`Usage: npx tsx scripts/mirror-codebase.ts [options]
-
-Options:
-  --scan-dir <path>    Root directory to scan (default: cwd)
-  --mirror-dir <path>  Output directory (default: md_db/code)
-  --omit <globs>       Comma-separated patterns to exclude
-                       (default: dist,node_modules,_legacy,.claude,*.d.ts)
-  --force              Regenerate all files even if mirror is up-to-date
-  --help               Show this help`);
-      process.exit(0);
-    }
-  }
-
-  return { scanDir, mirrorDir, omitPatterns, force };
+function parseCliForce(): boolean {
+  return process.argv.includes("--force");
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +197,14 @@ function getSlice(sf: ts.SourceFile, node: ts.Node): string {
   return sf.text.slice(node.getStart(sf), node.getEnd());
 }
 
+const MAX_BODY_CHARS = 10_000;
+
+function capBody(sf: ts.SourceFile, node: ts.Node): string {
+  const raw = getSlice(sf, node);
+  if (raw.length <= MAX_BODY_CHARS) return raw;
+  return raw.slice(0, MAX_BODY_CHARS) + "\n// ... (truncated)";
+}
+
 function formatParams(params: ts.NodeArray<ts.ParameterDeclaration>, sf: ts.SourceFile): string {
   return params
     .map((p) => {
@@ -288,21 +268,23 @@ function extractExports(sf: ts.SourceFile): ExportInfo[] {
         name: node.name.text,
         kind: "function",
         signature: `${node.name.text}(${params})${ret}`,
+        body: capBody(sf, node),
       });
     } else if (ts.isClassDeclaration(node) && isExport && node.name) {
-      exports.push({ name: node.name.text, kind: "class" });
+      exports.push({ name: node.name.text, kind: "class", body: capBody(sf, node) });
     } else if (ts.isVariableStatement(node) && isExport) {
+      const stmtBody = capBody(sf, node);
       node.declarationList.declarations.forEach((decl) => {
         if (ts.isIdentifier(decl.name)) {
-          exports.push({ name: decl.name.text, kind: "const" });
+          exports.push({ name: decl.name.text, kind: "const", body: stmtBody });
         }
       });
     } else if (ts.isTypeAliasDeclaration(node) && isExport) {
-      exports.push({ name: node.name.text, kind: "type" });
+      exports.push({ name: node.name.text, kind: "type", body: capBody(sf, node) });
     } else if (ts.isInterfaceDeclaration(node) && isExport) {
-      exports.push({ name: node.name.text, kind: "interface" });
+      exports.push({ name: node.name.text, kind: "interface", body: capBody(sf, node) });
     } else if (ts.isEnumDeclaration(node) && isExport) {
-      exports.push({ name: node.name.text, kind: "enum" });
+      exports.push({ name: node.name.text, kind: "enum", body: capBody(sf, node) });
     } else if (ts.isExportDeclaration(node)) {
       if (node.exportClause && ts.isNamedExports(node.exportClause)) {
         node.exportClause.elements.forEach((el) => {
@@ -544,7 +526,7 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string, p
   //   language   → mirror cleanup scoping
   //   generated  → mirror cleanup safety check
   const dirRel = path.posix.dirname(file.relativePath);
-  const parentModuleLink = dirRel === "." ? `${prefix}/${moduleDirName(dirRel)}` : `${prefix}/${dirRel}/${moduleDirName(dirRel)}`;
+  const parentModuleLink = dirRel === "." ? `${prefix}/root_module` : `${prefix}/${dirRel}_module`;
 
   lines.push(
     "---",
@@ -708,7 +690,7 @@ function generateSymbolNote(file: FileData, exp: ExportInfo, today: string, pref
   const dirRel = path.posix.dirname(file.relativePath);
   const stem = mirrorStem(file.relativePath);
   const parentFileLink = dirRel === "." ? `${prefix}/${stem}` : `${prefix}/${dirRel}/${stem}`;
-  const parentModuleLink = dirRel === "." ? `${prefix}/${moduleDirName(dirRel)}` : `${prefix}/${dirRel}/${moduleDirName(dirRel)}`;
+  const parentModuleLink = dirRel === "." ? `${prefix}/root_module` : `${prefix}/${dirRel}_module`;
 
   lines.push(
     "---",
@@ -731,7 +713,12 @@ function generateSymbolNote(file: FileData, exp: ExportInfo, today: string, pref
   lines.push(`**Kind:** \`${exp.kind}\`  `);
   lines.push(`**File:** [[${parentFileLink}]]`, "");
 
-  if (exp.signature) {
+  if (exp.body) {
+    lines.push("## Implementation", "");
+    lines.push("```ts");
+    lines.push(exp.body);
+    lines.push("```", "");
+  } else if (exp.kind === "reexport" && exp.signature) {
     lines.push("## Signature", "");
     lines.push("```ts");
     lines.push(exp.signature);
@@ -777,16 +764,17 @@ function generateSymbolNote(file: FileData, exp: ExportInfo, today: string, pref
 // Tier-3: Module note generation
 // ---------------------------------------------------------------------------
 
-/** Absolute path for a tier-3 module note. */
-function moduleDirName(dirRel: string): string {
-  return dirRel === "." ? "root" : path.posix.basename(dirRel);
-}
-
+/**
+ * Absolute path for a tier-3 module note.
+ * Tier-3 notes live ALONGSIDE their directory (at the parent level) to avoid
+ * collisions with same-named tier-2 notes (e.g. orchestrator.ts inside orchestrator/).
+ *   root dir  → {mirrorDir}/root_module.md
+ *   agents/orchestrator/ → {mirrorDir}/agents/orchestrator_module.md
+ */
 function moduleNotePath(mirrorDir: string, dirRel: string): string {
-  const name = moduleDirName(dirRel) + ".md";
   return dirRel === "."
-    ? path.join(mirrorDir, name)
-    : path.join(mirrorDir, dirRel, name);
+    ? path.join(mirrorDir, "root_module.md")
+    : path.join(mirrorDir, dirRel + "_module.md");
 }
 
 function generateModuleNote(
@@ -1042,13 +1030,37 @@ export async function runMirrorTs(
 // ---------------------------------------------------------------------------
 
 async function main() {
-  const args = parseArgs();
-  // console.log(`Scan dir  : ${args.scanDir}`);
-  // console.log(`Mirror dir: ${args.mirrorDir}`);
-  // console.log(`Omitting  : ${args.omitPatterns.join(", ")}`);
-  // console.log(`Force     : ${args.force}\n`);
-  const { written, skipped } = await runMirrorTs(args);
-  // console.log(`Done. Written: ${written}, Skipped (up-to-date): ${skipped}`);
+  const force = parseCliForce();
+  const cwd = process.cwd();
+  const registryPath = path.join(cwd, ".obsidi-claw", "workspaces.json");
+  const mdDbPath = path.join(cwd, "md_db");
+
+  let workspaces: Array<{ name: string; sourceDir: string; languages: string[]; active: boolean }> = [];
+  try {
+    const raw = fs.readFileSync(registryPath, "utf8");
+    workspaces = JSON.parse(raw).filter((w: { active: boolean }) => w.active);
+  } catch {
+    // Fall back to running against cwd with no workspace prefix (legacy behaviour)
+    console.log("[mirror-ts] no workspaces.json found, running against cwd");
+    const { written, skipped, cleaned } = await runMirrorTs({ scanDir: cwd, mirrorDir: path.join(mdDbPath, "code"), omitPatterns: DEFAULT_OMIT, force });
+    console.log(`  written=${written} skipped=${skipped} cleaned=${cleaned}`);
+    return;
+  }
+
+  for (const ws of workspaces) {
+    if (!ws.languages.includes("ts")) continue;
+    const mirrorDir = path.join(mdDbPath, "code", ws.name);
+    console.log(`[mirror-ts] ${ws.name} (${ws.sourceDir})`);
+    const { written, skipped, cleaned } = await runMirrorTs({
+      scanDir: ws.sourceDir,
+      mirrorDir,
+      omitPatterns: DEFAULT_OMIT,
+      force,
+      workspace: ws.name,
+      wikilinkPrefix: `code/${ws.name}`,
+    });
+    console.log(`  written=${written} skipped=${skipped} cleaned=${cleaned}`);
+  }
 }
 
 // Only run main() when this file is the entrypoint (e.g. npx tsx automation/scripts/mirror-codebase.ts)

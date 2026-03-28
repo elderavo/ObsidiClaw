@@ -53,7 +53,10 @@
       "Bash(grep -n \"setInterval\\\\|executeJob\\\\|runOnStart\\\\|scriptPath\" scheduler/scheduler.ts scheduler/types.ts scheduler/jobs/*.ts)",
       "Bash(grep -r .pi/extensions C:UsersAlexDesktopProjectsCodingObsidiClaw --include=*.ts --include=*.js --include=*.md)",
       "Bash(grep -E \"reindex|\\\\.ts$\")",
-      "Bash(sqlite3:*)"
+      "Bash(sqlite3:*)",
+      "Bash(find \"C:\\\\Users\\\\Alex\\\\Desktop\\\\Projects\\\\Coding\\\\ObsidiClaw\\\\md_db\\\\code\" -type f -name \"*.md\" -exec grep -l \"^tier: 1$\" {})",
+      "Bash(xargs -I {} basename {} .md)",
+      "Bash(find \"C:\\\\Users\\\\Alex\\\\Desktop\\\\Projects\\\\Coding\\\\ObsidiClaw\\\\md_db\\\\code\" -type f -name \"*.md\" -exec grep -l \"^tier: 3$\" {})"
     ]
   }
 }
