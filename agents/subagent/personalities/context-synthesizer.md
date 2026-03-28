@@ -2,7 +2,7 @@
 type: personality
 title: Context Synthesizer
 provider:
-  model: qwen3:8b
+  model: cogito:8b
   numCtx: 16384
   temperature: 0.1
 ---

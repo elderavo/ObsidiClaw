@@ -33,6 +33,8 @@ export interface PersonalityConfig {
     maxTokens?: number;
     /** Sampling temperature (0–2). */
     temperature?: number;
+    /** Enable/disable thinking mode (Ollama only, e.g. qwen3). */
+    think?: boolean;
   };
 }
 

@@ -33,6 +33,8 @@ export interface ChatOptions {
   providerType?: "ollama" | "openai" | "anthropic";
   /** Override API key (from personality config). */
   apiKey?: string;
+  /** Enable/disable thinking mode (Ollama only, e.g. qwen3). Default: undefined (model default). */
+  think?: boolean;
 }
 
 export interface ChatResult {
@@ -148,16 +150,18 @@ async function callOllama(
   if (opts?.numCtx !== undefined) ollamaOpts.num_ctx = opts.numCtx;
   if (opts?.maxTokens !== undefined) ollamaOpts.num_predict = opts.maxTokens;
 
-  const response = await axios.post(
-    url,
-    {
-      model,
-      messages,
-      stream: false,
-      options: Object.keys(ollamaOpts).length > 0 ? ollamaOpts : undefined,
-    },
-    { timeout, signal: AbortSignal.timeout(timeout) },
-  );
+  const body: Record<string, unknown> = {
+    model,
+    messages,
+    stream: false,
+    options: Object.keys(ollamaOpts).length > 0 ? ollamaOpts : undefined,
+  };
+  if (opts?.think !== undefined) body.think = opts.think;
+
+  const response = await axios.post(url, body, {
+    timeout,
+    signal: AbortSignal.timeout(timeout),
+  });
 
   return {
     content: response.data?.message?.content ?? "",

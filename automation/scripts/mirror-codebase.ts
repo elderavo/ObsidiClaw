@@ -523,8 +523,7 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string, p
   //   type       → infer_note_type() → graph label
   //   tags       → extract_tags() → tag boosting in retrieval
   //   path       → summarizer source lookup
-  //   language   → mirror cleanup scoping
-  //   generated  → mirror cleanup safety check
+  //   language   → informational; not used for cleanup
   const dirRel = path.posix.dirname(file.relativePath);
   const parentModuleLink = dirRel === "." ? `${prefix}/root_module` : `${prefix}/${dirRel}_module`;
 
@@ -535,7 +534,6 @@ function generateMarkdown(file: FileData, allFiles: FileData[], today: string, p
     `path: ${file.relativePath}`,
     `parentModule: ${parentModuleLink}`,
     "language: ts",
-    "generated: true",
     ...(workspace ? [`workspace: ${workspace}`] : []),
     "tags:",
     "  - codeUnit",
@@ -701,7 +699,6 @@ function generateSymbolNote(file: FileData, exp: ExportInfo, today: string, pref
     `parentModule: ${parentModuleLink}`,
     `symbolKind: ${exp.kind}`,
     "language: ts",
-    "generated: true",
     ...(workspace ? [`workspace: ${workspace}`] : []),
     "tags:",
     "  - codeUnit",
@@ -794,7 +791,6 @@ function generateModuleNote(
     `path: ${dirRel}`,
     `title: ${dirName}`,
     "language: ts",
-    "generated: true",
     ...(workspace ? [`workspace: ${workspace}`] : []),
     "tags:",
     "  - codeUnit",
@@ -857,14 +853,14 @@ function extractSummarySection(mirrorPath: string): string | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Walk the mirror directory and delete any .md files that are not in the set
- * of valid mirror paths (i.e., their source file no longer exists).
+ * Delete any .md files under mirrorDir that are not in validPaths.
+ * Language-agnostic: generation is language-specific, cleanup is not.
+ * The caller is responsible for passing a combined validPaths that covers
+ * all languages for this workspace so that no language's notes are
+ * incorrectly pruned.
  * Also removes empty directories left behind.
- *
- * Only deletes files with `generated: true` AND matching `language:` in
- * frontmatter, so the TS mirror won't delete Python mirrors and vice versa.
  */
-function cleanStaleMirrors(mirrorDir: string, validPaths: Set<string>, language: string): number {
+export function cleanMirrorDir(mirrorDir: string, validPaths: Set<string>): number {
   let cleaned = 0;
 
   function walkClean(dir: string): void {
@@ -887,14 +883,10 @@ function cleanStaleMirrors(mirrorDir: string, validPaths: Set<string>, language:
       } else if (entry.isFile() && entry.name.endsWith(".md")) {
         const resolved = path.resolve(absPath);
         if (!validPaths.has(resolved)) {
-          // Safety: only delete generated mirrors of the same language
           try {
-            const content = fs.readFileSync(absPath, "utf8");
-            if (content.includes("generated: true") && content.includes(`language: ${language}`)) {
-              fs.unlinkSync(absPath);
-              cleaned++;
-            }
-          } catch { /* can't read — skip */ }
+            fs.unlinkSync(absPath);
+            cleaned++;
+          } catch { /* can't delete — skip */ }
         }
       }
     }
@@ -921,7 +913,7 @@ export interface MirrorTsOptions {
 
 export async function runMirrorTs(
   opts: MirrorTsOptions,
-): Promise<{ written: number; skipped: number; cleaned: number }> {
+): Promise<{ written: number; skipped: number; validPaths: Set<string> }> {
   const today = new Date().toISOString().slice(0, 10);
   const discovered = collectFiles(opts.scanDir, opts.mirrorDir, opts.omitPatterns);
 
@@ -1018,11 +1010,8 @@ export async function runMirrorTs(
     }
   }
 
-  // ── Cleanup stale mirrors ──────────────────────────────────────────────
-  const cleaned = cleanStaleMirrors(opts.mirrorDir, validMirrorPaths, "ts");
-
   if (parseErrors > 0) console.warn(`[mirror-ts] ${parseErrors} files failed to parse`);
-  return { written, skipped, cleaned };
+  return { written, skipped, validPaths: validMirrorPaths };
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,7 +1031,8 @@ async function main() {
   } catch {
     // Fall back to running against cwd with no workspace prefix (legacy behaviour)
     console.log("[mirror-ts] no workspaces.json found, running against cwd");
-    const { written, skipped, cleaned } = await runMirrorTs({ scanDir: cwd, mirrorDir: path.join(mdDbPath, "code"), omitPatterns: DEFAULT_OMIT, force });
+    const { written, skipped, validPaths } = await runMirrorTs({ scanDir: cwd, mirrorDir: path.join(mdDbPath, "code"), omitPatterns: DEFAULT_OMIT, force });
+    const cleaned = cleanMirrorDir(path.join(mdDbPath, "code"), validPaths);
     console.log(`  written=${written} skipped=${skipped} cleaned=${cleaned}`);
     return;
   }
@@ -1051,7 +1041,7 @@ async function main() {
     if (!ws.languages.includes("ts")) continue;
     const mirrorDir = path.join(mdDbPath, "code", ws.name);
     console.log(`[mirror-ts] ${ws.name} (${ws.sourceDir})`);
-    const { written, skipped, cleaned } = await runMirrorTs({
+    const { written, skipped, validPaths } = await runMirrorTs({
       scanDir: ws.sourceDir,
       mirrorDir,
       omitPatterns: DEFAULT_OMIT,
@@ -1059,6 +1049,7 @@ async function main() {
       workspace: ws.name,
       wikilinkPrefix: `code/${ws.name}`,
     });
+    const cleaned = cleanMirrorDir(mirrorDir, validPaths);
     console.log(`  written=${written} skipped=${skipped} cleaned=${cleaned}`);
   }
 }

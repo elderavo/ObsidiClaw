@@ -2,7 +2,7 @@
 type: personality
 title: Code Summarizer — Tier 3 (Module)
 provider:
-  model: qwen3:8b
+  model: cogito:8b
   numCtx: 8192
   temperature: 0.1
 ---

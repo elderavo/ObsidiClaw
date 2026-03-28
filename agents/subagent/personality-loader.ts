@@ -86,6 +86,7 @@ export function resolvePersonalityChatOptions(
     maxTokens: p?.maxTokens ?? defaults.maxTokens,
     providerType: p?.type,
     apiKey: p?.apiKey,
+    think: p?.think,
   };
 }
 
@@ -121,8 +122,10 @@ function extractProvider(
     apiKey = raw.startsWith("env:") ? process.env[raw.slice(4)] : raw;
   }
 
-  const hasAny = type || model || baseUrl || apiKey || numCtx !== undefined || maxTokens !== undefined || temperature !== undefined;
+  const think = typeof p["think"] === "boolean" ? p["think"] : undefined;
+
+  const hasAny = type || model || baseUrl || apiKey || numCtx !== undefined || maxTokens !== undefined || temperature !== undefined || think !== undefined;
   if (!hasAny) return undefined;
 
-  return { type, model, baseUrl, apiKey, numCtx, maxTokens, temperature };
+  return { type, model, baseUrl, apiKey, numCtx, maxTokens, temperature, think };
 }

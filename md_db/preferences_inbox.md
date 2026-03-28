@@ -143,3 +143,15 @@ Pending proposals auto-derived from sessions. Review and merge manually.
 ### Signals
 - **[moderate imperative]** "Ready to execute whenever you give the word."
   → The agent should wait for explicit confirmation before proceeding with execution.
+
+## Session 0bd86cba (2026-03-28)
+
+### Signals
+- **[strong preference]** "Cleanup IS language agnostic, GENERATION is not"
+  → The user wants the agent to recognize that cleanup operations are language-agnostic while generation is not
+- **[strong praise]** "sweet! thank you"
+  → The user approves of the agent's framing of cleanup as language-agnostic
+
+### Synthesized Preferences
+- **[strong]** treat cleanup operations as language-agnostic
+  - Evidence: user explicitly stated cleanup is language-agnostic and praised the framing
