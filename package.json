@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "run:orchestrator": "node --experimental-vm-modules dist/orchestrator/run.js"
+    "dev:mcp": "npx tsx entry/run-mcp.ts",
+    "start:mcp": "node dist/entry/run-mcp.js"
   },
   "dependencies": {
     "@mariozechner/pi-coding-agent": "^0.61.0",

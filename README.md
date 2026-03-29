@@ -5,7 +5,7 @@ Self-improving memory and context injection system for AI agents. Maintains a ma
 ## How it works
 
 1. **Knowledge graph** (`md_db/`) — Flat-file markdown notes linked with Obsidian-style `[[wikilinks]]`. Tools, concepts, best practices, failure modes.
-2. **Hybrid retrieval** — LlamaIndex vector similarity seeds + SQLite BFS graph expansion. Notes are ranked, expanded, and optionally synthesized by an LLM into query-focused context.
+2. **Hybrid retrieval** — Vector similarity seeds + link-graph expansion. Indexing/retrieval is performed by a Python service (`knowledge/graph/`) and accessed from TS via a subprocess bridge (`knowledge/engine/context-engine.ts`).
 3. **MCP boundary** — The context engine is only accessible through an MCP server. Extensions and integrations are pure MCP clients.
 4. **Session logging** — Every event (prompts, tool calls, context retrievals, subagent runs, scheduled jobs) is logged to SQLite with full lineage tracking.
 5. **Scheduled maintenance** — In-process jobs reindex the knowledge graph, run health checks, and normalize markdown formatting.
@@ -14,18 +14,19 @@ Self-improving memory and context injection system for AI agents. Maintains a ma
 ## Entry points
 
 - **`pi`** — Interactive TUI. The ObsidiClaw extension boots the full stack (context engine, scheduler, event logging, subagent tools) automatically.
-- **`npx tsx orchestrator/run.ts`** — Headless mode for scripting, CI, and gateway integrations (e.g., Telegram bot).
+- **`npx tsx entry/run-mcp.ts`** — Headless MCP server (no TUI). Useful for scripting, CI, and gateway integrations.
 
-Both paths use `createObsidiClawStack()` from `shared/stack.ts` for shared infrastructure.
+Both paths use `createObsidiClawStack()` from `entry/stack.ts` for shared infrastructure.
 
 ## Stack
 
 - TypeScript
-- [LlamaIndex.TS](https://ts.llamaindex.ai/) — vector embeddings + retrieval
-- [Ollama](https://ollama.ai/) — local LLM provider (embeddings + synthesis)
+- Python (knowledge graph service in `knowledge/graph/`)
+- LlamaIndex (Python) — vector embeddings + retrieval
+- Ollama — local LLM provider (embeddings + synthesis)
 - SQLite (better-sqlite3, WAL mode) — knowledge graph store + run logging
-- [MCP SDK](https://github.com/modelcontextprotocol/typescript-sdk) — tool/resource protocol
-- [@mariozechner/pi-coding-agent](https://www.npmjs.com/package/@mariozechner/pi-coding-agent) — agent runtime + TUI
+- MCP SDK — tool/resource protocol
+- `@mariozechner/pi-coding-agent` — agent runtime + TUI
 
 ## Environment variables
 

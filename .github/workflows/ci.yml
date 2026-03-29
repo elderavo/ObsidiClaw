@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python deps (knowledge graph)
+        run: python -m pip install -r knowledge/graph/requirements.txt
+
+      - name: Install Node deps
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Point TS bridge at runner python
+        run: |
+          mkdir -p .obsidi-claw
+          python -c "import sys; print(sys.executable)" > .obsidi-claw/.python_path
+
+      - name: Smoke test (TS MCP ↔ Node server ↔ Python subprocess)
+        env:
+          OBSIDI_EMBED_PROVIDER: local
+          OBSIDI_CONTEXT_REVIEW: "0"
+          OBSIDI_CLAW_DEBUG: "0"
+        run: node dist/automation/ci/smoke-mcp.js

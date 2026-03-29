@@ -1,9 +1,27 @@
-.*
-!.pi
-!.pi/**
+## Secrets / local env
 .env
-node_modules
+
+## Node
+node_modules/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+## Python
 __pycache__/
-md_db/
-dist/*
+*.py[cod]
+.venv/
+venv/
+env/
+
+## ObsidiClaw runtime artifacts (local state)
+.obsidi-claw/
+
+## Obsidian workspace config + generated mirrors
+md_db/.obsidian/
+md_db/code/
+
+## Local artifacts
 notes.txt
+session.html
