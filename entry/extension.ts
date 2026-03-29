@@ -175,10 +175,14 @@ export interface ObsidiClawExtensionConfig {
 
 /**
  * Scans md_db/concepts/ and returns a compact block listing each concept note
- * by filename + H1 title. Injected at session start so Pi always knows which
- * design principles exist and can retrieve the full note on demand.
+ * by filename + H1 title + workspace scope. Injected at session start so Pi
+ * always knows which design principles exist and can retrieve the full note on demand.
+ *
+ * activeWorkspace filters workspace-specific concepts: a note with workspace: X
+ * only appears when X is the active workspace. Notes with no workspace field are
+ * always included (general principles).
  */
-function buildConceptsIndex(conceptsDir: string): string {
+function buildConceptsIndex(conceptsDir: string, activeWorkspace?: string): string {
   if (!fileExists(conceptsDir)) return "";
 
   let entries: string[];
@@ -192,14 +196,22 @@ function buildConceptsIndex(conceptsDir: string): string {
   for (const name of entries) {
     const fullPath = join(conceptsDir, name);
     let title = name.replace(/\.md$/, "").replace(/_/g, " ");
+    let workspace: string | undefined;
     try {
       const content = readText(fullPath);
       const h1 = content.match(/^#\s+(.+)$/m);
       if (h1) title = h1[1]!.trim();
+      const wsMatch = content.match(/^---[\s\S]*?^workspace:\s*(.+)$/m);
+      if (wsMatch) workspace = wsMatch[1]!.trim();
     } catch {
-      // fall back to filename stem
+      // fall back to filename stem, no workspace
     }
-    lines.push(`- **${name}** — ${title}`);
+
+    // Filter: include general (no workspace) always; workspace-specific only when active
+    if (workspace && workspace !== activeWorkspace) continue;
+
+    const scopeLabel = workspace ? ` *(${workspace})*` : "";
+    lines.push(`- **${name}** — ${title}${scopeLabel}`);
   }
 
   if (lines.length === 0) return "";
@@ -233,6 +245,10 @@ export function createObsidiClawExtension(
     // Tracks the current session's UI handle so the index progress listener
     // (registered once per factory) can update the status bar.
     let latestCtxUI: { setStatus(key: string, text: string | undefined): void } | undefined;
+
+    // Active workspace for concept filtering. Set by /workspace command.
+    // undefined = show only general (workspace-agnostic) concepts.
+    let activeWorkspace: string | undefined;
 
     // ── Engine + MCP server setup ────────────────────────────────────────────
 
@@ -435,6 +451,50 @@ export function createObsidiClawExtension(
     registerWorkspaceTools(pi, toolCtx);
     registerFindPathTool(pi, toolCtx);
 
+    // ── /workspace command ───────────────────────────────────────────────────
+    pi.registerCommand("workspace", {
+      description: "Pick active workspace — scopes concept injection and context",
+      handler: async (_args, ctx) => {
+        if (!ctx.hasUI) return;
+
+        // Load workspace registry
+        const registry = stack?.workspaceRegistry;
+        const workspaces = registry?.list().filter((w) => w.active) ?? [];
+
+        const MAX_LISTED = 4;
+        const listed = workspaces.slice(0, MAX_LISTED);
+        const options = [
+          ...listed.map((w) => w.name),
+          "＋ Add new workspace",
+        ];
+
+        const choice = await ctx.ui.select("Active workspace", options);
+
+        if (!choice) return; // dismissed
+
+        if (choice === "＋ Add new workspace") {
+          // Prompt for source dir, then send a message to Pi to handle registration
+          const sourceDir = await ctx.ui.input(
+            "Add workspace",
+            "Path to source directory (e.g. C:\\Projects\\MyApp)",
+          );
+          if (!sourceDir) return;
+          const name = await ctx.ui.input("Workspace name", "e.g. my-app");
+          if (!name) return;
+          ctx.ui.pasteToEditor(
+            `/register_workspace name="${name}" source_dir="${sourceDir}"`,
+          );
+          ctx.ui.notify(`Pasted registration command — send it to register "${name}"`, "info");
+          return;
+        }
+
+        // Set the active workspace
+        activeWorkspace = choice;
+        ctx.ui.notify(`Active workspace: ${choice}`, "info");
+        ctx.ui.setStatus("workspace", choice);
+      },
+    });
+
     // ── before_agent_start: inject preferences + standing tool reminder ─────
     // Calls MCP get_preferences so the engine stays behind the MCP boundary.
     pi.on("before_agent_start", async (event, ctx) => {
@@ -471,7 +531,7 @@ export function createObsidiClawExtension(
           ? `<!-- ObsidiClaw: Preferences -->\n\n${prefsContent}\n\n<!-- End ObsidiClaw Preferences -->`
           : "";
 
-        const conceptsBlock = buildConceptsIndex(join(paths.mdDbPath, "concepts"));
+        const conceptsBlock = buildConceptsIndex(join(paths.mdDbPath, "concepts"), activeWorkspace);
 
         const treeContent = buildDirectoryTree(paths.rootDir);
         const treeBlock = `<!-- ObsidiClaw: Project Structure -->\n\n## Project directory structure\n\n${treeContent}\n\n<!-- End ObsidiClaw Project Structure -->`;
