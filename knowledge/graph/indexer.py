@@ -370,7 +370,7 @@ def _build_vector_index(
     vector_index = VectorStoreIndex(
         nodes=text_nodes,
         embed_model=embed_model,
-        show_progress=True,
+        show_progress=False,
     )
 
     # Persist vector index
