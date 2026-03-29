@@ -13,10 +13,30 @@ Self-improving memory and context injection system for AI agents. Maintains a ma
 
 ## Entry points
 
-- **`pi`** — Interactive TUI. The ObsidiClaw extension boots the full stack (context engine, scheduler, event logging, subagent tools) automatically.
-- **`npx tsx entry/run-mcp.ts`** — Headless MCP server (no TUI). Useful for scripting, CI, and gateway integrations.
+- **`pi`** — Interactive TUI. The ObsidiClaw extension boots the full stack automatically.
+- **`npm run dev:mcp`** — Headless MCP server (no TUI). Useful for scripting, CI, and gateway integrations.
+- **`npm run start:mcp`** — Same as above, but runs built JS from `dist/`.
 
 Both paths use `createObsidiClawStack()` from `entry/stack.ts` for shared infrastructure.
+
+## Setup
+
+- Copy `.env.example` to `.env` and fill in the values you need.
+- Install Node deps: `npm ci`
+- Install Python deps (CI-friendly): `python -m pip install -r knowledge/graph/requirements.txt`
+
+More details (including conda): `docs/DEV_SETUP.md`
+
+## CI
+
+This repo includes a GitHub Actions workflow that runs a smoke test to catch breakage in the core wiring:
+
+TS MCP client ↔ Node MCP server ↔ Python knowledge graph subprocess.
+
+The smoke test runs in offline/degraded mode (no Ollama required):
+
+- `OBSIDI_EMBED_PROVIDER=local`
+- `OBSIDI_CONTEXT_REVIEW=0`
 
 ## Stack
 
@@ -40,10 +60,11 @@ Both paths use `createObsidiClawStack()` from `entry/stack.ts` for shared infras
 | `OBSIDI_EMBED_MODEL` | Embedding model name | `nomic-embed-text:v1.5` |
 | `OPENAI_API_KEY` | OpenAI API key (used when LLM/embedding provider is `openai`) | required for OpenAI providers |
 | `OBSIDI_CLAW_DEBUG` | Enable debug JSONL logging (`.obsidi-claw/debug/*.jsonl`) | on by default; set to `0`/`false` to disable |
+| `OBSIDI_CONTEXT_REVIEW` | Enable TS-side context review/synthesis (`0` disables) | enabled |
 | `OLLAMA_BASE_URL` | Compatibility: Ollama `/v1` URL for detached review worker | `http://localhost:11434/v1` |
 | `OLLAMA_MODEL` | Compatibility: alternate source for `OBSIDI_LLM_MODEL` | none (falls back to `cogito:8b`) |
 | `PERPLEXITY_API_KEY` | Needed to enable the `web_search` tool (`.pi/extensions/web-search.ts`) | required if using web search |
 
 ## Status
 
-Work in progress. Core pipeline (retrieval, injection, logging, scheduling) is operational. Active work on subagent reliability, post-session review, and observability tooling.
+Work in progress. Core pipeline (retrieval, injection, logging, scheduling) is operational.
