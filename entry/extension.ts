@@ -1,31 +1,35 @@
 /**
  * ObsidiClaw ExtensionFactory — Pi TUI entry point.
  *
- * Creates a full ObsidiClawStack (engine, logger, workspaces) and manages its
- * lifecycle via Pi SDK session hooks.
+ * Spawns a child process (mcp-process.ts) that owns the full stack (ContextEngine,
+ * Python subprocess, WorkspaceRegistry). The TUI communicates with it over
+ * StdioClientTransport — the standard MCP SDK child-process pattern.
  *
- * Hooks registered:
- *   - session_start: initialize stack, connect MCP transport
- *   - before_agent_start: inject preferences.md + concepts index + tool reminder
- *   - agent_start/turn_end/tool_execution_*: structured event logging
- *   - agent_end: log prompt_complete with durationMs
- *   - session_shutdown: enqueue session review, shutdown stack
+ * This process owns:
+ *   - RunLogger for TUI-side events (prompt, agent, tool lifecycle)
+ *   - Pi SDK hooks (session_start, before_agent_start, agent_start, etc.)
+ *   - Tool registrations (call through to MCP client)
+ *   - Session review job spawning
+ *
+ * The child process owns:
+ *   - ContextEngine + Python subprocess
+ *   - WorkspaceRegistry + file watchers
+ *   - MCP server (tool implementations)
+ *   - RunLogger for CE events (context_retrieved, ce_*, diagnostic)
  */
 
 import "dotenv/config";
 import { randomUUID } from "crypto";
 import { join } from "path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { type ExtensionFactory, type ExtensionUIContext } from "@mariozechner/pi-coding-agent";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Text } from "@mariozechner/pi-tui";
-import { createContextEngineMcpServer } from "../knowledge/engine/index.js";
 import { resolvePaths, getEmbedConfig } from "../core/config.js";
 import { extractMcpText } from "../core/text-utils.js";
 import { ensureDir, writeText, readText, listDir, fileExists } from "../core/os/fs.js";
 import { spawnProcess, getExecPath } from "../core/os/process.js";
-import { createObsidiClawStack, type ObsidiClawStack } from "./stack.js";
+import { RunLogger } from "../logger/run-logger.js";
 import { mapPiEventToRunEvent } from "../agents/pi-event-mapper.js";
 import { buildDirectoryTree, stripDirectoryBlock } from "../automation/scripts/update-directory-tree.js";
 import { TOOL_REMINDER, ENGINE_UNAVAILABLE_WARNING } from "../agents/prompts.js";
@@ -35,16 +39,6 @@ import { registerRetrieveContextTool } from "./tools/retrieve-context.js";
 import { registerRateContextTool } from "./tools/rate-context.js";
 import { registerWorkspaceTools } from "./tools/workspace.js";
 import { registerFindPathTool } from "./tools/find-path.js";
-import type { WorkspaceEntry } from "../automation/workspaces/workspace-registry.js";
-
-// ---------------------------------------------------------------------------
-// Shared state — lets other extensions reuse the stack's engine.
-// ---------------------------------------------------------------------------
-
-let _sharedStack: ObsidiClawStack | undefined;
-
-/** Engine from the standalone stack (undefined in orchestrator mode or before init). */
-export function getSharedEngine() { return _sharedStack?.engine; }
 
 
 // ---------------------------------------------------------------------------
@@ -57,23 +51,33 @@ function visibleLen(s: string): number {
   return s.replace(/\x1b\[[0-9;]*m/g, "").length;
 }
 
+interface ReadyParams {
+  engineState: "ok" | "degraded" | "unavailable";
+  degradedReason: string | null;
+  noteCount: number;
+  edgeCount: number;
+  indexLoaded: boolean;
+  activeWorkspaces: { name: string; mode: string; languages: string[] }[];
+}
+
 async function showStartupSplash(
   ui: ExtensionUIContext,
-  stats: { noteCount: number; edgeCount: number; indexLoaded: boolean },
-  activeWs: readonly WorkspaceEntry[],
+  params: ReadyParams,
 ): Promise<void> {
   await ui.custom(
     (_tui, theme, _keybindings, done) => {
-      const W = 52; // inner content width (border chars excluded from visible measure)
+      const W = 52;
 
-      const engineStatus = stats.indexLoaded
+      const engineStatus = params.engineState === "ok"
         ? theme.fg("success", "● OK")
-        : theme.fg("warning", "● degraded (keyword-only)");
+        : params.engineState === "degraded"
+          ? theme.fg("warning", "● degraded (keyword-only)")
+          : theme.fg("error", "● unavailable");
 
       const wsLines =
-        activeWs.length === 0
+        params.activeWorkspaces.length === 0
           ? ["  none registered"]
-          : activeWs.map((w) => `  ${w.name}  (${w.mode}, ${w.languages.join("+")})`);
+          : params.activeWorkspaces.map((w) => `  ${w.name}  (${w.mode}, ${w.languages.join("+")})`);
 
       const pad = (s: string, n: number) => s + " ".repeat(Math.max(0, n - visibleLen(s)));
       const border = theme.fg("border", "│");
@@ -89,8 +93,8 @@ async function showStartupSplash(
         line(""),
         line(`  Engine      ${engineStatus}`),
         line(
-          `  Graph       ${theme.fg("text", String(stats.noteCount))} notes` +
-          `  ·  ${theme.fg("text", String(stats.edgeCount))} edges`,
+          `  Graph       ${theme.fg("text", String(params.noteCount))} notes` +
+          `  ·  ${theme.fg("text", String(params.edgeCount))} edges`,
         ),
         line(""),
         divider,
@@ -141,10 +145,6 @@ export interface ObsidiClawExtensionConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Standing system-prompt instruction (appended on every before_agent_start)
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Concepts index builder
 // ---------------------------------------------------------------------------
 
@@ -152,10 +152,6 @@ export interface ObsidiClawExtensionConfig {
  * Scans md_db/concepts/ and returns a compact block listing each concept note
  * by filename + H1 title + workspace scope. Injected at session start so Pi
  * always knows which design principles exist and can retrieve the full note on demand.
- *
- * activeWorkspace filters workspace-specific concepts: a note with workspace: X
- * only appears when X is the active workspace. Notes with no workspace field are
- * always included (general principles).
  */
 function buildConceptsIndex(conceptsDir: string, activeWorkspace?: string): string {
   if (!fileExists(conceptsDir)) return "";
@@ -182,7 +178,6 @@ function buildConceptsIndex(conceptsDir: string, activeWorkspace?: string): stri
       // fall back to filename stem, no workspace
     }
 
-    // Filter: include general (no workspace) always; workspace-specific only when active
     if (workspace && workspace !== activeWorkspace) continue;
 
     const scopeLabel = workspace ? ` *(${workspace})*` : "";
@@ -216,128 +211,38 @@ export function createObsidiClawExtension(
   return async (pi) => {
     const paths = resolvePaths(config.rootDir);
     const mdDbPath = config.mdDbPath ?? paths.mdDbPath;
+    const sessionId = randomUUID();
 
-    // Tracks the current session's UI handle so the index progress listener
-    // (registered once per factory) can update the status bar.
+    // TUI-side RunLogger — logs Pi event lifecycle only.
+    // The MCP child process has its own RunLogger for CE events.
+    // Both write to the same runs.db via WAL mode.
+    const logger = new RunLogger({ dbPath: paths.dbPath });
+
+    // UI handle for status bar updates
     let latestCtxUI: { setStatus(key: string, text: string | undefined): void } | undefined;
 
     // Active workspace for concept filtering. Set by /workspace command.
-    // undefined = show only general (workspace-agnostic) concepts.
     let activeWorkspace: string | undefined;
 
-    // ── Engine + MCP server setup ────────────────────────────────────────────
+    // Engine state — populated when child process sends obsidi-claw/ready
+    let engineState: "ok" | "degraded" | "unavailable" = "ok";
 
-    const stack: ObsidiClawStack = createObsidiClawStack({ rootDir: paths.rootDir });
-    _sharedStack = stack;
-
-    const mcpServer: McpServer = createContextEngineMcpServer({
-      engine: stack.engine,
-      pruneStorage: stack.noteMetrics.pruneStorage,
-      workspaceRegistry: stack.workspaceRegistry,
-      getRunId: () => toolCtx.currentRunId,
-      onContextBuilt: (pkg) => {
-        const noteHits = pkg.retrievedNotes.map((n) => ({
-          noteId: n.noteId,
-          score: n.score,
-          depth: n.depth ?? 0,
-          source: n.retrievalSource,
-          tier: n.tier,
-          noteType: n.type,
-          symbolKind: n.symbolKind,
-        }));
-        const ts = Date.now();
-        stack.logger.logEvent({
-          type: "context_retrieved",
-          sessionId: stack.sessionId,
-          runId: toolCtx.currentRunId,
-          timestamp: ts,
-          query: pkg.query,
-          seedCount: pkg.seedNoteIds?.length ?? 0,
-          expandedCount: pkg.expandedNoteIds?.length ?? 0,
-          toolCount: pkg.suggestedTools.length,
-          retrievalMs: pkg.retrievalMs,
-          rawChars: pkg.rawChars,
-          strippedChars: pkg.strippedChars,
-          estimatedTokens: pkg.estimatedTokens,
-          reviewMs: pkg.reviewResult?.reviewMs,
-          reviewSkipped: pkg.reviewResult?.skipped,
-          noteHits,
-        } as RunEvent);
-        stack.noteMetrics.logRetrieval({
-          sessionId: stack.sessionId,
-          runId: toolCtx.currentRunId,
-          timestamp: ts,
-          query: pkg.query,
-          seedCount: pkg.seedNoteIds?.length ?? 0,
-          expandedCount: pkg.expandedNoteIds?.length ?? 0,
-          toolCount: pkg.suggestedTools.length,
-          retrievalMs: pkg.retrievalMs,
-          rawChars: pkg.rawChars,
-          strippedChars: pkg.strippedChars,
-          estimatedTokens: pkg.estimatedTokens,
-          noteHits,
-        });
-      },
-      onContextRated: (rating) => {
-        const ts = Date.now();
-        stack.logger.logEvent({
-          type: "context_rated",
-          sessionId: stack.sessionId,
-          runId: toolCtx.currentRunId,
-          timestamp: ts,
-          query: rating.query,
-          score: rating.score,
-          missing: rating.missing,
-          helpful: rating.helpful,
-        } as RunEvent);
-        stack.noteMetrics.logRating({
-          sessionId: stack.sessionId,
-          runId: toolCtx.currentRunId,
-          timestamp: ts,
-          query: rating.query,
-          score: rating.score,
-          missing: rating.missing,
-          helpful: rating.helpful,
-        });
-      },
-      onBackgroundError: (context, err) => {
-        stack.logger.logEvent({
-          type: "diagnostic",
-          sessionId: stack.sessionId,
-          runId: toolCtx.currentRunId,
-          timestamp: Date.now(),
-          module: "mcp_server",
-          level: "error",
-          message: `${context}: ${err instanceof Error ? err.message : String(err)}`,
-        });
-      },
-    });
-
-    // ── Index progress bar ───────────────────────────────────────────────────
-    // Python emits index_progress notifications during incremental_update.
-    // We render a status bar entry so the user sees progress on large workspaces.
-    stack.engine.on("indexProgress", (done: number, total: number) => {
-      if (!latestCtxUI) return;
-      if (done >= total) {
-        latestCtxUI.setStatus("indexing", undefined);
-      } else {
-        const filled = Math.round((done / total) * 20);
-        const bar = "█".repeat(filled) + "░".repeat(20 - filled);
-        latestCtxUI.setStatus("indexing", `Indexing ${done}/${total} [${bar}]`);
-      }
-    });
+    // Ready params — populated by child process notification
+    let readyParams: ReadyParams | undefined;
+    let readyResolve: ((params: ReadyParams) => void) | undefined;
+    const readyPromise = new Promise<ReadyParams>((resolve) => { readyResolve = resolve; });
 
     // Track latest transcript (updated on agent_end) for review hook
     let latestMessages: unknown[] = [];
 
-    // MCP client — reassigned each session_start so transport is always fresh.
-    let client = new Client({ name: "obsidi-claw-ext", version: "1.0.0" });
+    // MCP client — talks to child process over stdio
+    let client: Client;
+    let transport: StdioClientTransport;
 
-    // Shared mutable state for extracted tool files. Tools read properties at
-    // call time, so mutations here are visible to all registered tools.
-    const toolCtx: ToolContext = { client, currentRunId: "", engineState: "ok" };
+    // Shared mutable state for tool registrations.
+    const toolCtx: ToolContext = { client: null as unknown as Client, currentRunId: "", engineState: "ok" };
 
-    // ── session_start: initialize stack + connect MCP pair ───────────────────
+    // ── session_start: spawn MCP child process ──────────────────────────────
     pi.on("session_start", async (_event, ctx) => {
       latestCtxUI = ctx.hasUI ? ctx.ui : undefined;
       ensureDir(join(paths.rootDir, ".obsidi-claw"));
@@ -345,44 +250,95 @@ export function createObsidiClawExtension(
       // One-time migration: strip directory tree block from preferences.md if present.
       try { stripDirectoryBlock(join(mdDbPath, "preferences.md")); } catch { /* ignore */ }
 
-      // Connect MCP FIRST — before stack.initialize() — so any engine init
-      // failure surfaces as "ContextEngine not initialized" rather than the
-      // opaque "Not connected" error that results from client never connecting.
-      // Also recreate transport+client each session so shutdown→new-session works.
-      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      // Resolve the compiled mcp-process.js path
+      const mcpProcessScript = join(paths.rootDir, "dist", "entry", "mcp-process.js");
+
+      transport = new StdioClientTransport({
+        command: getExecPath(),
+        args: [mcpProcessScript],
+        env: {
+          ...process.env as Record<string, string>,
+          OBSIDI_SESSION_ID: sessionId,
+          OBSIDI_ROOT_DIR: paths.rootDir,
+        },
+        stderr: "pipe",
+        cwd: paths.rootDir,
+      });
+
+      // Pipe child stderr to TUI logger (line-buffered)
+      const childStderr = transport.stderr;
+      if (childStderr && "on" in childStderr) {
+        let stderrBuf = "";
+        (childStderr as unknown as NodeJS.ReadableStream).on("data", (chunk: Buffer) => {
+          stderrBuf += chunk.toString();
+          const lines = stderrBuf.split("\n");
+          stderrBuf = lines.pop() ?? "";
+          for (const line of lines) {
+            if (line.trim()) {
+              logger.logEvent({
+                type: "ce_subprocess_log",
+                sessionId,
+                runId: "",
+                timestamp: Date.now(),
+                message: line,
+              } as RunEvent);
+            }
+          }
+        });
+      }
+
       client = new Client({ name: "obsidi-claw-ext", version: "1.0.0" });
       toolCtx.client = client;
-      await mcpServer.connect(serverTransport);
-      await client.connect(clientTransport);
 
-      try {
-        await stack.initialize();
+      // Listen for custom notifications from child process
+      client.fallbackNotificationHandler = async (notification: { method: string; params?: Record<string, unknown> }) => {
+        if (notification.method === "obsidi-claw/ready") {
+          const params = notification.params as unknown as ReadyParams;
+          readyParams = params;
+          engineState = params.engineState;
+          toolCtx.engineState = params.engineState;
 
-        // Engine started but without embeddings — keyword + graph still work
-        if (stack.engine.isDegraded) {
-          toolCtx.engineState = "degraded";
-          const reason = stack.engine.degradedReasonMessage || "embedding provider unavailable";
-          stack.logger.logEvent({ type: "diagnostic", sessionId: stack.sessionId, runId: "", timestamp: Date.now(), module: "extension", level: "warn", message: `context engine degraded: ${reason}` });
-          if (ctx.hasUI) {
+          if (params.engineState === "degraded" && ctx.hasUI) {
+            const reason = params.degradedReason || "embedding provider unavailable";
             ctx.ui.notify(
               `Context engine running in keyword-only mode: ${reason}`,
               "warning",
             );
+          } else if (params.engineState === "unavailable" && ctx.hasUI) {
+            const reason = params.degradedReason || "initialization failed";
+            ctx.ui.notify(
+              `Context engine unavailable: ${reason}`,
+              "warning",
+            );
+          }
+
+          // Show startup splash
+          if (ctx.hasUI) {
+            const wsLabel = params.activeWorkspaces.map((w) => w.name).join(", ") || "no workspaces";
+            ctx.ui.setTitle(`ObsidiClaw — ${wsLabel} — ${params.noteCount} notes`);
+            showStartupSplash(ctx.ui, params).catch(() => {});
+          }
+
+          readyResolve?.(params);
+        } else if (notification.method === "notifications/progress") {
+          const p = notification.params as { progressToken?: string; progress?: number; total?: number } | undefined;
+          if (p?.progressToken === "index" && latestCtxUI) {
+            const done = p.progress ?? 0;
+            const total = p.total ?? 0;
+            if (done >= total) {
+              latestCtxUI.setStatus("indexing", undefined);
+            } else {
+              const filled = Math.round((done / total) * 20);
+              const bar = "█".repeat(filled) + "░".repeat(20 - filled);
+              latestCtxUI.setStatus("indexing", `Indexing ${done}/${total} [${bar}]`);
+            }
           }
         }
-      } catch (err) {
-        toolCtx.engineState = "unavailable";
-        const reason = err instanceof Error ? err.message : String(err);
-        stack.logger.logEvent({ type: "diagnostic", sessionId: stack.sessionId, runId: "", timestamp: Date.now(), module: "extension", level: "error", message: `context engine failed to initialize: ${reason}` });
-        if (ctx.hasUI) {
-          ctx.ui.notify(
-            `Context engine unavailable: ${reason}`,
-            "warning",
-          );
-        }
-      }
+      };
 
-      // Warn when embed host falls back to default (easy misconfiguration)
+      await client.connect(transport);
+
+      // Warn when embed host falls back to default
       if (ctx.hasUI) {
         const embedCfg = getEmbedConfig();
         if (embedCfg.provider !== "local" && !process.env["OBSIDI_EMBED_HOST"]) {
@@ -393,25 +349,14 @@ export function createObsidiClawExtension(
         }
       }
 
-      // ── Window title + startup splash ─────────────────────────────────────
-      if (ctx.hasUI) {
-        const stats = await stack.engine.getGraphStats().catch(() => ({
-          noteCount: 0, edgeCount: 0, indexLoaded: false,
-        }));
-        const activeWs = stack.workspaceRegistry.list().filter((w) => w.active);
-        const wsLabel = activeWs.map((w) => w.name).join(", ") || "no workspaces";
-        ctx.ui.setTitle(`ObsidiClaw — ${wsLabel} — ${stats.noteCount} notes`);
-        showStartupSplash(ctx.ui, stats, activeWs).catch(() => {});
-      }
-
-      stack.logger.logEvent({
+      logger.logEvent({
         type: "session_start",
-        sessionId: stack.sessionId,
+        sessionId,
         timestamp: Date.now(),
       } as RunEvent);
     });
 
-    // ── Tool registrations (extracted to entry/tools/) ──────────────────────
+    // ── Tool registrations (call through to MCP client) ───────────────────
     registerRetrieveContextTool(pi, toolCtx);
     registerRateContextTool(pi, toolCtx);
     registerWorkspaceTools(pi, toolCtx);
@@ -423,8 +368,9 @@ export function createObsidiClawExtension(
       handler: async (_args, ctx) => {
         if (!ctx.hasUI) return;
 
-        // Load workspace registry
-        const workspaces = stack.workspaceRegistry.list().filter((w) => w.active);
+        // Wait for ready if not yet received
+        const rp = readyParams ?? await Promise.race([readyPromise, new Promise<null>((r) => setTimeout(() => r(null), 3000))]);
+        const workspaces = rp?.activeWorkspaces ?? [];
 
         const MAX_LISTED = 4;
         const listed = workspaces.slice(0, MAX_LISTED);
@@ -435,7 +381,7 @@ export function createObsidiClawExtension(
 
         const choice = await ctx.ui.select("Active workspace", options);
 
-        if (!choice) return; // dismissed
+        if (!choice) return;
 
         if (choice === "＋ Add new workspace") {
           const name = await ctx.ui.input("Workspace name", "e.g. my-app");
@@ -448,12 +394,9 @@ export function createObsidiClawExtension(
 
           ctx.ui.setStatus("workspace", "registering…");
           try {
-            await stack.workspaceRegistry.register({
-              name,
-              sourceDir,
-              mode: "code",
-              languages: ["ts", "py"],
-              active: true,
+            await client.callTool({
+              name: "register_workspace",
+              arguments: { name, source_dir: sourceDir, mode: "code", languages: ["ts", "py"] },
             });
             activeWorkspace = name;
             ctx.ui.setStatus("workspace", name);
@@ -465,7 +408,6 @@ export function createObsidiClawExtension(
           return;
         }
 
-        // Set the active workspace
         activeWorkspace = choice;
         ctx.ui.notify(`Active workspace: ${choice}`, "info");
         ctx.ui.setStatus("workspace", choice);
@@ -476,20 +418,26 @@ export function createObsidiClawExtension(
     let promptStartTs = 0;
 
     // ── before_agent_start: inject preferences + standing tool reminder ─────
-    // Calls MCP get_preferences so the engine stays behind the MCP boundary.
     pi.on("before_agent_start", async (event, ctx) => {
       toolCtx.currentRunId = randomUUID();
       promptStartTs = Date.now();
-      stack.logger.logEvent({
+      logger.logEvent({
         type: "prompt_received",
-        sessionId: stack.sessionId,
+        sessionId,
         runId: toolCtx.currentRunId,
         timestamp: promptStartTs,
         text: "(pi-tui-prompt)",
       } as RunEvent);
 
-      // Fast path: engine is completely unavailable — inject warning, skip MCP calls
-      if (toolCtx.engineState === "unavailable") {
+      // Notify child process of current run ID (fire-and-forget notification)
+      try {
+        await client.notification({ method: "obsidi-claw/setRunId", params: { runId: toolCtx.currentRunId } } as any);
+      } catch {
+        // Non-fatal
+      }
+
+      // Fast path: engine is completely unavailable
+      if (engineState === "unavailable") {
         const treeContent = buildDirectoryTree(paths.rootDir);
         const treeBlock = `<!-- ObsidiClaw: Project Structure -->\n\n## Project directory structure\n\n${treeContent}\n\n<!-- End ObsidiClaw Project Structure -->`;
 
@@ -524,7 +472,6 @@ export function createObsidiClawExtension(
             TOOL_REMINDER,
         };
       } catch {
-        // MCP call failed unexpectedly — inject warning for this turn
         if (ctx.hasUI) ctx.ui.notify("Context engine unavailable this turn", "warning");
 
         const treeContent = buildDirectoryTree(paths.rootDir);
@@ -543,10 +490,10 @@ export function createObsidiClawExtension(
     const logPiEvent = (event: unknown) => {
       const mapped = mapPiEventToRunEvent(
         event as { type: string; [key: string]: unknown },
-        stack.sessionId,
+        sessionId,
         toolCtx.currentRunId,
       );
-      if (mapped) stack.logger.logEvent(mapped);
+      if (mapped) logger.logEvent(mapped);
     };
     pi.on("agent_start", logPiEvent);
     pi.on("turn_end", logPiEvent);
@@ -560,14 +507,14 @@ export function createObsidiClawExtension(
 
       const mapped = mapPiEventToRunEvent(
         event as unknown as { type: string; [key: string]: unknown },
-        stack.sessionId,
+        sessionId,
         toolCtx.currentRunId,
       );
-      if (mapped) stack.logger.logEvent(mapped);
+      if (mapped) logger.logEvent(mapped);
 
-      stack.logger.logEvent({
+      logger.logEvent({
         type: "prompt_complete",
-        sessionId: stack.sessionId,
+        sessionId,
         runId: toolCtx.currentRunId,
         timestamp: Date.now(),
         durationMs: Date.now() - promptStartTs,
@@ -591,7 +538,7 @@ export function createObsidiClawExtension(
         const spec = {
           type: "review",
           jobId,
-          sessionId: stack.sessionId,
+          sessionId,
           rootDir: paths.rootDir,
           trigger: "session_end",
           messages: latestMessages,
@@ -610,17 +557,16 @@ export function createObsidiClawExtension(
         });
         child.unref();
       } catch (err) {
-        stack.logger.logEvent({ type: "diagnostic", sessionId: stack.sessionId, runId: toolCtx.currentRunId, timestamp: Date.now(), module: "extension", level: "error", message: `session_review enqueue failed: ${err instanceof Error ? err.message : String(err)}` } as RunEvent);
+        logger.logEvent({ type: "diagnostic", sessionId, runId: toolCtx.currentRunId, timestamp: Date.now(), module: "extension", level: "error", message: `session_review enqueue failed: ${err instanceof Error ? err.message : String(err)}` } as RunEvent);
       } finally {
-        void client.close();
-        void mcpServer.close();
-        stack.logger.logEvent({
+        logger.logEvent({
           type: "session_end",
-          sessionId: stack.sessionId,
+          sessionId,
           timestamp: Date.now(),
         } as RunEvent);
-        await stack.shutdown();
-        _sharedStack = undefined;
+        // Close MCP client — this kills the child process (stdin closes → child exits)
+        void client?.close();
+        logger.close();
       }
     });
   };

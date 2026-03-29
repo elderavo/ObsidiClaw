@@ -31,6 +31,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="[knowledge_graph] %(levelname)s %(name)s: %(message)s",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------

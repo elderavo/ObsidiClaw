@@ -31,6 +31,8 @@ import { WorkspaceRegistry } from "../automation/workspaces/workspace-registry.j
 export interface StackOptions {
   /** Project root directory. Falls back to process.cwd(). */
   rootDir?: string;
+  /** Session ID override. Generated if not provided. */
+  sessionId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -57,7 +59,9 @@ export interface ObsidiClawStack {
 
 export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack {
   const paths = resolvePaths(opts.rootDir);
-  const sessionId = randomUUID();
+  const sessionId = opts.sessionId ?? randomUUID();
+  const reviewEnabledRaw = (process.env["OBSIDI_CONTEXT_REVIEW"] ?? "1").toLowerCase();
+  const reviewEnabled = !(reviewEnabledRaw === "0" || reviewEnabledRaw === "false" || reviewEnabledRaw === "off");
 
   // ── RunLogger ───────────────────────────────────────────────────────────
   const logger = new RunLogger({
@@ -76,6 +80,7 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
   // ── ContextEngine ───────────────────────────────────────────────────────
   const engine = new ContextEngine({
     mdDbPath: paths.mdDbPath,
+    review: { enabled: reviewEnabled },
     onDebug: (event) => {
       logger.logEvent({
         ...event,
