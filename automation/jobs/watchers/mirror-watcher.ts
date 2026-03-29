@@ -88,6 +88,30 @@ export interface WorkspaceMirrorConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Worker drain — call during shutdown to wait for running workers to finish
+// ---------------------------------------------------------------------------
+
+/**
+ * Wait for all active summarize workers to exit before returning.
+ *
+ * Clears pendingRerun first so no new workers are spawned as the current
+ * ones exit. Hard timeout prevents hanging if a worker stalls.
+ */
+export async function drainWorkers(timeoutMs = 30_000): Promise<void> {
+  pendingRerun.clear();
+  if (activeWorkers.size === 0) return;
+
+  const settled = [...activeWorkers.values()].map(
+    (child) => new Promise<void>((resolve) => child.once("exit", () => resolve())),
+  );
+
+  await Promise.race([
+    Promise.all(settled),
+    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+}
+
+// ---------------------------------------------------------------------------
 // Config-driven watcher (new — used by WorkspaceRegistry)
 // ---------------------------------------------------------------------------
 

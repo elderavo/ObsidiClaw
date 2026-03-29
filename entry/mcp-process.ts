@@ -19,6 +19,7 @@ import "dotenv/config";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createContextEngineMcpServer } from "../knowledge/engine/index.js";
 import { createObsidiClawStack } from "./stack.js";
+import { drainWorkers } from "../automation/jobs/watchers/mirror-watcher.js";
 import type { RunEvent } from "../logger/types.js";
 
 // ---------------------------------------------------------------------------
@@ -228,6 +229,10 @@ async function main(): Promise<void> {
 
 async function shutdown(): Promise<void> {
   try {
+    // Wait for any running summarize workers to finish before closing the
+    // logger and engine. This ensures summarizer_done events and the notes
+    // they write (+ their reindex) land in the current session.
+    await drainWorkers(30_000);
     await mcpServer.close();
     await stack.shutdown();
   } catch {
