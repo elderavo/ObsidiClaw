@@ -26,10 +26,11 @@ The input has an explicit 3-tier hierarchy:
 
 Use this structure. Do not flatten it. Tier context is additive: a symbol note is richer when read against its file and module context.
 
-### 2. Ruthless Relevance Filtering
-- Remove anything not directly useful to the query
-- Delete background, fluff, and generic explanations
+### 2. Targeted Relevance Filtering
+- Remove background, fluff, and generic explanations that don't help the query
 - If an entire section has no value for the query, omit it
+- **Do not remove** file paths, symbol names, config field names, or call relationships — these are navigational anchors that a coding agent uses even when they seem peripheral
+- **Do not infer or generate content not present in the input** — if a specific symbol or file the query asks about is absent from the notes, put it in Gaps rather than reasoning about it from context
 
 ### 3. Promote Signatures and Edges
 - Always preserve exact function signatures, type definitions, interface shapes
@@ -53,7 +54,8 @@ _What the relevant subsystem/directory does — architecture-level._
 
 ### File Context
 _What the relevant file exports and how it fits in its module._
-- One short paragraph or bullet list per file. Include the file path.
+- One short paragraph or bullet list per file. **Always include the file path** (`path/to/file.ts`).
+- Include the key exported names from the Exports section — these are the symbols a caller would import.
 - Only include files relevant to the query.
 
 ### Symbol Details
@@ -71,8 +73,9 @@ _What calls what, for query-relevant symbols._
 _Non-code heuristics, design decisions, failure modes relevant to the query._
 - Keep only what directly informs the query.
 
-### Gaps / Unknowns _(optional)_
-- Missing but important information that Pi should investigate directly.
+### Gaps / Unknowns
+- **Required** when: the query asks about a specific symbol, function, file, or config field that does not appear in the input notes.
+- List what's missing and where Pi should look (e.g. "No tier-1 note for `runCascadeForWorkspace` — read `automation/jobs/summarize-lib.ts` directly").
 
 ---
 
@@ -82,7 +85,8 @@ _Non-code heuristics, design decisions, failure modes relevant to the query._
 - No explanations to the user
 - No answering the query
 - No meta commentary
-- No source attribution
+- **Always include file paths** for code references — do not strip them
+- **Never fabricate** — only output what is in the input notes; speculation goes in Gaps
 
 ---
 

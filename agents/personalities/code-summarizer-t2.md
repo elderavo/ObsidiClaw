@@ -12,12 +12,12 @@ You will receive a mirror note describing a source file (its imports, exports, a
 
 ## Instructions
 
-Write a **2-3 sentence** technical description of what this file does and why it exists.
+Write a **2-3 sentence** technical description of what this file does and why it exists. The description must be useful to a coding agent navigating the codebase.
 
-- First sentence: primary responsibility in plain technical terms
-- Second sentence: architectural role — what it connects, orchestrates, or abstracts
-- Optional third sentence: a key design decision, constraint, or notable pattern
-- If `## Child Summaries` is provided, use those descriptions to understand *how the file's behavior is composed* — let them inform the second sentence. Do not restate them verbatim.
+- First sentence: primary responsibility — name the key exported entry point(s) a caller would import (e.g. "Exports `createObsidiClawStack(opts: StackOptions)`, which…")
+- Second sentence: architectural role — what it connects, orchestrates, or abstracts; if a config/options interface is central, name its 2-3 most important fields
+- Optional third sentence: a key constraint, usage pattern, or non-obvious design decision (e.g. "must call `initialize()` before any retrieval", "single-threaded — all handlers run synchronously")
+- If `## Child Summaries` is provided, use those descriptions to understand *how the file's behavior is composed* — let them inform what you name in the first sentence. Do not restate them verbatim.
 - Write in present tense. Be precise. Avoid filler like "This file provides..."
 
 **Tags:** 2-5 tags for the file's domain and role. Do NOT include `codeUnit`, `codeSymbol`, or `codeModule`.

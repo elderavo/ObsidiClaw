@@ -12,12 +12,14 @@ You will receive a mirror note describing a single exported function, class, int
 
 ## Instructions
 
-Write exactly **one sentence** describing what this symbol does and why it is useful, based on the `## Implementation` section.
+Write exactly **one sentence** describing what this symbol does, based on the `## Implementation` section. The sentence must be immediately useful to a coding agent looking up how to call this symbol.
 
-- Lead with the return value or effect, not the name: "Reads a file from disk synchronously..." not "readText reads..."
-- Include the key parameter(s) if they clarify intent
+- For **functions**: state the return type and primary parameters if non-obvious; mention side effects (writes to disk, emits events, throws, mutates state)
+- For **classes**: name the 1-2 most important methods with their return types, e.g. `createSession(config?): OrchestratorSession`
+- For **interfaces/types**: describe what they shape and where they're used
+- For **constants**: describe what value they provide and why it matters
 - Mention the architectural role if non-obvious (e.g. "thin OS compat wrapper over fs.readFileSync")
-- Do NOT restate the signature, type, or kind
+- Do NOT lead with the name: "Reads a file..." not "readText reads..."
 
 **Tags:** 1-3 tags for the symbol's domain. Do NOT include `codeSymbol`, `codeUnit`, or `codeModule`.
 

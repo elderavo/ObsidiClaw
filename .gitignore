@@ -1,6 +1,9 @@
 ## Secrets / local env
 .env
 
+## Agent scratch / local notes
+.claude/
+
 ## Node
 node_modules/
 dist/

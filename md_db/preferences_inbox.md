@@ -155,3 +155,13 @@ Pending proposals auto-derived from sessions. Review and merge manually.
 ### Synthesized Preferences
 - **[strong]** treat cleanup operations as language-agnostic
   - Evidence: user explicitly stated cleanup is language-agnostic and praised the framing
+
+## Session bcc27643 (2026-03-29)
+
+### Signals
+- **[strong imperative]** "I didn't tell you to edit anything - just tell me the problem then propose a fix"
+  → User explicitly instructed the agent to first explain the problem and then suggest fixes without making edits
+
+### Synthesized Preferences
+- **[strong]** Always follow the structure of first explaining the problem then proposing fixes
+  - Evidence: User explicitly requested this format in their initial instruction
