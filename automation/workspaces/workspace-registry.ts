@@ -322,8 +322,7 @@ export class WorkspaceRegistry {
       // Start watcher for continuous updates
       this.startWatcher(entry);
     } else {
-      // "know" mode — just create the directory, no pipeline yet
-      console.log(`[workspace-registry] know mode workspace "${entry.name}" registered (pipeline not yet implemented)`);
+      // "know" mode — directory created, no pipeline yet
     }
 
     return { entry, notesGenerated, notePaths };

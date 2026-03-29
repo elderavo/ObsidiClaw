@@ -39,6 +39,7 @@ export const INSIGHT_ENGINE = "insight_engine" as const;
 /** Logger — SQLite event persistence (runs.db). */
 export const LOGGER = "logger" as const;
 
+
 // ---------------------------------------------------------------------------
 // Dynamic module names
 // ---------------------------------------------------------------------------

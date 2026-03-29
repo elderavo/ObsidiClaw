@@ -336,6 +336,17 @@ export function createObsidiClawExtension(
             helpful: rating.helpful,
           });
         },
+        onBackgroundError: (context, err) => {
+          stack!.logger.logEvent({
+            type: "diagnostic",
+            sessionId,
+            runId: toolCtx.currentRunId,
+            timestamp: Date.now(),
+            module: "mcp_server",
+            level: "error",
+            message: `${context}: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        },
       });
     }
 
@@ -391,25 +402,23 @@ export function createObsidiClawExtension(
           if (stack.engine.isDegraded) {
             toolCtx.engineState = "degraded";
             const reason = stack.engine.degradedReasonMessage || "embedding provider unavailable";
+            stack.logger.logEvent({ type: "diagnostic", sessionId: stack.sessionId, runId: "", timestamp: Date.now(), module: "extension", level: "warn", message: `context engine degraded: ${reason}` });
             if (ctx.hasUI) {
               ctx.ui.notify(
                 `Context engine running in keyword-only mode: ${reason}`,
                 "warning",
               );
-            } else {
-              console.warn(`[obsidi-claw] Context engine degraded: ${reason}`);
             }
           }
         } catch (err) {
           toolCtx.engineState = "unavailable";
           const reason = err instanceof Error ? err.message : String(err);
+          stack.logger.logEvent({ type: "diagnostic", sessionId: stack.sessionId, runId: "", timestamp: Date.now(), module: "extension", level: "error", message: `context engine failed to initialize: ${reason}` });
           if (ctx.hasUI) {
             ctx.ui.notify(
               `Context engine unavailable: ${reason}`,
               "warning",
             );
-          } else {
-            console.warn(`[obsidi-claw] Context engine failed to initialize: ${reason}`);
           }
         }
       }
@@ -473,18 +482,35 @@ export function createObsidiClawExtension(
         if (!choice) return; // dismissed
 
         if (choice === "＋ Add new workspace") {
-          // Prompt for source dir, then send a message to Pi to handle registration
-          const sourceDir = await ctx.ui.input(
-            "Add workspace",
-            "Path to source directory (e.g. C:\\Projects\\MyApp)",
-          );
-          if (!sourceDir) return;
           const name = await ctx.ui.input("Workspace name", "e.g. my-app");
           if (!name) return;
-          ctx.ui.pasteToEditor(
-            `/register_workspace name="${name}" source_dir="${sourceDir}"`,
+          const sourceDir = await ctx.ui.input(
+            "Source directory",
+            "e.g. C:\\Projects\\MyApp",
           );
-          ctx.ui.notify(`Pasted registration command — send it to register "${name}"`, "info");
+          if (!sourceDir) return;
+
+          if (!stack) {
+            ctx.ui.notify("Stack not available — cannot register workspace", "error");
+            return;
+          }
+
+          ctx.ui.setStatus("workspace", "registering…");
+          try {
+            await stack.workspaceRegistry.register({
+              name,
+              sourceDir,
+              mode: "code",
+              languages: ["ts", "py"],
+              active: true,
+            });
+            activeWorkspace = name;
+            ctx.ui.setStatus("workspace", name);
+            ctx.ui.notify(`Workspace "${name}" registered`, "info");
+          } catch (err) {
+            ctx.ui.notify(`Registration failed: ${String(err)}`, "error");
+            ctx.ui.setStatus("workspace", undefined);
+          }
           return;
         }
 

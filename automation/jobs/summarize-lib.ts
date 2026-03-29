@@ -31,6 +31,9 @@ import type { PersonalityConfig } from "../../agents/types.js";
 // Public config
 // ---------------------------------------------------------------------------
 
+/** Structured log callback — injected by summarize-worker so output goes to runs.db. Falls back to stderr when absent. */
+export type SummarizeLog = (level: "info" | "warn" | "error", message: string) => void;
+
 export interface WorkspaceSummarizeConfig {
   /** md_db/code/{workspaceName} — workspace mirror output directory */
   mirrorDir: string;
@@ -42,6 +45,8 @@ export interface WorkspaceSummarizeConfig {
   workspacesPath?: string;
   registry?: WorkspaceRegistry;
   personalitiesDir: string;
+  /** Optional structured logger. When absent, output goes to process.stderr. */
+  log?: SummarizeLog;
 }
 
 // ---------------------------------------------------------------------------
@@ -96,7 +101,19 @@ const SOURCE_TRUNCATE_T2 = 3000;
 export async function runCascadeForWorkspace(
   config: WorkspaceSummarizeConfig,
 ): Promise<void> {
-  if (!await isLlmReachable()) return;
+  // Emit helper: routes to structured logger when available, falls back to stderr.
+  const emit: SummarizeLog = (level, message) => {
+    if (config.log) {
+      config.log(level, message);
+    } else {
+      process.stderr.write(`[summarize] ${message}\n`);
+    }
+  };
+
+  if (!await isLlmReachable()) {
+    emit("warn", "LLM unreachable — skipping cascade");
+    return;
+  }
 
   const t1Personality = loadPersonality("code-summarizer-t1", config.personalitiesDir);
   const t2Personality = loadPersonality("code-summarizer-t2", config.personalitiesDir);
@@ -106,7 +123,7 @@ export async function runCascadeForWorkspace(
   // ── Pass 1: Tier-1 symbol notes ──────────────────────────────────────────
   const justSummarizedT1 = new Set<string>();
   const tier1Notes = collectNotesByTier(config.mirrorDir, 1, config.rootDir, config.registry);
-  process.stderr.write(`[summarize] tier-1: ${tier1Notes.length} notes found\n`);
+  emit("info", `tier-1: ${tier1Notes.length} notes found`);
   let t1done = 0;
   let t1fail = 0;
   let connFails = 0;
@@ -128,6 +145,7 @@ export async function runCascadeForWorkspace(
       {},
       existingTags,
       t1Personality,
+      emit,
     );
 
     if (outcome.ok) {
@@ -140,12 +158,12 @@ export async function runCascadeForWorkspace(
       if (outcome.connection && ++connFails >= 2) break;
     }
   }
-  process.stderr.write(`[summarize] tier-1: done=${t1done} fail=${t1fail}\n`);
+  emit("info", `tier-1: done=${t1done} fail=${t1fail}`);
 
   // ── Pass 2: Tier-2 file notes ─────────────────────────────────────────────
   const justSummarizedT2 = new Set<string>();
   const tier2Notes = collectNotesByTier(config.mirrorDir, 2, config.rootDir, config.registry);
-  process.stderr.write(`[summarize] tier-2: ${tier2Notes.length} notes found\n`);
+  emit("info", `tier-2: ${tier2Notes.length} notes found`);
   let t2done = 0;
   let t2fail = 0;
   connFails = 0;
@@ -173,6 +191,7 @@ export async function runCascadeForWorkspace(
       { sourceContent: sourceContent.slice(0, SOURCE_TRUNCATE_T2), childSummaries },
       existingTags,
       t2Personality,
+      emit,
     );
 
     if (outcome.ok) {
@@ -185,7 +204,7 @@ export async function runCascadeForWorkspace(
       if (outcome.connection && ++connFails >= 2) break;
     }
   }
-  process.stderr.write(`[summarize] tier-2: done=${t2done} fail=${t2fail}\n`);
+  emit("info", `tier-2: done=${t2done} fail=${t2fail}`);
 
   // ── Pass 3: Tier-3 module notes ───────────────────────────────────────────
   let t3done = 0;
@@ -217,6 +236,7 @@ export async function runCascadeForWorkspace(
       { childSummaries },
       existingTags,
       t3Personality,
+      emit,
     );
 
     if (outcome.ok) {
@@ -228,7 +248,7 @@ export async function runCascadeForWorkspace(
       if (outcome.connection && ++connFails >= 2) break;
     }
   }
-  process.stderr.write(`[summarize] tier-3: done=${t3done} fail=${t3fail}\n`);
+  emit("info", `tier-3: done=${t3done} fail=${t3fail}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +545,7 @@ async function llmSummarize(
   opts: SummarizeOpts,
   existingTags: string[],
   personality: PersonalityConfig | null,
+  emit: SummarizeLog,
 ): Promise<LlmOutcome> {
   const tagList = existingTags.length > 0 ? existingTags.slice(0, 50).join(", ") : "(none yet)";
 
@@ -558,14 +579,12 @@ async function llmSummarize(
     );
     const parsed = parseResponse(raw.content);
     if (parsed) return { ok: true, result: parsed };
-    process.stderr.write(
-      `[summarize] LLM returned unparseable response (${raw.content.length} chars). First 200: ${raw.content.slice(0, 200)}\n`,
-    );
+    emit("warn", `LLM returned unparseable response (${raw.content.length} chars). First 200: ${raw.content.slice(0, 200)}`);
     return { ok: false, connection: false };
   } catch (err) {
     const msg = String(err);
     const isConn = CONNECTION_ERROR_PATTERNS.some((p) => msg.includes(p));
-    process.stderr.write(`[summarize] LLM call failed: ${msg}\n`);
+    emit("error", `LLM call failed: ${msg}`);
     return { ok: false, connection: isConn };
   }
 }

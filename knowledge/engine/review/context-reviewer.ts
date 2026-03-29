@@ -49,8 +49,8 @@ export interface ReviewResult {
   /** Whether the review was skipped. */
   skipped: boolean;
 
-  /** Reason for skipping, if skipped. */
-  skipReason?: "disabled" | "timeout" | "error" | "no_notes";
+  /** Reason for skipping, if skipped. For errors this is prefixed with "error: " + the message. */
+  skipReason?: "disabled" | "timeout" | "no_notes" | string;
 }
 
 // ---------------------------------------------------------------------------
@@ -107,15 +107,13 @@ export class ContextReviewer {
         skipped: false,
       };
     } catch (err) {
-      // Log the actual error so silent failures are diagnosable.
-      // Also surfaces via ce_review_done event (skipped=true, skipReason="error").
+      // Error message flows into ce_review_done.skipReason in runs.db via ContextEngine.
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[context-reviewer] synthesis failed: ${msg}`);
       return {
         synthesizedContext: null,
         reviewMs: Date.now() - t0,
         skipped: true,
-        skipReason: "error",
+        skipReason: `error: ${msg}`,
       };
     }
   }

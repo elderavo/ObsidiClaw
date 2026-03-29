@@ -30,6 +30,8 @@ export interface McpServerOptions {
   pruneStorage?: PruneClusterStorage;
   /** Workspace registry for register/list/unregister workspace tools. */
   workspaceRegistry?: WorkspaceRegistry;
+  /** Called when a fire-and-forget background operation fails (e.g. incremental reindex). Routes to runs.db. */
+  onBackgroundError?: (context: string, err: unknown) => void;
 }
 
 export function createContextEngineMcpServer(opts: McpServerOptions): McpServer {
@@ -37,7 +39,7 @@ export function createContextEngineMcpServer(opts: McpServerOptions): McpServer 
 }
 
 function _createMcpServer(opts: McpServerOptions): McpServer {
-  const { engine, onContextBuilt, onContextRated, pruneStorage, workspaceRegistry } = opts;
+  const { engine, onContextBuilt, onContextRated, pruneStorage, workspaceRegistry, onBackgroundError } = opts;
   const server = new McpServer({ name: "obsidi-claw-context", version: "1.0.0" });
 
   // ── retrieve_context ──────────────────────────────────────────────────────
@@ -289,7 +291,7 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
         // Returns immediately; Python background thread does the actual work.
         if (notePaths.length > 0) {
           engine.incrementalUpdate(notePaths).catch((err) => {
-            console.warn("[mcp] background incremental update failed:", err);
+            onBackgroundError?.("incremental update after register_workspace", err);
           });
         }
 

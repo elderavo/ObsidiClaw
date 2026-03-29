@@ -1,6 +1,7 @@
 import chokidar, { type FSWatcher } from "chokidar";
 import { join } from "path";
-import { existsSync } from "fs";
+import { existsSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
 import { spawn, type ChildProcess } from "child_process";
 
 import { runMirrorTs, type MirrorTsOptions } from "../../scripts/mirror-codebase.js";
@@ -212,15 +213,21 @@ function spawnSummarizeWorker(config: WorkspaceMirrorConfig): void {
   const workerScript = join(rootDir, "automation", "jobs", "summarize-worker.ts");
   if (!existsSync(workerScript)) return;
 
+  // Write config to a temp file — passing JSON directly via argv is unreliable
+  // on Windows with shell:true because cmd.exe mangles double-quoted strings.
   const workerConfig: SummarizeWorkerConfig = {
     mirrorDir: config.mirrorDir,
     mdDbPath: config.mdDbPath!,
     rootDir: config.sourceDir,
     workspacesPath: config.workspacesPath!,
     personalitiesDir: config.personalitiesDir!,
+    workspace: config.workspace,
+    notesDbPath: join(rootDir, ".obsidi-claw", "notes.db"),
   };
+  const configPath = join(tmpdir(), `obsidi-claw-worker-${Date.now()}.json`);
+  writeFileSync(configPath, JSON.stringify(workerConfig), "utf8");
 
-  const child = spawn(tsx, [workerScript, JSON.stringify(workerConfig)], {
+  const child = spawn(tsx, [workerScript, configPath], {
     cwd: rootDir,
     shell: true,                    // required for .cmd files on Windows
     stdio: ["ignore", "pipe", "pipe"],

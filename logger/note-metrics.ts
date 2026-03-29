@@ -151,6 +151,30 @@ export class NoteMetricsLogger {
 
       CREATE INDEX IF NOT EXISTS idx_lifecycle_note  ON note_lifecycle(note_id);
       CREATE INDEX IF NOT EXISTS idx_lifecycle_event ON note_lifecycle(event);
+
+      CREATE TABLE IF NOT EXISTS job_runs (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_name     TEXT    NOT NULL,
+        workspace    TEXT,
+        started_at   INTEGER NOT NULL,
+        finished_at  INTEGER,
+        status       TEXT    NOT NULL DEFAULT 'running',
+        error_text   TEXT,
+        stats_json   TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_job_runs_name   ON job_runs(job_name);
+      CREATE INDEX IF NOT EXISTS idx_job_runs_status ON job_runs(status);
+
+      CREATE TABLE IF NOT EXISTS job_logs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_run_id  INTEGER NOT NULL,
+        timestamp   INTEGER NOT NULL,
+        level       TEXT    NOT NULL,
+        message     TEXT    NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_job_logs_run ON job_logs(job_run_id);
     `);
   }
 
@@ -274,6 +298,42 @@ export class NoteMetricsLogger {
         Date.now(),
         tier ?? null,
         metadata ? JSON.stringify(metadata) : null,
+      );
+  }
+
+  // ── Job logging (background workers: summarize cascade, etc.) ────────────
+
+  /** Record a new job invocation. Returns the integer row ID used for subsequent calls. */
+  startJob(jobName: string, workspace?: string): number {
+    const result = this.db
+      .prepare(`INSERT INTO job_runs (job_name, workspace, started_at) VALUES (?, ?, ?)`)
+      .run(jobName, workspace ?? null, Date.now());
+    return result.lastInsertRowid as number;
+  }
+
+  /** Append a log line to a running job. */
+  logJobMessage(jobRunId: number, level: "info" | "warn" | "error", message: string): void {
+    this.db
+      .prepare(`INSERT INTO job_logs (job_run_id, timestamp, level, message) VALUES (?, ?, ?, ?)`)
+      .run(jobRunId, Date.now(), level, message);
+  }
+
+  /** Mark a job as finished with outcome. */
+  finishJob(
+    jobRunId: number,
+    status: "complete" | "error",
+    opts?: { errorText?: string; statsJson?: Record<string, unknown> },
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE job_runs SET finished_at = ?, status = ?, error_text = ?, stats_json = ? WHERE id = ?`,
+      )
+      .run(
+        Date.now(),
+        status,
+        opts?.errorText ?? null,
+        opts?.statsJson ? JSON.stringify(opts.statsJson) : null,
+        jobRunId,
       );
   }
 

@@ -153,7 +153,15 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
         }
       }
     } catch (err) {
-      console.warn("[obsidi-claw] workspace initialization failed:", err);
+      logger.logEvent({
+        type: "diagnostic",
+        sessionId,
+        runId: "",
+        timestamp: Date.now(),
+        module: "stack",
+        level: "error",
+        message: `workspace initialization failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
     }
 
     // ── Phase 2: engine init (sees settled md_db, hash is stable) ─────────
