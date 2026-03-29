@@ -1,18 +1,13 @@
 import Database from "better-sqlite3";
-import { dirname, join } from "path";
-import { ensureDir, appendText } from "../core/os/fs.js";
+import { randomUUID } from "crypto";
+import { dirname } from "path";
+import { ensureDir } from "../core/os/fs.js";
 import type { RunEvent } from "./types.js";
-import { TraceEmitter } from "./trace-emitter.js";
-
+import { mapRunEvent } from "./event-mapping.js";
 
 export interface RunLoggerOptions {
   /** Path to the SQLite database file. Required — use resolvePaths().dbPath. */
   dbPath: string;
-  /**
-   * When set, every RunEvent is also appended as a JSON line to
-   * {debugDir}/{sessionId}.jsonl. One file per session, created on first event.
-   */
-  debugDir?: string;
   /**
    * Called when a retrieve_context tool_result error event is logged.
    * Used to route retrieval errors to NoteMetricsLogger.
@@ -21,43 +16,35 @@ export interface RunLoggerOptions {
 }
 
 /**
- * RunLogger — SQLite-backed event store.
+ * RunLogger — unified SQLite event store.
  *
  * Schema:
- *   sessions  — one row per agent session
- *   trace     — one row per RunEvent; run_id is a loose per-prompt correlation
- *               key (no backing table — just groups events within a turn)
- *   (note_hits, synthesis_metrics, context_ratings are in notes.db — NoteMetricsLogger)
- *
- * Session-level events (session_start / session_end) write to trace with run_id = NULL.
- *
- * Debug mode (debugDir set): appends every event as JSONL to
- * {debugDir}/{sessionId}.jsonl for easy inspection.
+ *   sessions — one row per agent session
+ *   trace    — one row per event, structured columns, no redundancy
  */
 export class RunLogger {
   private readonly db: Database.Database;
-  private readonly debugDir: string | undefined;
   private readonly onRetrievalError: RunLoggerOptions["onRetrievalError"];
-  /** Track which session files have been created so we only mkdirSync once. */
-  private readonly debugSessions = new Set<string>();
-  private _traceEmitter: TraceEmitter | null = null;
+
+  /** Per-session monotonic sequence counter. */
+  private readonly seqCounters = new Map<string, number>();
+
+  private insertStmt: Database.Statement | null = null;
 
   constructor(options: RunLoggerOptions | string) {
-    // Support legacy positional string arg for backwards compat
     const opts: RunLoggerOptions = typeof options === "string" ? { dbPath: options } : options;
     const dbPath = opts.dbPath;
-    this.debugDir = opts.debugDir;
     this.onRetrievalError = opts.onRetrievalError;
 
     ensureDir(dirname(dbPath));
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
     this._initSchema();
-
-    if (this.debugDir) {
-      ensureDir(this.debugDir);
-    }
   }
+
+  // =========================================================================
+  // Schema
+  // =========================================================================
 
   private _initSchema(): void {
     this.db.exec(`
@@ -70,98 +57,167 @@ export class RunLogger {
         human_verdict TEXT,
         human_notes   TEXT
       );
-
-      CREATE TABLE IF NOT EXISTS trace (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        run_id     TEXT,
-        session_id TEXT    NOT NULL,
-        type       TEXT    NOT NULL,
-        timestamp  INTEGER NOT NULL,
-        payload    TEXT    NOT NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS trace_run_id ON trace(run_id);
-      CREATE INDEX IF NOT EXISTS trace_session_id ON trace(session_id);
     `);
 
-    // One-time migration: drop the old runs table if it exists from a previous
-    // version of the schema. The sessions + trace tables supersede it.
-    try {
-      const hasRuns = (this.db.prepare(
-        `SELECT name FROM sqlite_master WHERE type='table' AND name='runs'`
-      ).get()) != null;
-      if (hasRuns) {
-        this.db.exec(`DROP TABLE runs`);
-      }
-    } catch {
-      // Ignore — migration is best-effort
+    // Check if the trace table needs to be rebuilt (legacy schema detection).
+    // Legacy schema has a payload column but no event_id column.
+    const needsRebuild = this._traceSchemaNeedsRebuild();
+    if (needsRebuild) {
+      this.db.exec(`DROP TABLE IF EXISTS trace`);
     }
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS trace (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id   TEXT    UNIQUE NOT NULL,
+        session_id TEXT    NOT NULL,
+        run_id     TEXT,
+        seq        INTEGER NOT NULL,
+        ts         INTEGER NOT NULL,
+        type       TEXT    NOT NULL,
+        source     TEXT    NOT NULL,
+        target     TEXT,
+        action     TEXT    NOT NULL,
+        status     TEXT    NOT NULL,
+        phase      TEXT,
+        span_id    TEXT,
+        parent_id  TEXT,
+        data       TEXT,
+        summary    TEXT,
+        error      TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS trace_session_id ON trace(session_id);
+      CREATE INDEX IF NOT EXISTS trace_run_id     ON trace(run_id);
+      CREATE INDEX IF NOT EXISTS trace_event_id   ON trace(event_id);
+      CREATE INDEX IF NOT EXISTS trace_type       ON trace(type);
+      CREATE INDEX IF NOT EXISTS trace_source     ON trace(source);
+      CREATE INDEX IF NOT EXISTS trace_action     ON trace(action);
+      CREATE INDEX IF NOT EXISTS trace_span_id    ON trace(span_id);
+    `);
+
+    // Drop old runs table if it lingers from an even older schema version.
+    try {
+      const hasRuns = this.db.prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='runs'`
+      ).get() != null;
+      if (hasRuns) this.db.exec(`DROP TABLE runs`);
+    } catch { /* best-effort */ }
   }
 
-  /**
-   * Structured trace emitter. Uses the same `trace` table but writes
-   * decomposed source/target/action/status columns with per-run seq counters.
-   * Lazily initialized on first access.
-   */
-  get trace(): TraceEmitter {
-    if (!this._traceEmitter) {
-      this._traceEmitter = new TraceEmitter(this.db);
-    }
-    return this._traceEmitter;
+  /** Detect whether the trace table is the legacy schema (has payload, lacks event_id). */
+  private _traceSchemaNeedsRebuild(): boolean {
+    const exists = this.db.prepare(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='trace'`
+    ).get();
+    if (!exists) return false; // table doesn't exist yet — no rebuild needed
+
+    const columns = this.db.prepare("PRAGMA table_info(trace)").all() as { name: string }[];
+    const names = new Set(columns.map((c) => c.name));
+    // Legacy schema has 'payload' but not 'event_id'
+    return names.has("payload") && !names.has("event_id");
   }
+
+  // =========================================================================
+  // Public API
+  // =========================================================================
 
   logEvent(event: RunEvent): void {
-    if (this.debugDir) this._debugAppend(event);
-
     const sessionId = event.sessionId;
-    const runId = "runId" in event ? event.runId : null;
+    const runId = "runId" in event ? (event.runId as string | undefined) ?? null : null;
 
-    // ── Session lifecycle ──────────────────────────────────────────────────
+    // ── Session lifecycle side effects ─────────────────────────────────────
     if (event.type === "session_start") {
       this._insertSession(sessionId, event.timestamp);
     } else if (event.type === "session_end") {
       this._finalizeSession(sessionId, event.timestamp);
     }
 
-    // ── Per-prompt session counter ─────────────────────────────────────────
     if (event.type === "prompt_received") {
       this._incrementSessionPromptCount(sessionId);
     }
 
-    // Route retrieve_context errors to NoteMetricsLogger via callback.
+    // ── Route retrieval errors to NoteMetricsLogger ───────────────────────
     if (event.type === "tool_result" && event.toolName === "retrieve_context" && event.isError && this.onRetrievalError) {
       const errorPayload = (() => {
-        try {
-          return JSON.stringify(event.toolResult).slice(0, 240);
-        } catch {
-          return String(event.toolResult).slice(0, 240);
-        }
+        try { return JSON.stringify(event.toolResult).slice(0, 240); }
+        catch { return String(event.toolResult).slice(0, 240); }
       })();
       this.onRetrievalError(sessionId, runId, event.timestamp, errorPayload);
     }
 
-    this._insertTrace(runId, sessionId, event.type, event.timestamp, event);
+    // ── Map and write structured trace row ─────────────────────────────────
+    const mapped = mapRunEvent(event);
+    const eventId = randomUUID();
+    const seq = this._nextSeq(sessionId);
+    const dataJson = mapped.data != null ? JSON.stringify(mapped.data) : null;
+
+    this._getInsertStmt().run(
+      eventId,
+      sessionId,
+      runId,
+      seq,
+      event.timestamp,
+      event.type,
+      mapped.source,
+      mapped.target ?? null,
+      mapped.action,
+      mapped.status,
+      mapped.phase ?? null,
+      null, // span_id — set by callers who need correlation
+      null, // parent_id — set by callers who need nesting
+      dataJson,
+      mapped.summary ?? null,
+      mapped.error ?? null,
+    );
   }
 
   /**
-   * Get the trace events for a session, optionally filtered by run_id.
+   * Get trace events for a session, optionally filtered by run_id.
    */
-  getSessionTrace(sessionId: string, runId?: string): Array<{ type: string; timestamp: number; payload: string }> {
+  getSessionTrace(sessionId: string, runId?: string): TraceRow[] {
     if (runId) {
       return this.db
-        .prepare(`SELECT type, timestamp, payload FROM trace WHERE session_id = ? AND run_id = ? ORDER BY timestamp`)
-        .all(sessionId, runId) as Array<{ type: string; timestamp: number; payload: string }>;
+        .prepare(`SELECT * FROM trace WHERE session_id = ? AND run_id = ? ORDER BY seq`)
+        .all(sessionId, runId) as TraceRow[];
     }
     return this.db
-      .prepare(`SELECT type, timestamp, payload FROM trace WHERE session_id = ? ORDER BY timestamp`)
-      .all(sessionId) as Array<{ type: string; timestamp: number; payload: string }>;
+      .prepare(`SELECT * FROM trace WHERE session_id = ? ORDER BY seq`)
+      .all(sessionId) as TraceRow[];
+  }
+
+  /**
+   * Create a new span ID for correlating start/return event pairs.
+   */
+  newSpan(): string {
+    return randomUUID();
   }
 
   close(): void {
     this.db.close();
   }
 
-  // ── Private helpers ────────────────────────────────────────────────────────
+  // =========================================================================
+  // Private helpers
+  // =========================================================================
+
+  private _nextSeq(sessionId: string): number {
+    const current = this.seqCounters.get(sessionId) ?? 0;
+    const next = current + 1;
+    this.seqCounters.set(sessionId, next);
+    return next;
+  }
+
+  private _getInsertStmt(): Database.Statement {
+    if (!this.insertStmt) {
+      this.insertStmt = this.db.prepare(
+        `INSERT INTO trace
+           (event_id, session_id, run_id, seq, ts, type, source, target, action, status, phase, span_id, parent_id, data, summary, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+    }
+    return this.insertStmt;
+  }
 
   private _insertSession(sessionId: string, timestamp: number): void {
     this.db
@@ -183,33 +239,28 @@ export class RunLogger {
       .prepare(`UPDATE sessions SET prompt_count = prompt_count + 1, updated_at = ? WHERE session_id = ?`)
       .run(Date.now(), sessionId);
   }
+}
 
-  private _insertTrace(
-    runId: string | null,
-    sessionId: string,
-    type: string,
-    timestamp: number,
-    event: RunEvent,
-  ): void {
-    this.db
-      .prepare(
-        `INSERT INTO trace (run_id, session_id, type, timestamp, payload)
-         VALUES (?, ?, ?, ?, ?)`
-      )
-      .run(runId, sessionId, type, timestamp, JSON.stringify(event));
-  }
+// ---------------------------------------------------------------------------
+// TraceRow — returned by getSessionTrace()
+// ---------------------------------------------------------------------------
 
-  private _debugAppend(event: RunEvent): void {
-    const sessionId = event.sessionId;
-    const filePath = join(this.debugDir!, `${sessionId}.jsonl`);
-
-    // Write a header comment on first event for this session
-    if (!this.debugSessions.has(sessionId)) {
-      this.debugSessions.add(sessionId);
-      const header = `# session: ${sessionId}  started: ${new Date().toISOString()}\n`;
-      appendText(filePath, header);
-    }
-
-    appendText(filePath, JSON.stringify(event) + "\n");
-  }
+export interface TraceRow {
+  id: number;
+  event_id: string;
+  session_id: string;
+  run_id: string | null;
+  seq: number;
+  ts: number;
+  type: string;
+  source: string;
+  target: string | null;
+  action: string;
+  status: string;
+  phase: string | null;
+  span_id: string | null;
+  parent_id: string | null;
+  data: string | null;
+  summary: string | null;
+  error: string | null;
 }

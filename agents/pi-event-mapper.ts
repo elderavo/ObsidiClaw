@@ -1,9 +1,8 @@
 /**
- * Shared Pi event → RunEvent mapper.
+ * Pi SDK event → RunEvent mapper.
  *
- * Both orchestrator/session.ts (headless path) and extension/factory.ts
- * (Pi TUI path) translate Pi SDK events into RunEvents. This module is
- * the single source of truth for that mapping.
+ * Translates Pi SDK lifecycle events into structured RunEvents for SQLite logging.
+ * Single source of truth for the Pi TUI path (entry/extension.ts).
  */
 
 import type { RunEvent } from "../logger/types.js";
@@ -19,7 +18,7 @@ export function mapPiEventToRunEvent(
 ): RunEvent | null {
   switch (piEvent.type) {
     case "agent_start":
-      return { type: "agent_turn_start", sessionId, runId, timestamp: Date.now() };
+      return { type: "agent_run_start", sessionId, runId, timestamp: Date.now() };
 
     case "agent_end":
       return {

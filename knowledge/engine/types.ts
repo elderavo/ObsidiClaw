@@ -226,5 +226,7 @@ export interface ContextEngineConfig {
 export interface ContextEngineEvent {
   type: string;
   timestamp: number;
+  sessionId?: string;
+  runId?: string;
   [key: string]: unknown;
 }

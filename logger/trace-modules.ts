@@ -48,7 +48,7 @@ export const LOGGER = "logger" as const;
  * Tool module name — dynamic, one per tool invocation.
  * Format: `tool:<name>` (e.g., `tool:bash`, `tool:retrieve_context`).
  */
-export function toolModule(toolName: string): string {
+export function toolModule(toolName: string): `tool:${string}` {
   return `tool:${toolName}`;
 }
 

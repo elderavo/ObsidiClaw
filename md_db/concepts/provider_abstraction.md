@@ -29,13 +29,13 @@ ObsidiClaw's LLM and embedding layers are **provider-agnostic**. The system supp
 
 ## Architecture
 
-### TypeScript Side — `shared/llm-client.ts`
+### TypeScript Side — `core/llm-client.ts`
 
-All TS LLM calls route through `llmChat()`. It reads `getLlmConfig()` from `shared/config.ts`, routes to the right provider API (Ollama `/api/chat` or OpenAI `/v1/chat/completions`), and returns a normalized `ChatResult`.
+All TS LLM calls route through `llmChat()`. It reads `getLlmConfig()` from `core/config.ts`, routes to the right provider API (Ollama `/api/chat` or OpenAI `/v1/chat/completions`), and returns a normalized `ChatResult`.
 
 Throws `ProviderUnreachableError` for network failures (ECONNREFUSED, ETIMEDOUT, etc.) so callers can distinguish "server down" from "bad auth" or "model not found."
 
-`isLlmReachable()` sends a minimal ping through `llmChat()` — used by jobs for early-out checks.
+`isLlmReachable()` sends a minimal ping through `llmChat()` — used by standalone scripts for early-out checks.
 
 ### Python Side — `knowledge_graph/providers.py`
 
@@ -45,14 +45,12 @@ Embedding provider factory. `create_embedding()` reads `OBSIDI_EMBED_*` env vars
 
 ## Consumers
 
-- **Context reviewer** (`context_engine/review/context-reviewer.ts`) — uses `llmChat()` for synthesis
-- **Merge inbox job** (`jobs/scheduled/merge-inbox.ts`) — uses `llmChat()` + `isLlmReachable()` early-out
-- **Summarize code job** (`jobs/scheduled/summarize-code.ts`) — uses `llmChat()` + `isLlmReachable()` early-out
-- **Health check job** (`jobs/scheduled/health-check.ts`) — uses `isLlmReachable()`
-- **Knowledge graph engine** (`knowledge_graph/engine.py`) — uses `providers.py` for embeddings
+- **Context reviewer** (`knowledge/engine/review/context-reviewer.ts`) — uses `llmChat()` for synthesis
+- **Summarize worker** (`automation/jobs/summarize-worker.ts`) — uses `llmChat()` + `isLlmReachable()` early-out
+- **force-summarize script** (`automation/scripts/force-summarize.ts`) — uses `isLlmReachable()` early-out
+- **Knowledge graph engine** (`knowledge/graph/engine.py`) — uses `providers.py` for embeddings
 
 ## Related
 
 - [[graceful_degradation]] — what happens when providers are unavailable
 - [[context_synthesis_pipeline]] — context reviewer uses `llmChat()`
-- [[scheduler_and_cron]] — jobs use `isLlmReachable()` for early-out

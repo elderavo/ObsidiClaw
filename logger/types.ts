@@ -23,24 +23,6 @@ export type RunId = string;
 // Lifecycle stages
 // ---------------------------------------------------------------------------
 
-/**
- * Lifecycle stages within a single prompt round-trip.
- *
- * prompt_received  → prompt arrived
- * context_inject   → context engine running (first prompt only)
- * pi_ready         → pi session created and ready
- * agent_running    → prompt sent to agent, waiting for response
- * done             → round-trip complete
- * error            → round-trip failed
- */
-export type RunStage =
-  | "prompt_received"
-  | "context_inject"
-  | "pi_ready"
-  | "agent_running"
-  | "done"
-  | "error";
-
 // ---------------------------------------------------------------------------
 // Events — emitted at every interface boundary, consumed by RunLogger
 //
@@ -59,20 +41,12 @@ export type RunEvent =
   | { type: "prompt_complete";     sessionId: SessionId; runId: RunId; timestamp: number; durationMs: number }
   | { type: "prompt_error";        sessionId: SessionId; runId: RunId; timestamp: number; error: string }
 
-  // ── Context injection (first prompt only) ────────────────────────────────
-  | { type: "context_inject_start"; sessionId: SessionId; runId: RunId; timestamp: number }
-  | { type: "context_built";        sessionId: SessionId; runId: RunId; timestamp: number; noteCount: number; toolCount: number; retrievalMs: number }
-  | { type: "context_inject_end";   sessionId: SessionId; runId: RunId; timestamp: number }
-
-  // ── Pi session creation (first prompt only) ──────────────────────────────
-  | { type: "pi_session_created";  sessionId: SessionId; runId: RunId; timestamp: number; contextInjected: boolean }
-
   // ── Context retrieval (fired by MCP server via onContextBuilt callback) ──
   | { type: "context_retrieved"; sessionId: SessionId; runId: RunId; timestamp: number; query: string; seedCount: number; expandedCount: number; toolCount: number; retrievalMs: number; rawChars: number; strippedChars: number; estimatedTokens: number; reviewMs?: number; reviewSkipped?: boolean; noteHits?: Array<{ noteId: string; score: number; depth: number; source: string; tier?: string; noteType?: string; symbolKind?: string; edgeLabel?: string }> }
 
   // ── Agent interaction ────────────────────────────────────────────────────
   | { type: "agent_prompt_sent";   sessionId: SessionId; runId: RunId; timestamp: number }
-  | { type: "agent_turn_start";    sessionId: SessionId; runId: RunId; timestamp: number }
+  | { type: "agent_run_start";     sessionId: SessionId; runId: RunId; timestamp: number }
   | { type: "agent_turn_end";      sessionId: SessionId; runId: RunId; timestamp: number }
   | { type: "agent_done";          sessionId: SessionId; runId: RunId; timestamp: number; messageCount: number }
   | { type: "tool_call";           sessionId: SessionId; runId: RunId; timestamp: number; toolName: string; toolCallId?: string; toolArgs?: unknown }
@@ -91,8 +65,9 @@ export type RunEvent =
   | { type: "ce_graph_done";       sessionId: SessionId; runId: RunId; timestamp: number; expandedCount: number; durationMs: number }
   | { type: "ce_review_start";     sessionId: SessionId; runId: RunId; timestamp: number; noteCount: number; avgScore: number }
   | { type: "ce_review_done";      sessionId: SessionId; runId: RunId; timestamp: number; skipped: boolean; skipReason?: string; reviewMs: number; inputChars: number; outputChars?: number }
-  | { type: "ce_reindex_start";    sessionId: SessionId; runId: RunId; timestamp: number }
-  | { type: "ce_reindex_done";     sessionId: SessionId; runId: RunId; timestamp: number; durationMs: number; noteCount: number }
+  | { type: "ce_reindex_start";    sessionId: SessionId; runId: RunId; timestamp: number; path?: string }
+  | { type: "ce_reindex_done";     sessionId: SessionId; runId: RunId; timestamp: number; durationMs: number; noteCount: number; skipped?: boolean }
+  | { type: "ce_subprocess_log";   sessionId: SessionId; runId: RunId; timestamp: number; message: string }
 
   // ── Session review pipeline ──────────────────────────────────────────────
   | { type: "review_started";          sessionId: SessionId; runId: RunId; timestamp: number; trigger: string }

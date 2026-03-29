@@ -1,25 +1,15 @@
 /**
- * ObsidiClaw ExtensionFactory — MCP-backed context injection + retrieve_context tool.
+ * ObsidiClaw ExtensionFactory — Pi TUI entry point.
  *
- * Two modes:
+ * Creates a full ObsidiClawStack (engine, logger, workspaces) and manages its
+ * lifecycle via Pi SDK session hooks.
  *
- * 1. **Standalone / Pi TUI** (no mcpServer provided):
- *    Creates a full ObsidiClawStack (engine, logger, scheduler, runner) and
- *    manages its lifecycle via session_start / session_shutdown. This gives
- *    Pi the same capabilities as the headless orchestrator path.
- *
- * 2. **Orchestrator / headless** (mcpServer provided):
- *    Connects to the caller's MCP server. Caller owns engine lifecycle.
- *    The extension connects/disconnects transport only.
- *
- * Hooks registered in both modes:
- *   - before_agent_start: inject preferences.md + tool reminder
- *   - retrieve_context tool: proxy to MCP retrieve_context
- *
- * Additional hooks in standalone mode:
- *   - Pi event logging (prompt_received, agent_turn_start/end, tool_call/result, etc.)
- *   - Scheduler start/stop
- *   - Session review on shutdown
+ * Hooks registered:
+ *   - session_start: initialize stack, connect MCP transport
+ *   - before_agent_start: inject preferences.md + concepts index + tool reminder
+ *   - agent_start/turn_end/tool_execution_*: structured event logging
+ *   - agent_end: log prompt_complete with durationMs
+ *   - session_shutdown: enqueue session review, shutdown stack
  */
 
 import "dotenv/config";
@@ -27,8 +17,8 @@ import { randomUUID } from "crypto";
 import { join } from "path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { type ExtensionFactory, type ExtensionUIContext } from "@mariozechner/pi-coding-agent";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Text } from "@mariozechner/pi-tui";
 import { createContextEngineMcpServer } from "../knowledge/engine/index.js";
 import { resolvePaths, getEmbedConfig } from "../core/config.js";
@@ -139,15 +129,7 @@ async function showStartupSplash(
 
 export interface ObsidiClawExtensionConfig {
   /**
-   * Already-built MCP server wrapping a ContextEngine (e.g. from OrchestratorSession).
-   * Caller owns engine lifecycle. The extension connects/disconnects transport only.
-   */
-  mcpServer?: McpServer;
-
-  /**
-   * Path to the md_db directory.
-   * Only used when mcpServer is not provided (standalone / Pi TUI path).
-   * Defaults to resolvePaths().mdDbPath.
+   * Path to the md_db directory. Defaults to resolvePaths().mdDbPath.
    */
   mdDbPath?: string;
 
@@ -156,13 +138,6 @@ export interface ObsidiClawExtensionConfig {
    * Defaults to resolvePaths().rootDir (which falls back to process.cwd()).
    */
   rootDir?: string;
-
-  /**
-   * Explicit session ID. When provided, used for review job metadata instead of
-   * generating a random one.
-   */
-  sessionId?: string;
-
 }
 
 // ---------------------------------------------------------------------------
@@ -252,119 +227,105 @@ export function createObsidiClawExtension(
 
     // ── Engine + MCP server setup ────────────────────────────────────────────
 
-    let stack: ObsidiClawStack | undefined;
-    let mcpServer: McpServer;
+    const stack: ObsidiClawStack = createObsidiClawStack({ rootDir: paths.rootDir });
+    _sharedStack = stack;
 
-    if (config.mcpServer) {
-      // Orchestrator path — caller owns everything.
-      mcpServer = config.mcpServer;
-    } else {
-      // Standalone / Pi TUI path — create the full stack.
-      stack = createObsidiClawStack({
-        rootDir: paths.rootDir,
-      });
-      _sharedStack = stack;
+    const mcpServer: McpServer = createContextEngineMcpServer({
+      engine: stack.engine,
+      pruneStorage: stack.noteMetrics.pruneStorage,
+      workspaceRegistry: stack.workspaceRegistry,
+      getRunId: () => toolCtx.currentRunId,
+      onContextBuilt: (pkg) => {
+        const noteHits = pkg.retrievedNotes.map((n) => ({
+          noteId: n.noteId,
+          score: n.score,
+          depth: n.depth ?? 0,
+          source: n.retrievalSource,
+          tier: n.tier,
+          noteType: n.type,
+          symbolKind: n.symbolKind,
+        }));
+        const ts = Date.now();
+        stack.logger.logEvent({
+          type: "context_retrieved",
+          sessionId: stack.sessionId,
+          runId: toolCtx.currentRunId,
+          timestamp: ts,
+          query: pkg.query,
+          seedCount: pkg.seedNoteIds?.length ?? 0,
+          expandedCount: pkg.expandedNoteIds?.length ?? 0,
+          toolCount: pkg.suggestedTools.length,
+          retrievalMs: pkg.retrievalMs,
+          rawChars: pkg.rawChars,
+          strippedChars: pkg.strippedChars,
+          estimatedTokens: pkg.estimatedTokens,
+          reviewMs: pkg.reviewResult?.reviewMs,
+          reviewSkipped: pkg.reviewResult?.skipped,
+          noteHits,
+        } as RunEvent);
+        stack.noteMetrics.logRetrieval({
+          sessionId: stack.sessionId,
+          runId: toolCtx.currentRunId,
+          timestamp: ts,
+          query: pkg.query,
+          seedCount: pkg.seedNoteIds?.length ?? 0,
+          expandedCount: pkg.expandedNoteIds?.length ?? 0,
+          toolCount: pkg.suggestedTools.length,
+          retrievalMs: pkg.retrievalMs,
+          rawChars: pkg.rawChars,
+          strippedChars: pkg.strippedChars,
+          estimatedTokens: pkg.estimatedTokens,
+          noteHits,
+        });
+      },
+      onContextRated: (rating) => {
+        const ts = Date.now();
+        stack.logger.logEvent({
+          type: "context_rated",
+          sessionId: stack.sessionId,
+          runId: toolCtx.currentRunId,
+          timestamp: ts,
+          query: rating.query,
+          score: rating.score,
+          missing: rating.missing,
+          helpful: rating.helpful,
+        } as RunEvent);
+        stack.noteMetrics.logRating({
+          sessionId: stack.sessionId,
+          runId: toolCtx.currentRunId,
+          timestamp: ts,
+          query: rating.query,
+          score: rating.score,
+          missing: rating.missing,
+          helpful: rating.helpful,
+        });
+      },
+      onBackgroundError: (context, err) => {
+        stack.logger.logEvent({
+          type: "diagnostic",
+          sessionId: stack.sessionId,
+          runId: toolCtx.currentRunId,
+          timestamp: Date.now(),
+          module: "mcp_server",
+          level: "error",
+          message: `${context}: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      },
+    });
 
-      const sessionId = stack.sessionId;
-
-      mcpServer = createContextEngineMcpServer({
-        engine: stack.engine,
-        pruneStorage: stack.noteMetrics.pruneStorage,
-        workspaceRegistry: stack.workspaceRegistry,
-        onContextBuilt: (pkg) => {
-          const noteHits = pkg.retrievedNotes.map((n) => ({
-            noteId: n.noteId,
-            score: n.score,
-            depth: n.depth ?? 0,
-            source: n.retrievalSource,
-            tier: n.tier,
-            noteType: n.type,
-            symbolKind: n.symbolKind,
-          }));
-          const ts = Date.now();
-          stack!.logger.logEvent({
-            type: "context_retrieved",
-            sessionId,
-            runId: toolCtx.currentRunId,
-            timestamp: ts,
-            query: pkg.query,
-            seedCount: pkg.seedNoteIds?.length ?? 0,
-            expandedCount: pkg.expandedNoteIds?.length ?? 0,
-            toolCount: pkg.suggestedTools.length,
-            retrievalMs: pkg.retrievalMs,
-            rawChars: pkg.rawChars,
-            strippedChars: pkg.strippedChars,
-            estimatedTokens: pkg.estimatedTokens,
-            reviewMs: pkg.reviewResult?.reviewMs,
-            reviewSkipped: pkg.reviewResult?.skipped,
-            noteHits,
-          } as RunEvent);
-          stack!.noteMetrics.logRetrieval({
-            sessionId,
-            runId: toolCtx.currentRunId,
-            timestamp: ts,
-            query: pkg.query,
-            seedCount: pkg.seedNoteIds?.length ?? 0,
-            expandedCount: pkg.expandedNoteIds?.length ?? 0,
-            toolCount: pkg.suggestedTools.length,
-            retrievalMs: pkg.retrievalMs,
-            rawChars: pkg.rawChars,
-            strippedChars: pkg.strippedChars,
-            estimatedTokens: pkg.estimatedTokens,
-            noteHits,
-          });
-        },
-        onContextRated: (rating) => {
-          const ts = Date.now();
-          stack!.logger.logEvent({
-            type: "context_rated",
-            sessionId,
-            runId: toolCtx.currentRunId,
-            timestamp: ts,
-            query: rating.query,
-            score: rating.score,
-            missing: rating.missing,
-            helpful: rating.helpful,
-          } as RunEvent);
-          stack!.noteMetrics.logRating({
-            sessionId,
-            runId: toolCtx.currentRunId,
-            timestamp: ts,
-            query: rating.query,
-            score: rating.score,
-            missing: rating.missing,
-            helpful: rating.helpful,
-          });
-        },
-        onBackgroundError: (context, err) => {
-          stack!.logger.logEvent({
-            type: "diagnostic",
-            sessionId,
-            runId: toolCtx.currentRunId,
-            timestamp: Date.now(),
-            module: "mcp_server",
-            level: "error",
-            message: `${context}: ${err instanceof Error ? err.message : String(err)}`,
-          });
-        },
-      });
-    }
-
-    // ── Index progress bar (standalone mode only) ────────────────────────────
+    // ── Index progress bar ───────────────────────────────────────────────────
     // Python emits index_progress notifications during incremental_update.
     // We render a status bar entry so the user sees progress on large workspaces.
-    if (stack) {
-      stack.engine.on("indexProgress", (done: number, total: number) => {
-        if (!latestCtxUI) return;
-        if (done >= total) {
-          latestCtxUI.setStatus("indexing", undefined);
-        } else {
-          const filled = Math.round((done / total) * 20);
-          const bar = "█".repeat(filled) + "░".repeat(20 - filled);
-          latestCtxUI.setStatus("indexing", `Indexing ${done}/${total} [${bar}]`);
-        }
-      });
-    }
+    stack.engine.on("indexProgress", (done: number, total: number) => {
+      if (!latestCtxUI) return;
+      if (done >= total) {
+        latestCtxUI.setStatus("indexing", undefined);
+      } else {
+        const filled = Math.round((done / total) * 20);
+        const bar = "█".repeat(filled) + "░".repeat(20 - filled);
+        latestCtxUI.setStatus("indexing", `Indexing ${done}/${total} [${bar}]`);
+      }
+    });
 
     // Track latest transcript (updated on agent_end) for review hook
     let latestMessages: unknown[] = [];
@@ -394,37 +355,35 @@ export function createObsidiClawExtension(
       await mcpServer.connect(serverTransport);
       await client.connect(clientTransport);
 
-      if (stack) {
-        try {
-          await stack.initialize();
+      try {
+        await stack.initialize();
 
-          // Engine started but without embeddings — keyword + graph still work
-          if (stack.engine.isDegraded) {
-            toolCtx.engineState = "degraded";
-            const reason = stack.engine.degradedReasonMessage || "embedding provider unavailable";
-            stack.logger.logEvent({ type: "diagnostic", sessionId: stack.sessionId, runId: "", timestamp: Date.now(), module: "extension", level: "warn", message: `context engine degraded: ${reason}` });
-            if (ctx.hasUI) {
-              ctx.ui.notify(
-                `Context engine running in keyword-only mode: ${reason}`,
-                "warning",
-              );
-            }
-          }
-        } catch (err) {
-          toolCtx.engineState = "unavailable";
-          const reason = err instanceof Error ? err.message : String(err);
-          stack.logger.logEvent({ type: "diagnostic", sessionId: stack.sessionId, runId: "", timestamp: Date.now(), module: "extension", level: "error", message: `context engine failed to initialize: ${reason}` });
+        // Engine started but without embeddings — keyword + graph still work
+        if (stack.engine.isDegraded) {
+          toolCtx.engineState = "degraded";
+          const reason = stack.engine.degradedReasonMessage || "embedding provider unavailable";
+          stack.logger.logEvent({ type: "diagnostic", sessionId: stack.sessionId, runId: "", timestamp: Date.now(), module: "extension", level: "warn", message: `context engine degraded: ${reason}` });
           if (ctx.hasUI) {
             ctx.ui.notify(
-              `Context engine unavailable: ${reason}`,
+              `Context engine running in keyword-only mode: ${reason}`,
               "warning",
             );
           }
         }
+      } catch (err) {
+        toolCtx.engineState = "unavailable";
+        const reason = err instanceof Error ? err.message : String(err);
+        stack.logger.logEvent({ type: "diagnostic", sessionId: stack.sessionId, runId: "", timestamp: Date.now(), module: "extension", level: "error", message: `context engine failed to initialize: ${reason}` });
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            `Context engine unavailable: ${reason}`,
+            "warning",
+          );
+        }
       }
 
       // Warn when embed host falls back to default (easy misconfiguration)
-      if (stack && ctx.hasUI) {
+      if (ctx.hasUI) {
         const embedCfg = getEmbedConfig();
         if (embedCfg.provider !== "local" && !process.env["OBSIDI_EMBED_HOST"]) {
           ctx.ui.notify(
@@ -435,7 +394,7 @@ export function createObsidiClawExtension(
       }
 
       // ── Window title + startup splash ─────────────────────────────────────
-      if (stack && ctx.hasUI) {
+      if (ctx.hasUI) {
         const stats = await stack.engine.getGraphStats().catch(() => ({
           noteCount: 0, edgeCount: 0, indexLoaded: false,
         }));
@@ -445,13 +404,11 @@ export function createObsidiClawExtension(
         showStartupSplash(ctx.ui, stats, activeWs).catch(() => {});
       }
 
-      if (stack) {
-        stack.logger.logEvent({
-          type: "session_start",
-          sessionId: stack.sessionId,
-          timestamp: Date.now(),
-        } as RunEvent);
-      }
+      stack.logger.logEvent({
+        type: "session_start",
+        sessionId: stack.sessionId,
+        timestamp: Date.now(),
+      } as RunEvent);
     });
 
     // ── Tool registrations (extracted to entry/tools/) ──────────────────────
@@ -467,8 +424,7 @@ export function createObsidiClawExtension(
         if (!ctx.hasUI) return;
 
         // Load workspace registry
-        const registry = stack?.workspaceRegistry;
-        const workspaces = registry?.list().filter((w) => w.active) ?? [];
+        const workspaces = stack.workspaceRegistry.list().filter((w) => w.active);
 
         const MAX_LISTED = 4;
         const listed = workspaces.slice(0, MAX_LISTED);
@@ -489,11 +445,6 @@ export function createObsidiClawExtension(
             "e.g. C:\\Projects\\MyApp",
           );
           if (!sourceDir) return;
-
-          if (!stack) {
-            ctx.ui.notify("Stack not available — cannot register workspace", "error");
-            return;
-          }
 
           ctx.ui.setStatus("workspace", "registering…");
           try {
@@ -521,20 +472,21 @@ export function createObsidiClawExtension(
       },
     });
 
+    // Track prompt start time for prompt_complete durationMs
+    let promptStartTs = 0;
+
     // ── before_agent_start: inject preferences + standing tool reminder ─────
     // Calls MCP get_preferences so the engine stays behind the MCP boundary.
     pi.on("before_agent_start", async (event, ctx) => {
-      // Generate new runId for this prompt (standalone mode logging)
-      if (stack) {
-        toolCtx.currentRunId = randomUUID();
-        stack.logger.logEvent({
-          type: "prompt_received",
-          sessionId: stack.sessionId,
-          runId: toolCtx.currentRunId,
-          timestamp: Date.now(),
-          text: "(pi-tui-prompt)",
-        } as RunEvent);
-      }
+      toolCtx.currentRunId = randomUUID();
+      promptStartTs = Date.now();
+      stack.logger.logEvent({
+        type: "prompt_received",
+        sessionId: stack.sessionId,
+        runId: toolCtx.currentRunId,
+        timestamp: promptStartTs,
+        text: "(pi-tui-prompt)",
+      } as RunEvent);
 
       // Fast path: engine is completely unavailable — inject warning, skip MCP calls
       if (toolCtx.engineState === "unavailable") {
@@ -587,37 +539,39 @@ export function createObsidiClawExtension(
       }
     });
 
-    // ── Pi event logging (standalone mode only) ──────────────────────────────
-    // Uses shared mapper from agents/pi-event-mapper.ts.
-    if (stack) {
-      const s = stack;
-      const logPiEvent = (event: unknown) => {
-        const mapped = mapPiEventToRunEvent(
-          event as { type: string; [key: string]: unknown },
-          s.sessionId,
-          toolCtx.currentRunId,
-        );
-        if (mapped) s.logger.logEvent(mapped);
-      };
-      pi.on("agent_start", logPiEvent);
-      pi.on("turn_end", logPiEvent);
-      pi.on("tool_execution_start", logPiEvent);
-      pi.on("tool_execution_end", logPiEvent);
-    }
+    // ── Pi event logging ──────────────────────────────────────────────────────
+    const logPiEvent = (event: unknown) => {
+      const mapped = mapPiEventToRunEvent(
+        event as { type: string; [key: string]: unknown },
+        stack.sessionId,
+        toolCtx.currentRunId,
+      );
+      if (mapped) stack.logger.logEvent(mapped);
+    };
+    pi.on("agent_start", logPiEvent);
+    pi.on("turn_end", logPiEvent);
+    pi.on("tool_execution_start", logPiEvent);
+    pi.on("tool_execution_end", logPiEvent);
 
-    // ── agent_end: capture transcript + log event ────────────────────────────
+    // ── agent_end: capture transcript, log agent_done + prompt_complete ───────
     pi.on("agent_end", (event) => {
       const messages = (event as unknown as { messages?: unknown[] })?.messages;
       if (Array.isArray(messages)) latestMessages = messages;
 
-      if (stack) {
-        const mapped = mapPiEventToRunEvent(
-          event as unknown as { type: string; [key: string]: unknown },
-          stack.sessionId,
-          toolCtx.currentRunId,
-        );
-        if (mapped) stack.logger.logEvent(mapped);
-      }
+      const mapped = mapPiEventToRunEvent(
+        event as unknown as { type: string; [key: string]: unknown },
+        stack.sessionId,
+        toolCtx.currentRunId,
+      );
+      if (mapped) stack.logger.logEvent(mapped);
+
+      stack.logger.logEvent({
+        type: "prompt_complete",
+        sessionId: stack.sessionId,
+        runId: toolCtx.currentRunId,
+        timestamp: Date.now(),
+        durationMs: Date.now() - promptStartTs,
+      } as RunEvent);
     });
 
     // ── session_shutdown ─────────────────────────────────────────────────────
@@ -625,56 +579,48 @@ export function createObsidiClawExtension(
       latestCtxUI?.setStatus("indexing", undefined);
       latestCtxUI = undefined;
       try {
-        // Only queue review when this extension owns the stack (Pi TUI path).
-        if (stack) {
-          const jobId = randomUUID();
-          const sessionId = config.sessionId ?? stack.sessionId;
-          const workDir = join(paths.rootDir, ".obsidi-claw", "reviews");
-          const specPath = join(workDir, `${jobId}.json`);
-          const resultPath = join(workDir, `${jobId}.result.json`);
-          const logPath = join(workDir, `${jobId}.log`);
-          const scriptPath = join(paths.rootDir, "dist", "automation", "scripts", "run_session_review.js");
+        const jobId = randomUUID();
+        const workDir = join(paths.rootDir, ".obsidi-claw", "reviews");
+        const specPath = join(workDir, `${jobId}.json`);
+        const resultPath = join(workDir, `${jobId}.result.json`);
+        const logPath = join(workDir, `${jobId}.log`);
+        const scriptPath = join(paths.rootDir, "dist", "automation", "scripts", "run_session_review.js");
 
-          ensureDir(workDir);
+        ensureDir(workDir);
 
-          const spec = {
-            type: "review",
-            jobId,
-            sessionId,
-            rootDir: paths.rootDir,
-            trigger: "session_end",
-            messages: latestMessages,
-            compactionMeta: undefined,
-            mdDbPath,
-            resultPath,
-            logPath,
-            createdAt: Date.now(),
-          };
+        const spec = {
+          type: "review",
+          jobId,
+          sessionId: stack.sessionId,
+          rootDir: paths.rootDir,
+          trigger: "session_end",
+          messages: latestMessages,
+          compactionMeta: undefined,
+          mdDbPath,
+          resultPath,
+          logPath,
+          createdAt: Date.now(),
+        };
 
-          writeText(specPath, JSON.stringify(spec, null, 2));
+        writeText(specPath, JSON.stringify(spec, null, 2));
 
-          const child = spawnProcess(getExecPath(), [scriptPath, specPath], {
-            detached: true,
-            stdio: "ignore",
-          });
-          child.unref();
-        }
+        const child = spawnProcess(getExecPath(), [scriptPath, specPath], {
+          detached: true,
+          stdio: "ignore",
+        });
+        child.unref();
       } catch (err) {
-        if (stack) {
-          stack.logger.logEvent({ type: "diagnostic", sessionId: stack.sessionId, runId: toolCtx.currentRunId, timestamp: Date.now(), module: "extension", level: "error", message: `session_review enqueue failed: ${err instanceof Error ? err.message : String(err)}` } as RunEvent);
-        }
+        stack.logger.logEvent({ type: "diagnostic", sessionId: stack.sessionId, runId: toolCtx.currentRunId, timestamp: Date.now(), module: "extension", level: "error", message: `session_review enqueue failed: ${err instanceof Error ? err.message : String(err)}` } as RunEvent);
       } finally {
         void client.close();
         void mcpServer.close();
-        if (stack) {
-          stack.logger.logEvent({
-            type: "session_end",
-            sessionId: stack.sessionId,
-            timestamp: Date.now(),
-          } as RunEvent);
-          await stack.shutdown();
-          _sharedStack = undefined;
-        }
+        stack.logger.logEvent({
+          type: "session_end",
+          sessionId: stack.sessionId,
+          timestamp: Date.now(),
+        } as RunEvent);
+        await stack.shutdown();
+        _sharedStack = undefined;
       }
     });
   };

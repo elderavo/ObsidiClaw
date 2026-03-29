@@ -179,12 +179,12 @@ export class ContextEngine extends EventEmitter {
    * Build a ContextPackage for the given prompt.
    * Sends `retrieve` RPC → formats context in TS → runs reviewer in TS.
    */
-  async build(prompt: string, workspace?: string): Promise<ContextPackage> {
+  async build(prompt: string, workspace?: string, runId?: string): Promise<ContextPackage> {
     this.ensureInitialized();
 
     const t0 = Date.now();
 
-    this.debug({ type: "ce_retrieval_start", timestamp: t0, query: prompt.slice(0, 200), topK: this.config.topK });
+    this.debug({ type: "ce_retrieval_start", timestamp: t0, query: prompt.slice(0, 200), topK: this.config.topK, runId });
 
     const tVector = Date.now();
     const rpcResult = await this.rpc("retrieve", {
@@ -196,12 +196,12 @@ export class ContextEngine extends EventEmitter {
     const seedNotes = rpcResult.seed_notes.map(rpcNoteToRetrievedNote);
     const expandedNotes = rpcResult.expanded_notes.map(rpcNoteToRetrievedNote);
 
-    this.debug({ type: "ce_vector_done", timestamp: Date.now(), seedCount: seedNotes.length, durationMs: Date.now() - tVector });
+    this.debug({ type: "ce_vector_done", timestamp: Date.now(), seedCount: seedNotes.length, durationMs: Date.now() - tVector, runId });
 
     const tGraph = Date.now();
     const allNotes = [...seedNotes, ...expandedNotes].sort((a, b) => b.score - a.score);
 
-    this.debug({ type: "ce_graph_done", timestamp: Date.now(), expandedCount: expandedNotes.length, durationMs: Date.now() - tGraph });
+    this.debug({ type: "ce_graph_done", timestamp: Date.now(), expandedCount: expandedNotes.length, durationMs: Date.now() - tGraph, runId });
 
     // ── Format raw context ──────────────────────────────────────────────
     const suggestedTools = allNotes
@@ -220,7 +220,7 @@ export class ContextEngine extends EventEmitter {
 
     if (this.reviewer) {
       const avgScore = allNotes.length > 0 ? allNotes.reduce((sum, n) => sum + n.score, 0) / allNotes.length : 0;
-      this.debug({ type: "ce_review_start", timestamp: Date.now(), noteCount: allNotes.length, avgScore });
+      this.debug({ type: "ce_review_start", timestamp: Date.now(), noteCount: allNotes.length, avgScore, runId });
 
       const review = await this.reviewer.review(prompt, allNotes, rawFormattedContext);
       reviewResult = {
@@ -237,6 +237,7 @@ export class ContextEngine extends EventEmitter {
         reviewMs: review.reviewMs,
         inputChars: rawFormattedContext.length,
         outputChars: review.synthesizedContext?.length,
+        runId,
       });
 
       if (!review.skipped && review.synthesizedContext) {

@@ -32,6 +32,8 @@ export interface McpServerOptions {
   workspaceRegistry?: WorkspaceRegistry;
   /** Called when a fire-and-forget background operation fails (e.g. incremental reindex). Routes to runs.db. */
   onBackgroundError?: (context: string, err: unknown) => void;
+  /** Returns the active run ID for the current tool call, if known. Used to link CE trace events to their run. */
+  getRunId?: () => string | undefined;
 }
 
 export function createContextEngineMcpServer(opts: McpServerOptions): McpServer {
@@ -39,7 +41,7 @@ export function createContextEngineMcpServer(opts: McpServerOptions): McpServer 
 }
 
 function _createMcpServer(opts: McpServerOptions): McpServer {
-  const { engine, onContextBuilt, onContextRated, pruneStorage, workspaceRegistry, onBackgroundError } = opts;
+  const { engine, onContextBuilt, onContextRated, pruneStorage, workspaceRegistry, onBackgroundError, getRunId } = opts;
   const server = new McpServer({ name: "obsidi-claw-context", version: "1.0.0" });
 
   // ── retrieve_context ──────────────────────────────────────────────────────
@@ -60,7 +62,7 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
       },
     },
     async ({ query, workspace }) => {
-      const pkg = await engine.build(query, workspace);
+      const pkg = await engine.build(query, workspace, getRunId?.());
       onContextBuilt?.(pkg);
       const budget = DEFAULT_MAX_CHARS;
       let text = pkg.formattedContext.length <= budget

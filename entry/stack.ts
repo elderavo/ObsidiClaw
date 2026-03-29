@@ -10,7 +10,7 @@
  *   - entry/extension.ts  (Pi TUI path)
  */
 
-import { join, relative, resolve } from "path";
+import { join, relative } from "path";
 import { randomUUID } from "crypto";
 
 import chokidar, { type FSWatcher } from "chokidar";
@@ -31,11 +31,6 @@ import { WorkspaceRegistry } from "../automation/workspaces/workspace-registry.j
 export interface StackOptions {
   /** Project root directory. Falls back to process.cwd(). */
   rootDir?: string;
-  /**
-   * Enable debug JSONL. Default: ON (set OBSIDI_CLAW_DEBUG=0 to disable).
-   * When true, all events are also written to .obsidi-claw/debug/{sessionId}.jsonl.
-   */
-  debug?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,21 +59,11 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
   const paths = resolvePaths(opts.rootDir);
   const sessionId = randomUUID();
 
-  // ── Debug mode ──────────────────────────────────────────────────────────
-  const debugExplicit = opts.debug;
-  const debugFromEnv = !["0", "false"].includes(
-    (process.env["OBSIDI_CLAW_DEBUG"] ?? "").toLowerCase(),
-  );
-  const debugEnabled = debugExplicit ?? debugFromEnv;
-
   // ── RunLogger ───────────────────────────────────────────────────────────
   const logger = new RunLogger({
     dbPath: paths.dbPath,
-    ...(debugEnabled
-      ? { debugDir: resolve(paths.rootDir, ".obsidi-claw/debug") }
-      : {}),
-    onRetrievalError: (sessionId, runId, timestamp, errorPayload) => {
-      noteMetrics.logRetrievalError({ sessionId, runId: runId ?? undefined, timestamp, errorPayload });
+    onRetrievalError: (sid, rid, timestamp, errorPayload) => {
+      noteMetrics.logRetrievalError({ sessionId: sid, runId: rid ?? undefined, timestamp, errorPayload });
     },
   });
 
@@ -94,8 +79,8 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     onDebug: (event) => {
       logger.logEvent({
         ...event,
-        sessionId: (event as Record<string, unknown>)["sessionId"] as string ?? sessionId,
-        runId: (event as Record<string, unknown>)["runId"] as string ?? "",
+        sessionId: event.sessionId ?? sessionId,
+        runId: event.runId ?? "",
       } as RunEvent);
     },
   });

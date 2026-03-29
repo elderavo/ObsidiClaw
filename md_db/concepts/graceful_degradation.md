@@ -65,15 +65,13 @@ Scores are normalized so the best match = 1.0. Graph expansion still runs on top
 2. Keyword retrieval → keyword seeds + graph expansion
 ```
 
-## Job Behavior When Provider Unavailable
+## Standalone Script Behavior When Provider Unavailable
 
-| Job | Behavior |
+| Script | Behavior |
 |---|---|
-| `reindex-md-db` | Rebuilds graph + keyword index; skips vector rebuild |
-| `normalize-md-db` | Unaffected (pure file I/O) |
-| `merge-preferences-inbox` | `isLlmReachable()` early-out; inbox items deferred to next run |
-| `summarize-code` | `isLlmReachable()` early-out; stale summaries wait for next run |
-| `health-check` | Reports "LLM provider unreachable" as an issue |
+| `mirror-codebase.ts/py` | Unaffected (pure file I/O) |
+| `force-summarize.ts` | `isLlmReachable()` early-out; stale summaries wait for next run |
+| Summarize worker (in-runtime) | `isLlmReachable()` early-out; re-triggered next time source file changes |
 
 ## TS-Side Awareness
 
