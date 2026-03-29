@@ -3,7 +3,7 @@
  *
  * Consolidates text extraction from MCP results and message content,
  * previously duplicated across extension/factory.ts, orchestrator/session.ts,
- * and shared/agents/subagent-runner.ts.
+ * and agent session handling.
  */
 
 /**

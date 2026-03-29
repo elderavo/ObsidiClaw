@@ -2,13 +2,12 @@
  * ObsidiClawStack — shared infrastructure factory.
  *
  * Creates and manages the core runtime components (ContextEngine, RunLogger,
- * SubagentRunner) that all entry points need. Each process creates its own
- * stack instance; SQLite WAL mode handles concurrent access.
+ * NoteMetricsLogger, WorkspaceRegistry) that all entry points need. Each
+ * process creates its own stack instance; SQLite WAL mode handles concurrent
+ * access.
  *
  * Consumers:
- *   - extension/factory.ts   (Pi TUI path)
- *   - orchestrator/run.ts    (headless/scripting path)
- *   - gateway/*              (future: Telegram, etc.)
+ *   - entry/extension.ts  (Pi TUI path)
  */
 
 import { join, relative, resolve } from "path";
@@ -18,9 +17,8 @@ import chokidar, { type FSWatcher } from "chokidar";
 import { RunLogger } from "../logger/run-logger.js";
 import { NoteMetricsLogger } from "../logger/note-metrics.js";
 import { ContextEngine } from "../knowledge/engine/context-engine.js";
-import { SubagentRunner } from "../agents/subagent/subagent-runner.js";
 import { resolvePaths, type ObsidiClawPaths } from "../core/config.js";
-import type { RunEvent } from "../agents/orchestrator/types.js";
+import type { RunEvent } from "../logger/types.js";
 import { startMdDbLintWatcher } from "../automation/jobs/watchers/md-db-lint-watcher.js";
 import { runMirrorTs } from "../automation/scripts/mirror-codebase.js";
 import { runMirrorPy } from "../automation/scripts/mirror-codebase-py.js";
@@ -48,7 +46,6 @@ export interface ObsidiClawStack {
   readonly engine: ContextEngine;
   readonly logger: RunLogger;
   readonly noteMetrics: NoteMetricsLogger;
-  readonly runner: SubagentRunner;
   readonly sessionId: string;
   readonly paths: ObsidiClawPaths;
   readonly workspaceRegistry: WorkspaceRegistry;
@@ -108,13 +105,6 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
 
   // ── md_db reindex watcher (incremental update on change) ────────────────
   let reindexWatcher: FSWatcher | undefined;
-
-  // ── SubagentRunner ──────────────────────────────────────────────────────
-  const runner = new SubagentRunner({
-    dbPath: paths.dbPath,
-    contextEngine: engine,
-    noteMetrics,
-  });
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
@@ -194,7 +184,6 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     engine,
     logger,
     noteMetrics,
-    runner,
     sessionId,
     paths,
     workspaceRegistry,
@@ -236,14 +225,12 @@ function startMdDbReindexWatcher(mdDbPath: string, engine: ContextEngine): FSWat
     pendingChanged.clear();
     pendingDeleted.clear();
 
-    // Don't send files that are in both changed and deleted — only delete
     const changedFiltered = changed.filter((p) => !deleted.includes(p));
-
     if (changedFiltered.length === 0 && deleted.length === 0) return;
 
     try {
       await engine.incrementalUpdate(changedFiltered, deleted);
-    } catch (err) {
+    } catch {
       // Engine might not be initialized yet or subprocess crashed — swallow
     }
   }
@@ -258,7 +245,7 @@ function startMdDbReindexWatcher(mdDbPath: string, engine: ContextEngine): FSWat
     if (!absPath.endsWith(".md")) return;
     const rel = toRelPath(absPath);
     pendingChanged.add(rel);
-    pendingDeleted.delete(rel); // un-delete if re-created
+    pendingDeleted.delete(rel);
     scheduleFlush();
   }
 
@@ -266,7 +253,7 @@ function startMdDbReindexWatcher(mdDbPath: string, engine: ContextEngine): FSWat
     if (!absPath.endsWith(".md")) return;
     const rel = toRelPath(absPath);
     pendingDeleted.add(rel);
-    pendingChanged.delete(rel); // don't try to update a deleted file
+    pendingChanged.delete(rel);
     scheduleFlush();
   }
 

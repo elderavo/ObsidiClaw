@@ -6,7 +6,7 @@
  * the single source of truth for that mapping.
  */
 
-import type { RunEvent } from "./orchestrator/types.js";
+import type { RunEvent } from "../logger/types.js";
 
 /**
  * Map a Pi SDK event to a RunEvent, or return null if the event

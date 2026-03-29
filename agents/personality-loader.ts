@@ -20,10 +20,10 @@
  */
 
 import { join } from "path";
-import { readText, fileExists, listDir } from "../../core/os/fs.js";
-import { parseFrontmatter } from "../../knowledge/markdown/frontmatter.js";
-import { getLlmConfig } from "../../core/config.js";
-import type { ChatOptions } from "../../core/llm-client.js";
+import { readText, fileExists, listDir } from "../core/os/fs.js";
+import { parseFrontmatter } from "../knowledge/markdown/frontmatter.js";
+import { getLlmConfig } from "../core/config.js";
+import type { ChatOptions } from "../core/llm-client.js";
 import type { PersonalityConfig } from "./types.js";
 
 // ---------------------------------------------------------------------------

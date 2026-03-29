@@ -103,44 +103,6 @@ export interface ContextPackage {
 }
 
 // ---------------------------------------------------------------------------
-// SubagentInput / SubagentPackage — input and output of buildSubagentPackage()
-// ---------------------------------------------------------------------------
-
-export interface SubagentInput {
-  /** Top-level task description passed to the subagent. */
-  prompt: string;
-
-  /** Detailed implementation plan produced by the main agent. */
-  plan: string;
-
-  /** Unambiguous, measurable criteria for task completion. */
-  successCriteria: string;
-
-  /** Optional personality name (loads from agents/subagent/personalities/). */
-  personality?: string;
-}
-
-export interface SubagentPackage {
-  /** Original input from the main agent. */
-  input: SubagentInput;
-
-  /** RAG result retrieved against the plan. */
-  contextPackage: ContextPackage;
-
-  /**
-   * Ready-to-inject system prompt for the subagent session.
-   * Combines: personality + task + plan + retrieved context + success criteria.
-   */
-  formattedSystemPrompt: string;
-
-  /** Resolved personality config (if a personality was specified). */
-  personalityConfig?: import("../../agents/subagent/types.js").PersonalityConfig;
-
-  /** Unix timestamp (ms) when the package was built. */
-  builtAt: number;
-}
-
-// ---------------------------------------------------------------------------
 // PathResult — graph path retrieval result
 // ---------------------------------------------------------------------------
 

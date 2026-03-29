@@ -52,7 +52,7 @@ export interface SubagentSpec {
   /** Measurable success criteria. */
   successCriteria: string;
 
-  /** Personality name to use (loads from agents/subagent/personalities/). */
+  /** Personality name to use (loads from agents/personalities/). */
   personality?: string;
 
   /** Extra context from caller (not from RAG). */

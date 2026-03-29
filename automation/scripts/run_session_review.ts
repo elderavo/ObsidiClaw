@@ -20,7 +20,7 @@ import { fileURLToPath } from "url";
 import axios from "axios";
 
 import { getOllamaConfig, resolvePaths } from "../../core/config.js";
-import { loadPersonality } from "../../agents/subagent/personality-loader.js";
+import { loadPersonality } from "../../agents/personality-loader.js";
 import { DETACHED_SESSION_REVIEW_SYSTEM_PROMPT } from "../../agents/prompts.js";
 import { readText, writeText, ensureDir, appendText, fileExists } from "../../core/os/fs.js";
 import { exitProcess } from "../../core/os/process.js";

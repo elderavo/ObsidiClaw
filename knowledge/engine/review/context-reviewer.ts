@@ -16,9 +16,9 @@
  */
 
 import { llmChat } from "../../../core/llm-client.js";
-import { loadPersonality, resolvePersonalityChatOptions } from "../../../agents/subagent/personality-loader.js";
+import { loadPersonality, resolvePersonalityChatOptions } from "../../../agents/personality-loader.js";
 import { CONTEXT_REVIEW_FALLBACK_SYSTEM_PROMPT } from "../../../agents/prompts.js";
-import type { PersonalityConfig } from "../../../agents/subagent/types.js";
+import type { PersonalityConfig } from "../../../agents/types.js";
 import type { RetrievedNote } from "../types.js";
 
 // ---------------------------------------------------------------------------

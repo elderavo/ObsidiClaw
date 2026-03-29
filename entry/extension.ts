@@ -39,7 +39,7 @@ import { createObsidiClawStack, type ObsidiClawStack } from "./stack.js";
 import { mapPiEventToRunEvent } from "../agents/pi-event-mapper.js";
 import { buildDirectoryTree, stripDirectoryBlock } from "../automation/scripts/update-directory-tree.js";
 import { TOOL_REMINDER, ENGINE_UNAVAILABLE_WARNING } from "../agents/prompts.js";
-import type { RunEvent } from "../agents/orchestrator/types.js";
+import type { RunEvent } from "../logger/types.js";
 import type { ToolContext } from "./tools/types.js";
 import { registerRetrieveContextTool } from "./tools/retrieve-context.js";
 import { registerRateContextTool } from "./tools/rate-context.js";
@@ -48,17 +48,13 @@ import { registerFindPathTool } from "./tools/find-path.js";
 import type { WorkspaceEntry } from "../automation/workspaces/workspace-registry.js";
 
 // ---------------------------------------------------------------------------
-// Shared state — lets other extensions (subagent.ts) reuse the stack's engine
-// and runner instead of creating duplicates.
+// Shared state — lets other extensions reuse the stack's engine.
 // ---------------------------------------------------------------------------
 
 let _sharedStack: ObsidiClawStack | undefined;
 
 /** Engine from the standalone stack (undefined in orchestrator mode or before init). */
 export function getSharedEngine() { return _sharedStack?.engine; }
-
-/** SubagentRunner from the standalone stack. */
-export function getSharedRunner() { return _sharedStack?.runner; }
 
 
 // ---------------------------------------------------------------------------
@@ -81,8 +77,8 @@ async function showStartupSplash(
       const W = 52; // inner content width (border chars excluded from visible measure)
 
       const engineStatus = stats.indexLoaded
-        ? theme.fg(theme.success, "● OK")
-        : theme.fg(theme.warning, "● degraded (keyword-only)");
+        ? theme.fg("success", "● OK")
+        : theme.fg("warning", "● degraded (keyword-only)");
 
       const wsLines =
         activeWs.length === 0
@@ -90,32 +86,32 @@ async function showStartupSplash(
           : activeWs.map((w) => `  ${w.name}  (${w.mode}, ${w.languages.join("+")})`);
 
       const pad = (s: string, n: number) => s + " ".repeat(Math.max(0, n - visibleLen(s)));
-      const border = theme.fg(theme.border, "│");
+      const border = theme.fg("border", "│");
       const line = (content: string) => `${border} ${pad(content, W)} ${border}`;
-      const divider = theme.fg(theme.border, "├" + "─".repeat(W + 2) + "┤");
+      const divider = theme.fg("border", "├" + "─".repeat(W + 2) + "┤");
 
       const rows = [
-        theme.fg(theme.border, "╭" + "─".repeat(W + 2) + "╮"),
+        theme.fg("border", "╭" + "─".repeat(W + 2) + "╮"),
         line(""),
-        line(theme.fg(theme.accent, "  ObsidiClaw") + theme.fg(theme.muted, "  memory system")),
+        line(theme.bold(theme.fg("accent", "  ObsidiClaw")) + theme.fg("muted", "  memory system")),
         line(""),
         divider,
         line(""),
         line(`  Engine      ${engineStatus}`),
         line(
-          `  Graph       ${theme.fg(theme.text, String(stats.noteCount))} notes` +
-          `  ·  ${theme.fg(theme.text, String(stats.edgeCount))} edges`,
+          `  Graph       ${theme.fg("text", String(stats.noteCount))} notes` +
+          `  ·  ${theme.fg("text", String(stats.edgeCount))} edges`,
         ),
         line(""),
         divider,
         line(""),
-        ...wsLines.map((l) => line(theme.fg(theme.muted, "  Workspace  ") + l)),
+        ...wsLines.map((l) => line(theme.fg("muted", "  Workspace  ") + l)),
         line(""),
         divider,
         line(""),
-        line(theme.fg(theme.dim, "  any key to dismiss · auto-closes in 4s")),
+        line(theme.fg("dim", "  any key to dismiss · auto-closes in 4s")),
         line(""),
-        theme.fg(theme.border, "╰" + "─".repeat(W + 2) + "╯"),
+        theme.fg("border", "╰" + "─".repeat(W + 2) + "╯"),
       ];
 
       const text = new Text(rows.join("\n"), 0, 0);
@@ -302,19 +298,6 @@ export function createObsidiClawExtension(
             noteHits,
           });
         },
-        onSubagentPrepared: (pkg) => {
-          stack!.logger.logEvent({
-            type: "subagent_start",
-            sessionId,
-            runId: toolCtx.currentRunId,
-            timestamp: Date.now(),
-            prompt: pkg.input.prompt,
-            plan: pkg.input.plan,
-            seedCount: pkg.contextPackage.seedNoteIds?.length ?? 0,
-            expandedCount: pkg.contextPackage.expandedNoteIds?.length ?? 0,
-            estimatedTokens: pkg.contextPackage.estimatedTokens,
-          } as RunEvent);
-        },
         onContextRated: (rating) => {
           const ts = Date.now();
           stack!.logger.logEvent({
@@ -464,8 +447,6 @@ export function createObsidiClawExtension(
           runId: toolCtx.currentRunId,
           timestamp: Date.now(),
           text: "(pi-tui-prompt)",
-          isSubagent: false,
-          runKind: "core",
         } as RunEvent);
       }
 

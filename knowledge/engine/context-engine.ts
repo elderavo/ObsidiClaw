@@ -28,11 +28,8 @@ import { createInterface, type Interface as ReadlineInterface } from "readline";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { ensureDir } from "../../core/os/fs.js";
 import { stripFrontmatter, estimateTokens } from "./frontmatter-utils.js";
-import { loadPersonality } from "../../agents/subagent/personality-loader.js";
-import { SUBAGENT_RAG_FOOTER_LINES } from "../../agents/prompts.js";
 import { ContextReviewer } from "./review/context-reviewer.js";
 import type { PruneClusterStorage } from "./prune/prune-storage.js";
-import type { PersonalityConfig } from "../../agents/subagent/types.js";
 import type {
   ContextEngineConfig,
   ContextEngineEvent,
@@ -40,14 +37,12 @@ import type {
   PathResult,
   PathStep,
   RetrievedNote,
-  SubagentInput,
-  SubagentPackage,
   PruneCluster,
   PruneConfig,
 } from "./types.js";
 
 const DEFAULT_TOP_K = 5;
-const DEFAULT_PERSONALITIES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "agents", "subagent", "personalities");
+
 const DEFAULT_PRUNE_CONFIG: PruneConfig = {
   similarityThreshold: 0.9,
   maxNeighborsPerNote: 10,
@@ -105,7 +100,7 @@ export class ContextEngine extends EventEmitter {
       mdDbPath,
       dbPath: config.dbPath ?? defaultDbPath,
       topK: config.topK ?? DEFAULT_TOP_K,
-      personalitiesDir: config.personalitiesDir ?? DEFAULT_PERSONALITIES_DIR,
+      personalitiesDir: config.personalitiesDir ?? join(dirname(fileURLToPath(import.meta.url)), "..", "..", "agents", "personalities"),
       review: config.review,
       pruneConfig: config.pruneConfig,
     };
@@ -337,29 +332,6 @@ export class ContextEngine extends EventEmitter {
       retrievalMs: Date.now() - t0,
       noPath: rpcResult.no_path,
       reviewResult,
-    };
-  }
-
-  /**
-   * Build a SubagentPackage for the given subagent input.
-   */
-  async buildSubagentPackage(input: SubagentInput): Promise<SubagentPackage> {
-    this.ensureInitialized();
-
-    const query = [input.plan, input.prompt].filter(Boolean).join(" ").slice(0, 1000);
-    const contextPackage = await this.build(query);
-
-    let personalityConfig: PersonalityConfig | undefined;
-    if (input.personality) {
-      personalityConfig = loadPersonality(input.personality, this.config.personalitiesDir) ?? undefined;
-    }
-
-    return {
-      input,
-      contextPackage,
-      formattedSystemPrompt: formatSubagentSystemPrompt(input, contextPackage, personalityConfig?.content),
-      personalityConfig,
-      builtAt: Date.now(),
     };
   }
 
@@ -814,41 +786,6 @@ function rpcNoteToRetrievedNote(n: RpcRetrievedNote): RetrievedNote {
     linkedFrom: n.linkedFrom ?? undefined,
     depth: n.depth ?? undefined,
   };
-}
-
-// ---------------------------------------------------------------------------
-// Subagent system prompt formatting (unchanged from original)
-// ---------------------------------------------------------------------------
-
-function formatSubagentSystemPrompt(
-  input: SubagentInput,
-  ctx: ContextPackage,
-  personalityContent?: string,
-): string {
-  const sections: string[] = ["# Subagent Task"];
-
-  if (personalityContent) {
-    sections.push("", "## Personality", personalityContent);
-  }
-
-  sections.push(
-    "",
-    "## Your Task",
-    input.prompt,
-    "",
-    "## Implementation Plan",
-    input.plan,
-    "",
-    "## Success Criteria",
-    input.successCriteria,
-    "",
-    "## Retrieved Context",
-    ctx.formattedContext,
-    "",
-    ...SUBAGENT_RAG_FOOTER_LINES,
-  );
-
-  return sections.join("\n");
 }
 
 // ---------------------------------------------------------------------------

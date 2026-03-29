@@ -4,7 +4,7 @@
  * Context tools:
  *   retrieve_context     — hybrid RAG query
  *   get_preferences      — returns preferences.md content
- *   prepare_subagent     — build context-enriched system prompt for subagents
+ *   find_path            — graph path between two concepts
  *   build/list/get/update_prune_* — note deduplication management
  *
  * Transport-agnostic: wire via InMemoryTransport or StdioServerTransport.
@@ -14,19 +14,17 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ContextEngine } from "../context-engine.js";
-import type { ContextPackage, SubagentPackage, PruneMemberStatus } from "../types.js";
+import type { ContextPackage, PruneMemberStatus } from "../types.js";
 import type { PruneClusterStorage } from "../prune/prune-storage.js";
 import type { WorkspaceRegistry } from "../../../automation/workspaces/workspace-registry.js";
 import { RATE_CONTEXT_REMINDER } from "../../../agents/prompts.js";
 
 export type OnContextBuilt = (pkg: ContextPackage) => void;
-export type OnSubagentPrepared = (pkg: SubagentPackage) => void;
 export type OnContextRated = (rating: { query: string; score: number; missing: string; helpful: string }) => void;
 
 export interface McpServerOptions {
   engine: ContextEngine;
   onContextBuilt?: OnContextBuilt;
-  onSubagentPrepared?: OnSubagentPrepared;
   onContextRated?: OnContextRated;
   /** Shared prune cluster storage (from notes.db). Falls back to engine.buildPruneClusters() for build. */
   pruneStorage?: PruneClusterStorage;
@@ -34,24 +32,12 @@ export interface McpServerOptions {
   workspaceRegistry?: WorkspaceRegistry;
 }
 
-/**
- * @deprecated Use createContextEngineMcpServer(options: McpServerOptions) instead.
- */
-export function createContextEngineMcpServer(
-  engineOrOpts: ContextEngine | McpServerOptions,
-  onContextBuilt?: OnContextBuilt,
-  onSubagentPrepared?: OnSubagentPrepared,
-): McpServer {
-  // Support both old positional args and new options object
-  const opts: McpServerOptions = "build" in engineOrOpts
-    ? { engine: engineOrOpts, onContextBuilt, onSubagentPrepared }
-    : engineOrOpts;
-
+export function createContextEngineMcpServer(opts: McpServerOptions): McpServer {
   return _createMcpServer(opts);
 }
 
 function _createMcpServer(opts: McpServerOptions): McpServer {
-  const { engine, onContextBuilt, onSubagentPrepared, onContextRated, pruneStorage, workspaceRegistry } = opts;
+  const { engine, onContextBuilt, onContextRated, pruneStorage, workspaceRegistry } = opts;
   const server = new McpServer({ name: "obsidi-claw-context", version: "1.0.0" });
 
   // ── retrieve_context ──────────────────────────────────────────────────────
@@ -65,8 +51,7 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
       description:
         "Search the ObsidiClaw knowledge base for relevant notes, tools, concepts, and best " +
         "practices. Returns markdown-formatted context from the md_db knowledge graph. " +
-        "Call this before relying on your own knowledge for any project-specific question. " +
-        "For detailed tool usage examples, search for the tool name (e.g. 'spawn_subagent').",
+        "Call this before relying on your own knowledge for any project-specific question.",
       inputSchema: {
         query: z.string().describe("What to search for in the knowledge base."),
         workspace: z.string().optional().describe("Limit retrieval to a specific registered workspace by name. Omit to search all workspaces."),
@@ -181,33 +166,6 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
     },
   );
 
-  // ── prepare_subagent ──────────────────────────────────────────────────────
-
-  server.registerTool(
-    "prepare_subagent",
-    {
-      description:
-        "Prepare a SubagentPackage: runs hybrid RAG on the implementation plan, then bundles " +
-        "prompt + plan + retrieved context + success criteria into a formatted system prompt " +
-        "ready for injection into a child Pi session. Call this before spawning a subagent.",
-      inputSchema: {
-        prompt: z.string().describe("Top-level task description for the subagent."),
-        plan: z.string().describe("Detailed implementation plan from the main agent."),
-        success_criteria: z.string().describe("Clear, measurable criteria for task completion."),
-        personality: z.string().optional().describe("Personality profile name (e.g., 'deep-researcher', 'code-reviewer', 'context-synthesizer')."),
-      },
-    },
-    async ({ prompt, plan, success_criteria, personality }) => {
-      const pkg = await engine.buildSubagentPackage({
-        prompt,
-        plan,
-        successCriteria: success_criteria,
-        personality,
-      });
-      onSubagentPrepared?.(pkg);
-      return { content: [{ type: "text" as const, text: pkg.formattedSystemPrompt }] };
-    },
-  );
 
   // ── prune: build clusters ────────────────────────────────────────────────
   server.registerTool(

@@ -13,7 +13,7 @@ md_db: true
 - **Bootstrap behavior**:
   - If there are any project bootstrap docs (e.g. `README.md`), skim them to understand the architecture and constraints.
   - Run `list_workspaces` to see which codebases are registered and active.
-  - Learn how this project wants you to use tools, memory, and subagents before jumping in to deeper work.
+  - Learn how this project wants you to use tools and memory before jumping in to deeper work.
 
 ---
 

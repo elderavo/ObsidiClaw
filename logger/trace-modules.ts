@@ -6,15 +6,12 @@
  *
  * Actual event producers and the modules they map to:
  *
- *   OrchestratorSession.emit()       → ORCHESTRATOR
- *   OrchestratorSession.handlePiEvent() → PI_SESSION (source), ORCHESTRATOR (target)
- *   ContextEngine.onDebug()          → CONTEXT_ENGINE
- *   Extension factory (standalone)   → EXTENSION
- *   SubagentRunner                   → SUBAGENT
- *   insight_engine/session_review.ts → INSIGHT_ENGINE
- *   RunLogger                        → LOGGER
- *   Tool invocations                 → tool:<name> (dynamic)
- *   User input                       → USER
+ *   ContextEngine.onDebug()         → CONTEXT_ENGINE
+ *   Extension factory (Pi TUI)      → EXTENSION
+ *   insight engine (detached)       → INSIGHT_ENGINE
+ *   RunLogger                       → LOGGER
+ *   Tool invocations                → tool:<name> (dynamic)
+ *   User input                      → USER
  */
 
 // ---------------------------------------------------------------------------
@@ -33,11 +30,8 @@ export const PI_SESSION = "pi_session" as const;
 /** Context engine — hybrid RAG retrieval, graph expansion, review/synthesis. */
 export const CONTEXT_ENGINE = "context_engine" as const;
 
-/** Extension — MCP extension factory (both orchestrator and standalone/Pi TUI paths). */
+/** Extension — MCP extension factory (Pi TUI path). */
 export const EXTENSION = "extension" as const;
-
-/** Subagent — child agent session spawned by SubagentRunner. */
-export const SUBAGENT = "subagent" as const;
 
 /** Insight engine — post-session review, preference proposals, note generation. */
 export const INSIGHT_ENGINE = "insight_engine" as const;
@@ -68,7 +62,6 @@ export type TraceModule =
   | typeof PI_SESSION
   | typeof CONTEXT_ENGINE
   | typeof EXTENSION
-  | typeof SUBAGENT
   | typeof INSIGHT_ENGINE
   | typeof LOGGER;
 

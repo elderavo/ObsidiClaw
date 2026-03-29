@@ -125,7 +125,7 @@ export function resolvePaths(rootDir?: string): ObsidiClawPaths {
     dbPath: join(root, ".obsidi-claw", "runs.db"),
     notesDbPath: join(root, ".obsidi-claw", "notes.db"),
     graphDbPath: join(root, ".obsidi-claw", "graph.db"),
-    personalitiesDir: join(root, "agents", "subagent", "personalities"),
+    personalitiesDir: join(root, "agents", "personalities"),
     workspacesPath: join(root, ".obsidi-claw", "workspaces.json"),
   };
 }

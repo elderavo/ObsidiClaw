@@ -22,10 +22,10 @@ import { llmChat, isLlmReachable } from "../../core/llm-client.js";
 import {
   loadPersonality,
   resolvePersonalityChatOptions,
-} from "../../agents/subagent/personality-loader.js";
+} from "../../agents/personality-loader.js";
 import { readText, writeText, fileExists, listDir } from "../../core/os/fs.js";
 import type { WorkspaceRegistry } from "../workspaces/workspace-registry.js";
-import type { PersonalityConfig } from "../../agents/subagent/types.js";
+import type { PersonalityConfig } from "../../agents/types.js";
 
 // ---------------------------------------------------------------------------
 // Public config

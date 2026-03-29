@@ -1,7 +1,9 @@
 /**
- * Orchestrator type definitions.
+ * Core event and identifier types for the ObsidiClaw logger.
  *
- * TODO: Phase 1 — migrate to shared/types.ts and shared/events.ts once stable.
+ * Previously lived in agents/orchestrator/types.ts alongside the headless
+ * orchestrator machinery. Moved here so the logger and entry paths can import
+ * types without pulling in the (now-deleted) orchestrator.
  */
 
 // ---------------------------------------------------------------------------
@@ -12,28 +14,19 @@
 export type SessionId = string;
 
 /**
- * Discriminates run type in the runs table.
- *   core      — interactive user prompt via OrchestratorSession
- *   subagent  — child agent spawned by SubagentRunner
- *   reviewer  — post-session review subagent (insight_engine)
- *   job       — scheduler job execution
- */
-export type RunKind = "core" | "subagent" | "reviewer" | "job";
-
-/**
- * Unique ID for a single prompt/response round-trip within a session.
- * A session has one or more runs (one per prompt).
+ * Correlation ID for a single prompt round-trip within a session.
+ * Stored in trace.run_id as a loose grouping key — no backing table.
  */
 export type RunId = string;
 
 // ---------------------------------------------------------------------------
-// Lifecycle
+// Lifecycle stages
 // ---------------------------------------------------------------------------
 
 /**
  * Lifecycle stages within a single prompt round-trip.
  *
- * prompt_received  → prompt arrived at orchestrator
+ * prompt_received  → prompt arrived
  * context_inject   → context engine running (first prompt only)
  * pi_ready         → pi session created and ready
  * agent_running    → prompt sent to agent, waiting for response
@@ -49,71 +42,11 @@ export type RunStage =
   | "error";
 
 // ---------------------------------------------------------------------------
-// Session config
-// ---------------------------------------------------------------------------
-
-export interface SessionConfig {
-  /** System prompt override for the pi agent. */
-  systemPrompt?: string;
-
-  /** Ollama model override. Defaults to OLLAMA_MODEL env / "cogito:8b". */
-  model?: string;
-
-  /** Ollama base URL override (e.g. from personality provider config). */
-  baseUrl?: string;
-
-  /**
-   * Called with streaming text delta from the agent.
-   * Use this to print agent output in real time.
-   */
-  onOutput?: (delta: string) => void;
-
-  /**
-   * What kind of run this session produces. Defaults to "core".
-   * @deprecated Use runKind instead of isSubagent.
-   */
-  isSubagent?: boolean;
-
-  /** Discriminates run type. Defaults to "core". Takes precedence over isSubagent. */
-  runKind?: RunKind;
-
-  /** Run ID of the parent that spawned this session (for subagent/reviewer linking). */
-  parentRunId?: RunId;
-
-  /** Session ID of the parent session (for cross-session parent/child trees). */
-  parentSessionId?: SessionId;
-}
-
-// ---------------------------------------------------------------------------
-// Run config (single-shot compat)
-// ---------------------------------------------------------------------------
-
-export interface RunConfig extends SessionConfig {
-  prompt: string;
-}
-
-// ---------------------------------------------------------------------------
-// Run result (single-shot compat)
-// ---------------------------------------------------------------------------
-
-export interface RunResult {
-  sessionId: SessionId;
-  runId: RunId;
-  stage: RunStage;
-  durationMs: number;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  messages: any[];
-  error?: string;
-}
-
-// ---------------------------------------------------------------------------
 // Events — emitted at every interface boundary, consumed by RunLogger
 //
 // Convention:
 //   - Session-level events: { sessionId, timestamp }
-//   - Prompt-level events: { sessionId, runId, timestamp }
-//
-// TODO: Phase 1 — migrate to shared/events.ts as named interfaces + union
+//   - Prompt-level events:  { sessionId, runId, timestamp }
 // ---------------------------------------------------------------------------
 
 export type RunEvent =
@@ -122,7 +55,7 @@ export type RunEvent =
   | { type: "session_end";         sessionId: SessionId; timestamp: number }
 
   // ── Prompt lifecycle (one per prompt, reused across session) ─────────────
-  | { type: "prompt_received";     sessionId: SessionId; runId: RunId; timestamp: number; text: string; isSubagent?: boolean; runKind?: RunKind; parentRunId?: RunId; parentSessionId?: SessionId }
+  | { type: "prompt_received";     sessionId: SessionId; runId: RunId; timestamp: number; text: string }
   | { type: "prompt_complete";     sessionId: SessionId; runId: RunId; timestamp: number; durationMs: number }
   | { type: "prompt_error";        sessionId: SessionId; runId: RunId; timestamp: number; error: string }
 
@@ -136,9 +69,6 @@ export type RunEvent =
 
   // ── Context retrieval (fired by MCP server via onContextBuilt callback) ──
   | { type: "context_retrieved"; sessionId: SessionId; runId: RunId; timestamp: number; query: string; seedCount: number; expandedCount: number; toolCount: number; retrievalMs: number; rawChars: number; strippedChars: number; estimatedTokens: number; reviewMs?: number; reviewSkipped?: boolean; noteHits?: Array<{ noteId: string; score: number; depth: number; source: string; tier?: string; noteType?: string; symbolKind?: string; edgeLabel?: string }> }
-
-  // ── Subagent preparation (fired by MCP server via onSubagentPrepared callback) ──
-  | { type: "subagent_start"; sessionId: SessionId; runId: RunId; timestamp: number; prompt: string; plan: string; seedCount: number; expandedCount: number; estimatedTokens: number }
 
   // ── Agent interaction ────────────────────────────────────────────────────
   | { type: "agent_prompt_sent";   sessionId: SessionId; runId: RunId; timestamp: number }
@@ -154,7 +84,6 @@ export type RunEvent =
   | { type: "job_error";           sessionId: SessionId; timestamp: number; jobName: string; runId: string; error: string }
 
   // ── Context engine debug events (ce_*) ──────────────────────────────────
-  // Emitted via ContextEngine.onDebug callback for full internal visibility.
   | { type: "ce_init_start";       sessionId: SessionId; runId: RunId; timestamp: number; path: "fast" | "slow" }
   | { type: "ce_init_end";         sessionId: SessionId; runId: RunId; timestamp: number; path: "fast" | "slow"; durationMs: number; noteCount?: number }
   | { type: "ce_retrieval_start";  sessionId: SessionId; runId: RunId; timestamp: number; query: string; topK: number }
@@ -165,14 +94,14 @@ export type RunEvent =
   | { type: "ce_reindex_start";    sessionId: SessionId; runId: RunId; timestamp: number }
   | { type: "ce_reindex_done";     sessionId: SessionId; runId: RunId; timestamp: number; durationMs: number; noteCount: number }
 
-  // ── Session review pipeline (insight_engine/session_review.ts) ──────────
+  // ── Session review pipeline ──────────────────────────────────────────────
   | { type: "review_started";          sessionId: SessionId; runId: RunId; timestamp: number; trigger: string }
   | { type: "review_llm_response";     sessionId: SessionId; runId: RunId; timestamp: number; rawLength: number; parsedOk: boolean }
   | { type: "review_proposal_applied"; sessionId: SessionId; runId: RunId; timestamp: number; notesWritten: number; prefsUpdated: number }
   | { type: "review_failed";           sessionId: SessionId; runId: RunId; timestamp: number; error: string; stage: string }
 
-  // ── Context self-grading (model rates its own retrieved context) ────────
+  // ── Context self-grading ─────────────────────────────────────────────────
   | { type: "context_rated"; sessionId: SessionId; runId: RunId; timestamp: number; query: string; score: number; missing: string; helpful: string }
 
-  // ── Diagnostic (replaces console.log/warn/error in structured modules) ──
+  // ── Diagnostic ───────────────────────────────────────────────────────────
   | { type: "diagnostic"; sessionId: SessionId; runId: RunId; timestamp: number; module: string; level: "info" | "warn" | "error"; message: string };

@@ -25,58 +25,9 @@ export const RATE_CONTEXT_REMINDER = `
 <!-- After using this context, call rate_context to report how well it answered your query. -->
 `.trim();
 
-// Used in agents/subagent/subagent-runner.ts to append shared footer guidance.
-export const SUBAGENT_FOOTER_BASE_LINES = [
-  "",
-  "---",
-  "Focus exclusively on the plan above. Work systematically towards the success criteria.",
-];
-
-// Used in knowledge/engine/context-engine.ts when composing RAG subagent prompts.
-export const SUBAGENT_RAG_FOOTER_LINES = [
-  ...SUBAGENT_FOOTER_BASE_LINES,
-  "Use `retrieve_context` for additional knowledge lookup.",
-];
-
 // Used in knowledge/engine/review/context-reviewer.ts when no personality content is available.
 export const CONTEXT_REVIEW_FALLBACK_SYSTEM_PROMPT =
   "You synthesize retrieved context into focused, query-relevant summaries.";
-
-// Used in agents/insight/session_review.ts for the session review subagent.
-export const SESSION_REVIEW_PROMPT =
-  "You are a review subagent. Read the provided session transcript and current preferences/meta-notes (via retrieval). Decide if any general, enduring preference should be updated, and whether any specific heuristic/insight should become a new concept note. Output JSON per schema.";
-
-// Used in agents/insight/session_review.ts to outline the review subagent plan.
-export const SESSION_REVIEW_PLAN = `
-1) Skim transcript for corrections, strong preferences, repeated patterns.
-2) Check if these are already encoded in preferences/meta-notes (via retrieval context).
-3) For each candidate lesson, decide:
-   - General + durable -> preferences update.
-   - Specific/domain -> new concept note.
-4) Limit to at most 3 preference updates and 3 new notes.
-5) Produce JSON per schema; avoid duplicates; include reasons.`;
-
-// Used in agents/insight/session_review.ts as success criteria for the review subagent.
-export const SESSION_REVIEW_SUCCESS_CRITERIA = `
-- Output valid JSON only.
-- Max 3 preference updates, max 3 new notes.
-- Each item has a concise reason.
-- No secrets or private data. Preference changes must be general, not project-specific.`;
-
-// Used in agents/insight/session_review.ts to describe the JSON schema for session reviews.
-export const SESSION_REVIEW_SCHEMA_TEXT = `
-Schema (JSON):
-{
-  "trigger": "session_end" | "pre_compaction",
-  "should_update_preferences": boolean,
-  "preferences_updates": [
-    { "action": "add"|"modify"|"deprecate", "section": string, "rule_id": string, "text": string, "reason": string }
-  ],
-  "new_notes": [
-    { "path": string, "title": string, "type": string, "tags": string[], "body": string, "reason": string }
-  ]
-}
-All fields optional except trigger. Keep lists small (<=3 items each).`;
 
 // Used in automation/scripts/run_session_review.ts when running session review without context engine.
 export const DETACHED_SESSION_REVIEW_SYSTEM_PROMPT = `You analyze conversations between a user and an AI coding agent to extract preferences and behavioral signals. Respond with JSON only: { "signals": [...], "preferences": [...] }. If the conversation is purely task execution with no preference signals, return empty lists.`;
