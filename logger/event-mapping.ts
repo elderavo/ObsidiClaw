@@ -12,6 +12,7 @@ import {
   PI_SESSION,
   CONTEXT_ENGINE,
   INSIGHT_ENGINE,
+  AUTOMATION,
   toolModule,
   type TraceModuleOrTool,
 } from "./trace-modules.js";
@@ -121,13 +122,25 @@ export function mapRunEvent(event: RunEvent): MappedEvent {
         summary: `${event.messageCount} messages`,
       };
 
-    case "tool_call":
+    case "tool_call": {
+      const args = event.toolArgs as Record<string, unknown> | undefined;
+      let toolSummary = event.toolName;
+      if (args) {
+        const filePath = args["file_path"] ?? args["path"];
+        const command = args["command"];
+        if (typeof filePath === "string") {
+          toolSummary = `${event.toolName}: ${filePath}`;
+        } else if (event.toolName === "bash" && typeof command === "string") {
+          toolSummary = `bash: ${command.slice(0, 80)}`;
+        }
+      }
       return {
         source: PI_SESSION, target: toolModule(event.toolName),
         action: "tool_exec", status: "started", phase: "execution",
         data: { toolName: event.toolName, toolCallId: event.toolCallId, toolArgs: event.toolArgs },
-        summary: event.toolName,
+        summary: toolSummary,
       };
+    }
 
     case "tool_result":
       return {
@@ -279,6 +292,66 @@ export function mapRunEvent(event: RunEvent): MappedEvent {
         action: "rate_context", status: "emitted", phase: "retrieval",
         data: { query: event.query, score: event.score, missing: event.missing, helpful: event.helpful },
         summary: `${event.score}/5 for "${event.query.slice(0, 60)}"`,
+      };
+
+    // ── Automation pipeline (mirror watcher, summarizer, reindex) ────────
+    case "mirror_run_start":
+      return {
+        source: AUTOMATION,
+        action: "mirror_run", status: "started", phase: "execution",
+        data: { workspace: event.workspace, trigger: event.trigger },
+        summary: `${event.workspace} (${event.trigger})`,
+      };
+
+    case "mirror_run_done":
+      return {
+        source: AUTOMATION,
+        action: "mirror_run", status: "returned", phase: "execution",
+        data: { workspace: event.workspace, durationMs: event.durationMs, tsNotesUpdated: event.tsNotesUpdated, pyNotesUpdated: event.pyNotesUpdated },
+        summary: `${event.workspace}: ts=${event.tsNotesUpdated} py=${event.pyNotesUpdated} in ${event.durationMs}ms`,
+      };
+
+    case "mirror_run_error":
+      return {
+        source: AUTOMATION,
+        action: "mirror_run", status: "failed", phase: "execution",
+        data: { workspace: event.workspace },
+        error: event.error,
+        summary: `${event.workspace} mirror failed`,
+      };
+
+    case "summarizer_spawned":
+      return {
+        source: AUTOMATION,
+        action: "summarizer", status: "started", phase: "execution",
+        data: { workspace: event.workspace },
+        summary: event.workspace,
+      };
+
+    case "summarizer_done":
+      return {
+        source: AUTOMATION,
+        action: "summarizer", status: event.exitCode === 0 ? "returned" : "failed", phase: "execution",
+        data: { workspace: event.workspace, durationMs: event.durationMs, exitCode: event.exitCode },
+        summary: `${event.workspace} exit=${event.exitCode} in ${event.durationMs}ms`,
+        error: event.exitCode !== 0 ? `exit code ${event.exitCode}` : undefined,
+      };
+
+    case "reindex_queued":
+      return {
+        source: AUTOMATION,
+        action: "reindex", status: "started", phase: "retrieval",
+        data: { changedCount: event.changedCount, deletedCount: event.deletedCount },
+        summary: `+${event.changedCount} ~0 -${event.deletedCount} queued`,
+      };
+
+    case "reindex_deferred":
+      return {
+        source: AUTOMATION,
+        action: "reindex", status: "emitted", phase: "retrieval",
+        data: { changedCount: event.changedCount, deletedCount: event.deletedCount, reason: event.reason },
+        summary: `deferred: ${event.changedCount + event.deletedCount} paths re-queued`,
+        error: event.reason,
       };
 
     // ── Diagnostic ────────────────────────────────────────────────────────

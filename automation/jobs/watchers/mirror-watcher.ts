@@ -8,6 +8,7 @@ import { runMirrorTs, type MirrorTsOptions } from "../../scripts/mirror-codebase
 import { runMirrorPy, type MirrorPyOptions } from "../../scripts/mirror-codebase-py.js";
 import type { WorkspaceLanguage, WorkspaceRegistry } from "../../workspaces/workspace-registry.js";
 import type { SummarizeWorkerConfig } from "../summarize-worker.js";
+import type { RunEvent } from "../../../logger/types.js";
 
 // ---------------------------------------------------------------------------
 // Defaults (mirror the CLI defaults from each script)
@@ -80,6 +81,10 @@ export interface WorkspaceMirrorConfig {
   workspacesPath?: string;
   /** Workspace registry — kept for source-path resolution (not serialized to worker). */
   registry?: WorkspaceRegistry;
+  /** Session ID for trace events. Optional — automation runs fine without it. */
+  sessionId?: string;
+  /** Callback for emitting structured trace events. Optional. */
+  onEvent?: (event: RunEvent) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -121,38 +126,32 @@ export function startWorkspaceMirrorWatcher(
   async function runMirrors(): Promise<void> {
     const tsOmit = config.omitPatterns?.ts ?? DEFAULT_TS_OMIT;
     const pyOmit = config.omitPatterns?.py ?? DEFAULT_PY_OMIT;
+    const sid = config.sessionId ?? "";
+    const t0 = Date.now();
+
+    config.onEvent?.({ type: "mirror_run_start", sessionId: sid, timestamp: t0, workspace: config.workspace, trigger: "file_change" });
+
+    let tsWritten = 0;
+    let pyWritten = 0;
 
     try {
-      const promises: Promise<unknown>[] = [];
+      const tsPromise = config.languages.includes("ts")
+        ? runMirrorTs({ scanDir: config.sourceDir, mirrorDir: config.mirrorDir, omitPatterns: tsOmit, force: true, workspace: config.workspace, wikilinkPrefix: config.wikilinkPrefix })
+        : Promise.resolve({ written: 0, skipped: 0, validPaths: new Set<string>() });
 
-      if (config.languages.includes("ts")) {
-        const tsOpts: MirrorTsOptions = {
-          scanDir: config.sourceDir,
-          mirrorDir: config.mirrorDir,
-          omitPatterns: tsOmit,
-          force: true,
-          workspace: config.workspace,
-          wikilinkPrefix: config.wikilinkPrefix,
-        };
-        promises.push(runMirrorTs(tsOpts));
-      }
+      const pyPromise = config.languages.includes("py")
+        ? runMirrorPy({ scanDir: config.sourceDir, mirrorDir: config.mirrorDir, omitPatterns: pyOmit, force: true, workspace: config.workspace, wikilinkPrefix: config.wikilinkPrefix })
+        : Promise.resolve({ written: 0, skipped: 0, validPaths: new Set<string>() });
 
-      if (config.languages.includes("py")) {
-        const pyOpts: MirrorPyOptions = {
-          scanDir: config.sourceDir,
-          mirrorDir: config.mirrorDir,
-          omitPatterns: pyOmit,
-          force: true,
-          workspace: config.workspace,
-          wikilinkPrefix: config.wikilinkPrefix,
-        };
-        promises.push(runMirrorPy(pyOpts));
-      }
-
-      await Promise.all(promises);
-    } catch {
+      const [tsResult, pyResult] = await Promise.all([tsPromise, pyPromise]);
+      tsWritten = tsResult.written;
+      pyWritten = pyResult.written;
+    } catch (err) {
+      config.onEvent?.({ type: "mirror_run_error", sessionId: sid, timestamp: Date.now(), workspace: config.workspace, error: err instanceof Error ? err.message : String(err) });
       return;
     }
+
+    config.onEvent?.({ type: "mirror_run_done", sessionId: sid, timestamp: Date.now(), workspace: config.workspace, durationMs: Date.now() - t0, tsNotesUpdated: tsWritten, pyNotesUpdated: pyWritten });
 
     // Spawn summarize worker if configured — fire-and-forget, never blocks TUI
     if (config.personalitiesDir && config.mdDbPath && config.workspacesPath) {
@@ -236,12 +235,18 @@ function spawnSummarizeWorker(config: WorkspaceMirrorConfig): void {
 
   activeWorkers.set(workspace, child);
 
-  // Forward worker output to parent console so summarization progress/errors are visible
-  child.stdout?.on("data", (chunk: Buffer) => process.stdout.write(chunk));
+  const sid = config.sessionId ?? "";
+  const spawnTs = Date.now();
+  config.onEvent?.({ type: "summarizer_spawned", sessionId: sid, timestamp: spawnTs, workspace });
+
+  // Forward worker output to parent process stderr so summarization progress/errors are visible
+  child.stdout?.on("data", (chunk: Buffer) => process.stderr.write(chunk));
   child.stderr?.on("data", (chunk: Buffer) => process.stderr.write(chunk));
 
-  child.on("exit", () => {
+  child.on("exit", (code) => {
     activeWorkers.delete(workspace);
+
+    config.onEvent?.({ type: "summarizer_done", sessionId: sid, timestamp: Date.now(), workspace, durationMs: Date.now() - spawnTs, exitCode: code ?? -1 });
 
     // If a source change arrived while we were running, do one more pass
     if (pendingRerun.has(workspace)) {

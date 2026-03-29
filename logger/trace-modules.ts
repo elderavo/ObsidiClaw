@@ -39,6 +39,9 @@ export const INSIGHT_ENGINE = "insight_engine" as const;
 /** Logger — SQLite event persistence (runs.db). */
 export const LOGGER = "logger" as const;
 
+/** Automation — mirror watcher, summarizer worker, reindex watcher. */
+export const AUTOMATION = "automation" as const;
+
 
 // ---------------------------------------------------------------------------
 // Dynamic module names
@@ -64,7 +67,8 @@ export type TraceModule =
   | typeof CONTEXT_ENGINE
   | typeof EXTENSION
   | typeof INSIGHT_ENGINE
-  | typeof LOGGER;
+  | typeof LOGGER
+  | typeof AUTOMATION;
 
 /** All valid module names including dynamic tool:* pattern. */
 export type TraceModuleOrTool = TraceModule | `tool:${string}`;

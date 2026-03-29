@@ -57,6 +57,15 @@ export type RunEvent =
   | { type: "job_complete";        sessionId: SessionId; timestamp: number; jobName: string; runId: string; durationMs: number }
   | { type: "job_error";           sessionId: SessionId; timestamp: number; jobName: string; runId: string; error: string }
 
+  // ── Automation pipeline (mirror watcher, summarizer, reindex watcher) ──
+  | { type: "mirror_run_start";    sessionId: SessionId; timestamp: number; workspace: string; trigger: "file_change" | "startup" }
+  | { type: "mirror_run_done";     sessionId: SessionId; timestamp: number; workspace: string; durationMs: number; tsNotesUpdated: number; pyNotesUpdated: number }
+  | { type: "mirror_run_error";    sessionId: SessionId; timestamp: number; workspace: string; error: string }
+  | { type: "summarizer_spawned";  sessionId: SessionId; timestamp: number; workspace: string }
+  | { type: "summarizer_done";     sessionId: SessionId; timestamp: number; workspace: string; durationMs: number; exitCode: number }
+  | { type: "reindex_queued";      sessionId: SessionId; timestamp: number; changedCount: number; deletedCount: number }
+  | { type: "reindex_deferred";    sessionId: SessionId; timestamp: number; changedCount: number; deletedCount: number; reason: string }
+
   // ── Context engine debug events (ce_*) ──────────────────────────────────
   | { type: "ce_init_start";       sessionId: SessionId; runId: RunId; timestamp: number; path: "fast" | "slow" }
   | { type: "ce_init_end";         sessionId: SessionId; runId: RunId; timestamp: number; path: "fast" | "slow"; durationMs: number; noteCount?: number }

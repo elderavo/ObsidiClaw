@@ -15,6 +15,7 @@ import type { FSWatcher } from "chokidar";
 import { startWorkspaceMirrorWatcher, type WorkspaceMirrorConfig } from "../jobs/watchers/mirror-watcher.js";
 import { runMirrorTs } from "../scripts/mirror-codebase.js";
 import { runMirrorPy } from "../scripts/mirror-codebase-py.js";
+import type { RunEvent } from "../../logger/types.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -84,6 +85,8 @@ export class WorkspaceRegistry {
     private readonly mdDbPath: string,
     /** Personalities directory — enables tiered summarization in mirror watchers. */
     private readonly personalitiesDir?: string,
+    /** Callback for emitting structured trace events from mirror watchers. */
+    private readonly onEvent?: (event: RunEvent) => void,
   ) {}
 
   // ── Persistence ──────────────────────────────────────────────────────────
@@ -232,6 +235,7 @@ export class WorkspaceRegistry {
       mdDbPath: this.mdDbPath,
       workspacesPath: this.registryPath,
       registry: this,
+      onEvent: this.onEvent,
     };
 
     const watcher = startWorkspaceMirrorWatcher(config);

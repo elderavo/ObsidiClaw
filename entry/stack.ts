@@ -75,7 +75,12 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
   const noteMetrics = new NoteMetricsLogger(paths.notesDbPath);
 
   // ── WorkspaceRegistry ─────────────────────────────────────────────────
-  const workspaceRegistry = new WorkspaceRegistry(paths.workspacesPath, paths.mdDbPath, paths.personalitiesDir);
+  const workspaceRegistry = new WorkspaceRegistry(
+    paths.workspacesPath,
+    paths.mdDbPath,
+    paths.personalitiesDir,
+    (event) => logger.logEvent({ ...event, sessionId } as RunEvent),
+  );
 
   // ── ContextEngine ───────────────────────────────────────────────────────
   const engine = new ContextEngine({
@@ -154,13 +159,18 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
       });
     }
 
-    // ── Phase 2: engine init (sees settled md_db, hash is stable) ─────────
-    await engine.initialize();
-
-    // Watchers are cheap — start after everything else is up.
+    // ── Phase 2: start watchers BEFORE engine init ─────────────────────
+    // Watchers must be running before engine.initialize() because init can
+    // take 20+ seconds (slow path). Any source file edits during that window
+    // would be missed if watchers started after init.
+    // The reindex watcher is safe to start early: if the engine isn't ready,
+    // incrementalUpdate() is a no-op (queued in Python background thread).
     mdDbWatcher = startMdDbLintWatcher(paths.mdDbPath);
     workspaceRegistry.startAllWatchers();
-    reindexWatcher = startMdDbReindexWatcher(paths.mdDbPath, engine);
+    reindexWatcher = startMdDbReindexWatcher(paths.mdDbPath, engine, sessionId, (event) => logger.logEvent({ ...event, sessionId } as RunEvent));
+
+    // ── Phase 3: engine init (sees settled md_db, hash is stable) ─────────
+    await engine.initialize();
   }
 
   async function shutdown(): Promise<void> {
@@ -200,7 +210,12 @@ const REINDEX_DEBOUNCE_MS = 1500;
  * Watch md_db for .md file changes and trigger incremental engine updates.
  * Batches rapid changes (debounce) and sends only the changed/deleted paths.
  */
-function startMdDbReindexWatcher(mdDbPath: string, engine: ContextEngine): FSWatcher {
+function startMdDbReindexWatcher(
+  mdDbPath: string,
+  engine: ContextEngine,
+  sessionId: string,
+  onEvent?: (event: RunEvent) => void,
+): FSWatcher {
   const pendingChanged = new Set<string>();
   const pendingDeleted = new Set<string>();
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -226,10 +241,29 @@ function startMdDbReindexWatcher(mdDbPath: string, engine: ContextEngine): FSWat
     const changedFiltered = changed.filter((p) => !deleted.includes(p));
     if (changedFiltered.length === 0 && deleted.length === 0) return;
 
+    onEvent?.({
+      type: "reindex_queued",
+      sessionId,
+      timestamp: Date.now(),
+      changedCount: changedFiltered.length,
+      deletedCount: deleted.length,
+    });
+
     try {
       await engine.incrementalUpdate(changedFiltered, deleted);
-    } catch {
-      // Engine might not be initialized yet or subprocess crashed — swallow
+    } catch (err) {
+      // Engine might not be initialized yet — put paths back for next flush
+      for (const p of changedFiltered) pendingChanged.add(p);
+      for (const p of deleted) pendingDeleted.add(p);
+      onEvent?.({
+        type: "reindex_deferred",
+        sessionId,
+        timestamp: Date.now(),
+        changedCount: changedFiltered.length,
+        deletedCount: deleted.length,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      scheduleFlush();
     }
   }
 

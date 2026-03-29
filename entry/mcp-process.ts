@@ -160,9 +160,15 @@ mcpServer.server.fallbackNotificationHandler = async (notification: { method: st
 const transport = new StdioServerTransport();
 
 async function main(): Promise<void> {
-  // Initialize stack BEFORE connecting transport.
-  // This ensures the engine is ready before any tool calls can arrive.
-  // The TUI is NOT blocked — it's in a separate process.
+  // Connect transport FIRST so the TUI can establish MCP immediately.
+  // Tool calls that arrive before init completes will get "ContextEngine not
+  // initialized" errors — this is acceptable and expected. The TUI shows a
+  // splash screen while waiting for the obsidi-claw/ready notification.
+  await mcpServer.connect(transport);
+
+  // Initialize stack (mirrors + engine). This is the slow part (20+ seconds
+  // on slow path). Watchers start during init so source file edits are
+  // captured even while embeddings are being generated.
   let initError: Error | undefined;
   try {
     await stack.initialize();
@@ -179,10 +185,7 @@ async function main(): Promise<void> {
     });
   }
 
-  // Now connect — tool calls can arrive after this point, engine is ready (or failed)
-  await mcpServer.connect(transport);
-
-  // Send ready notification with engine status
+  // Send ready notification — TUI uses this for startup splash + engine state
   if (initError) {
     await mcpServer.server.notification({
       method: "obsidi-claw/ready",
