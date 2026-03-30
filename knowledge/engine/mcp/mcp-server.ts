@@ -11,6 +11,8 @@
  * Scheduler tools live in .pi/extensions/scheduler.ts — not here.
  */
 
+import fs from "fs";
+import path from "path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ContextEngine } from "../context-engine.js";
@@ -32,8 +34,8 @@ export interface McpServerOptions {
   workspaceRegistry?: WorkspaceRegistry;
   /** Called when a fire-and-forget background operation fails (e.g. incremental reindex). Routes to runs.db. */
   onBackgroundError?: (context: string, err: unknown) => void;
-  /** Returns the active run ID for the current tool call, if known. Used to link CE trace events to their run. */
-  getRunId?: () => string | undefined;
+  /** Absolute path to md_db root — required for create_concept_note. */
+  mdDbPath?: string;
 }
 
 export function createContextEngineMcpServer(opts: McpServerOptions): McpServer {
@@ -41,7 +43,7 @@ export function createContextEngineMcpServer(opts: McpServerOptions): McpServer 
 }
 
 function _createMcpServer(opts: McpServerOptions): McpServer {
-  const { engine, onContextBuilt, onContextRated, pruneStorage, workspaceRegistry, onBackgroundError, getRunId } = opts;
+  const { engine, onContextBuilt, onContextRated, pruneStorage, workspaceRegistry, onBackgroundError, mdDbPath } = opts;
   const server = new McpServer({ name: "obsidi-claw-context", version: "1.0.0" });
 
   // ── retrieve_context ──────────────────────────────────────────────────────
@@ -62,7 +64,7 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
       },
     },
     async ({ query, workspace }) => {
-      const pkg = await engine.build(query, workspace, getRunId?.());
+      const pkg = await engine.build(query, workspace);
       onContextBuilt?.(pkg);
       const budget = DEFAULT_MAX_CHARS;
       let text = pkg.formattedContext.length <= budget
@@ -380,6 +382,79 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
       } catch (err) {
         return { content: [{ type: "text" as const, text: `Failed to unregister workspace: ${err}` }] };
       }
+    },
+  );
+
+  // ── create_concept_note ───────────────────────────────────────────────────
+
+  server.registerTool(
+    "create_concept_note",
+    {
+      description:
+        "Write a new concept note to md_db. Use this after investigating the codebase to answer " +
+        "a question that retrieve_context could not answer — capturing what you learned makes it " +
+        "available to all future retrieve_context queries for this workspace. " +
+        "The note is picked up by the reindex watcher within seconds.",
+      inputSchema: {
+        title: z.string().describe("Human-readable title (becomes the filename slug)."),
+        body: z.string().describe("Markdown body of the note. Do not include frontmatter — it is generated automatically."),
+        workspace: z.string().describe("Workspace name this note belongs to (e.g. 'obsidi-claw'). Must match a registered workspace."),
+        tags: z.array(z.string()).optional().describe("Additional tags to apply. The workspace name is always added automatically."),
+      },
+    },
+    async ({ title, body, workspace, tags }) => {
+      if (!mdDbPath) {
+        return { content: [{ type: "text" as const, text: "create_concept_note: mdDbPath not configured on server." }] };
+      }
+
+      // Validate workspace exists
+      if (workspaceRegistry) {
+        const workspaces = workspaceRegistry.list();
+        if (!workspaces.find((w) => w.name === workspace)) {
+          const names = workspaces.map((w) => w.name).join(", ") || "none";
+          return { content: [{ type: "text" as const, text: `Workspace "${workspace}" not found. Registered: ${names}` }] };
+        }
+      }
+
+      // Slug: lowercase, replace spaces+special chars with hyphens, collapse repeats
+      const slug = title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+
+      const noteDir = path.join(mdDbPath, "concepts", workspace);
+      const notePath = path.join(noteDir, `${slug}.md`);
+      const noteId = `concepts/${workspace}/${slug}`;
+
+      // Don't overwrite existing notes silently
+      if (fs.existsSync(notePath)) {
+        return { content: [{ type: "text" as const, text: `Note already exists: ${noteId}\nTo update it, edit the file directly.` }] };
+      }
+
+      const allTags = [workspace, ...(tags ?? [])];
+      const created = new Date().toISOString();
+      const frontmatter = [
+        "---",
+        `type: concept`,
+        `title: ${title}`,
+        `workspace: ${workspace}`,
+        `source: agent`,
+        `created: ${created}`,
+        `tags:`,
+        ...allTags.map((t) => `  - ${t}`),
+        "---",
+        "",
+      ].join("\n");
+
+      fs.mkdirSync(noteDir, { recursive: true });
+      fs.writeFileSync(notePath, frontmatter + body.trimStart(), "utf8");
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Concept note created: ${noteId}\nPath: ${notePath}\nThe reindex watcher will pick this up within ~2 seconds.`,
+        }],
+      };
     },
   );
 

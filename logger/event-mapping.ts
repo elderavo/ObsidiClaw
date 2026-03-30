@@ -38,7 +38,7 @@ export interface MappedEvent {
 
 /**
  * Decompose a RunEvent into structured trace fields.
- * The common envelope (type, sessionId, runId, timestamp) is handled by the caller.
+ * The common envelope (type, sessionId, timestamp) is handled by the caller.
  */
 export function mapRunEvent(event: RunEvent): MappedEvent {
   switch (event.type) {
@@ -307,8 +307,8 @@ export function mapRunEvent(event: RunEvent): MappedEvent {
       return {
         source: AUTOMATION,
         action: "mirror_run", status: "returned", phase: "execution",
-        data: { workspace: event.workspace, durationMs: event.durationMs, tsNotesUpdated: event.tsNotesUpdated, pyNotesUpdated: event.pyNotesUpdated },
-        summary: `${event.workspace}: ts=${event.tsNotesUpdated} py=${event.pyNotesUpdated} in ${event.durationMs}ms`,
+        data: { workspace: event.workspace, durationMs: event.durationMs, tsNotesUpdated: event.tsNotesUpdated, pyNotesUpdated: event.pyNotesUpdated, notesCleaned: event.notesCleaned ?? 0 },
+        summary: `${event.workspace}: ts=${event.tsNotesUpdated} py=${event.pyNotesUpdated} cleaned=${event.notesCleaned ?? 0} in ${event.durationMs}ms`,
       };
 
     case "mirror_run_error":
@@ -367,7 +367,7 @@ export function mapRunEvent(event: RunEvent): MappedEvent {
     default: {
       // Catch-all for any unhandled ce_subprocess_log or future event types
       const ev = event as Record<string, unknown>;
-      const { type: _t, sessionId: _s, runId: _r, timestamp: _ts, ...rest } = ev;
+      const { type: _t, sessionId: _s, timestamp: _ts, ...rest } = ev;
       return {
         source: CONTEXT_ENGINE,
         action: String(ev["type"] ?? "unknown"),

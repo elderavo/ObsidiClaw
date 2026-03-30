@@ -276,6 +276,19 @@ def _build_graph_store(
                     edge_label = "CALLS"
                 elif note.tier == "2" and target_note.tier == "2":
                     edge_label = "IMPORTS"
+                elif note.tier == "3" and target_note.tier == "3":
+                    # Parent module lists child modules in ## Submodules → CONTAINS + inverse
+                    relations.append(Relation(
+                        label="CONTAINS",
+                        source_id=note.note_id,
+                        target_id=resolved,
+                    ))
+                    relations.append(Relation(
+                        label="BELONGS_TO",
+                        source_id=resolved,
+                        target_id=note.note_id,
+                    ))
+                    continue
                 else:
                     # Cross-tier wikilinks in code notes → generic
                     edge_label = "LINKS_TO"

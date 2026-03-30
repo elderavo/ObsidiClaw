@@ -780,6 +780,7 @@ function generateModuleNote(
   today: string,
   prefix = MIRROR_PREFIX,
   workspace?: string,
+  childModuleLinks: string[] = [],
 ): string {
   const lines: string[] = [];
   const dirName = dirRel === "." ? "root" : path.posix.basename(dirRel);
@@ -800,6 +801,13 @@ function generateModuleNote(
 
   lines.push(`# ${dirName}`, "");
   lines.push("*Module summary not yet generated.*", "");
+
+  if (childModuleLinks.length > 0) {
+    lines.push("## Submodules", "");
+    for (const link of childModuleLinks) lines.push(`- ${link}`);
+    lines.push("");
+  }
+
   lines.push("## Files", "");
   for (const { relPath, stem } of fileStemsAndPaths) {
     const d = path.posix.dirname(relPath);
@@ -827,6 +835,22 @@ function extractModuleFileLinks(modulePath: string): string[] | null {
   return section[1].trim().split("\n").map((l) => l.replace(/^- /, "").trim());
 }
 
+/**
+ * Extract the submodule wikilinks listed in an existing _module.md's ## Submodules section.
+ * Returns [] if the section is absent (not an error — root modules have no submodules).
+ */
+function extractModuleSubmoduleLinks(modulePath: string): string[] {
+  let content: string;
+  try {
+    content = fs.readFileSync(modulePath, "utf8");
+  } catch {
+    return [];
+  }
+  const section = content.match(/^## Submodules\s*\n((?:- \[\[.+\]\]\n?)*)/m);
+  if (!section) return [];
+  return section[1].trim().split("\n").map((l) => l.replace(/^- /, "").trim());
+}
+
 // ---------------------------------------------------------------------------
 // Summary preservation — survive mirror regeneration
 // ---------------------------------------------------------------------------
@@ -846,54 +870,6 @@ function extractSummarySection(mirrorPath: string): string | null {
   const idx = content.indexOf("\n## Summary");
   if (idx === -1) return null;
   return content.slice(idx + 1).trimEnd();
-}
-
-// ---------------------------------------------------------------------------
-// Stale mirror cleanup
-// ---------------------------------------------------------------------------
-
-/**
- * Delete any .md files under mirrorDir that are not in validPaths.
- * Language-agnostic: generation is language-specific, cleanup is not.
- * The caller is responsible for passing a combined validPaths that covers
- * all languages for this workspace so that no language's notes are
- * incorrectly pruned.
- * Also removes empty directories left behind.
- */
-export function cleanMirrorDir(mirrorDir: string, validPaths: Set<string>): number {
-  let cleaned = 0;
-
-  function walkClean(dir: string): void {
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-
-    for (const entry of entries) {
-      const absPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        walkClean(absPath);
-        // Remove directory if now empty
-        try {
-          const remaining = fs.readdirSync(absPath);
-          if (remaining.length === 0) fs.rmdirSync(absPath);
-        } catch { /* ignore */ }
-      } else if (entry.isFile() && entry.name.endsWith(".md")) {
-        const resolved = path.resolve(absPath);
-        if (!validPaths.has(resolved)) {
-          try {
-            fs.unlinkSync(absPath);
-            cleaned++;
-          } catch { /* can't delete — skip */ }
-        }
-      }
-    }
-  }
-
-  walkClean(mirrorDir);
-  return cleaned;
 }
 
 // ---------------------------------------------------------------------------
@@ -992,17 +968,41 @@ export async function runMirrorTs(
     const modPath = moduleNotePath(opts.mirrorDir, dirRel);
     validMirrorPaths.add(path.resolve(modPath));
 
-    // Stale if: force, doesn't exist, or files list has changed
-    const existingLinks = extractModuleFileLinks(modPath);
-    const currentLinks = fileEntries.map(({ relPath, stem }) => {
+    // Child submodule links: union of this language's byDir children + *_module.md files
+    // already on disk from the other-language mirror pass.
+    const childModuleLinksSet = new Set<string>();
+    for (const k of byDir.keys()) {
+      if (path.posix.dirname(k) === dirRel) {
+        const childName = path.posix.basename(k);
+        const link = dirRel === "." ? `${prefix}/${childName}_module` : `${prefix}/${dirRel}/${childName}_module`;
+        childModuleLinksSet.add(`[[${link}]]`);
+      }
+    }
+    const mirrorSubdir = dirRel === "." ? opts.mirrorDir : path.join(opts.mirrorDir, dirRel);
+    try {
+      for (const entry of fs.readdirSync(mirrorSubdir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        if (fs.existsSync(path.join(mirrorSubdir, entry.name + "_module.md"))) {
+          const link = dirRel === "." ? `${prefix}/${entry.name}_module` : `${prefix}/${dirRel}/${entry.name}_module`;
+          childModuleLinksSet.add(`[[${link}]]`);
+        }
+      }
+    } catch { /* mirror subdir may not exist yet on first run */ }
+    const childModuleLinks = [...childModuleLinksSet].sort();
+
+    // Stale if: force, doesn't exist, files list changed, or submodules list changed
+    const existingFileLinks = extractModuleFileLinks(modPath);
+    const existingSubmoduleLinks = extractModuleSubmoduleLinks(modPath);
+    const currentFileLinks = fileEntries.map(({ relPath, stem }) => {
       const d = path.posix.dirname(relPath);
       return d === "." ? `[[${prefix}/${stem}]]` : `[[${prefix}/${d}/${stem}]]`;
     }).sort();
-    const needsWrite = opts.force || existingLinks === null
-      || JSON.stringify(existingLinks.sort()) !== JSON.stringify(currentLinks);
+    const needsWrite = opts.force || existingFileLinks === null
+      || JSON.stringify(existingFileLinks.sort()) !== JSON.stringify(currentFileLinks)
+      || JSON.stringify(existingSubmoduleLinks.sort()) !== JSON.stringify(childModuleLinks);
 
     if (needsWrite) {
-      const modMarkdown = generateModuleNote(dirRel, fileEntries, today, prefix, opts.workspace);
+      const modMarkdown = generateModuleNote(dirRel, fileEntries, today, prefix, opts.workspace, childModuleLinks);
       const modPreserved = extractSummarySection(modPath);
       const modFinal = modPreserved ? modMarkdown.trimEnd() + "\n\n" + modPreserved + "\n" : modMarkdown;
       fs.mkdirSync(path.dirname(modPath), { recursive: true });
@@ -1029,11 +1029,11 @@ async function main() {
     const raw = fs.readFileSync(registryPath, "utf8");
     workspaces = JSON.parse(raw).filter((w: { active: boolean }) => w.active);
   } catch {
-    // Fall back to running against cwd with no workspace prefix (legacy behaviour)
+    // Fall back to running against cwd with no workspace prefix (legacy behaviour).
+    // Note: no cleanup here — use mirror-workspaces.ts for the full pipeline.
     console.log("[mirror-ts] no workspaces.json found, running against cwd");
-    const { written, skipped, validPaths } = await runMirrorTs({ scanDir: cwd, mirrorDir: path.join(mdDbPath, "code"), omitPatterns: DEFAULT_OMIT, force });
-    const cleaned = cleanMirrorDir(path.join(mdDbPath, "code"), validPaths);
-    console.log(`  written=${written} skipped=${skipped} cleaned=${cleaned}`);
+    const { written, skipped } = await runMirrorTs({ scanDir: cwd, mirrorDir: path.join(mdDbPath, "code"), omitPatterns: DEFAULT_OMIT, force });
+    console.log(`  written=${written} skipped=${skipped}`);
     return;
   }
 
@@ -1041,7 +1041,7 @@ async function main() {
     if (!ws.languages.includes("ts")) continue;
     const mirrorDir = path.join(mdDbPath, "code", ws.name);
     console.log(`[mirror-ts] ${ws.name} (${ws.sourceDir})`);
-    const { written, skipped, validPaths } = await runMirrorTs({
+    const { written, skipped } = await runMirrorTs({
       scanDir: ws.sourceDir,
       mirrorDir,
       omitPatterns: DEFAULT_OMIT,
@@ -1049,8 +1049,10 @@ async function main() {
       workspace: ws.name,
       wikilinkPrefix: `code/${ws.name}`,
     });
-    const cleaned = cleanMirrorDir(mirrorDir, validPaths);
-    console.log(`  written=${written} skipped=${skipped} cleaned=${cleaned}`);
+    // Cleanup is intentionally omitted here — this CLI only mirrors TS files.
+    // Running cleanMirrorDir with TS-only validPaths would incorrectly prune
+    // Python notes in the same mirrorDir. Use mirror-workspaces.ts instead.
+    console.log(`  written=${written} skipped=${skipped}`);
   }
 }
 

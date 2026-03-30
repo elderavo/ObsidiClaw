@@ -53,6 +53,13 @@ const DEFAULT_PRUNE_CONFIG: PruneConfig = {
 
 const RPC_TIMEOUT_MS = 1_800_000; // 30 minutes for long operations (indexing)
 
+// Returned verbatim when RAG produces zero results. Pi reads this and triggers the gap-fill loop.
+const NOTHING_FOUND_CONTEXT =
+  `## Nothing Found\n\n` +
+  `No notes in this workspace match this query.\n\n` +
+  `**Next step**: Investigate the codebase directly (read files, search for symbols), ` +
+  `then call \`create_concept_note\` to save what you learn so future queries succeed.`;
+
 // ---------------------------------------------------------------------------
 // RPC types
 // ---------------------------------------------------------------------------
@@ -179,12 +186,12 @@ export class ContextEngine extends EventEmitter {
    * Build a ContextPackage for the given prompt.
    * Sends `retrieve` RPC → formats context in TS → runs reviewer in TS.
    */
-  async build(prompt: string, workspace?: string, runId?: string): Promise<ContextPackage> {
+  async build(prompt: string, workspace?: string): Promise<ContextPackage> {
     this.ensureInitialized();
 
     const t0 = Date.now();
 
-    this.debug({ type: "ce_retrieval_start", timestamp: t0, query: prompt.slice(0, 200), topK: this.config.topK, runId });
+    this.debug({ type: "ce_retrieval_start", timestamp: t0, query: prompt.slice(0, 200), topK: this.config.topK });
 
     const tVector = Date.now();
     const rpcResult = await this.rpc("retrieve", {
@@ -196,12 +203,30 @@ export class ContextEngine extends EventEmitter {
     const seedNotes = rpcResult.seed_notes.map(rpcNoteToRetrievedNote);
     const expandedNotes = rpcResult.expanded_notes.map(rpcNoteToRetrievedNote);
 
-    this.debug({ type: "ce_vector_done", timestamp: Date.now(), seedCount: seedNotes.length, durationMs: Date.now() - tVector, runId });
+    this.debug({ type: "ce_vector_done", timestamp: Date.now(), seedCount: seedNotes.length, durationMs: Date.now() - tVector });
+
+    // ── Short-circuit: nothing came back from RAG ─────────────────────────
+    if (seedNotes.length === 0 && expandedNotes.length === 0) {
+      return {
+        query: prompt,
+        retrievedNotes: [],
+        suggestedTools: [],
+        formattedContext: NOTHING_FOUND_CONTEXT,
+        retrievalMs: Date.now() - t0,
+        builtAt: Date.now(),
+        seedNoteIds: [],
+        expandedNoteIds: [],
+        rawChars: 0,
+        strippedChars: NOTHING_FOUND_CONTEXT.length,
+        estimatedTokens: estimateTokens(NOTHING_FOUND_CONTEXT),
+        reviewResult: { reviewMs: 0, skipped: true, skipReason: "no_notes" },
+      };
+    }
 
     const tGraph = Date.now();
     const allNotes = [...seedNotes, ...expandedNotes].sort((a, b) => b.score - a.score);
 
-    this.debug({ type: "ce_graph_done", timestamp: Date.now(), expandedCount: expandedNotes.length, durationMs: Date.now() - tGraph, runId });
+    this.debug({ type: "ce_graph_done", timestamp: Date.now(), expandedCount: expandedNotes.length, durationMs: Date.now() - tGraph });
 
     // ── Format raw context ──────────────────────────────────────────────
     const suggestedTools = allNotes
@@ -220,7 +245,7 @@ export class ContextEngine extends EventEmitter {
 
     if (this.reviewer) {
       const avgScore = allNotes.length > 0 ? allNotes.reduce((sum, n) => sum + n.score, 0) / allNotes.length : 0;
-      this.debug({ type: "ce_review_start", timestamp: Date.now(), noteCount: allNotes.length, avgScore, runId });
+      this.debug({ type: "ce_review_start", timestamp: Date.now(), noteCount: allNotes.length, avgScore });
 
       const review = await this.reviewer.review(prompt, allNotes, rawFormattedContext);
       reviewResult = {
@@ -237,7 +262,6 @@ export class ContextEngine extends EventEmitter {
         reviewMs: review.reviewMs,
         inputChars: rawFormattedContext.length,
         outputChars: review.synthesizedContext?.length,
-        runId,
       });
 
       if (!review.skipped && review.synthesizedContext) {

@@ -5,7 +5,8 @@
   "scripts": {
     "build": "tsc",
     "dev:mcp": "npx tsx entry/run-mcp.ts",
-    "start:mcp": "node dist/entry/run-mcp.js"
+    "start:mcp": "node dist/entry/run-mcp.js",
+    "note": "npx tsx --env-file=.env automation/scripts/notetaker.ts"
   },
   "dependencies": {
     "@mariozechner/pi-coding-agent": "^0.61.0",

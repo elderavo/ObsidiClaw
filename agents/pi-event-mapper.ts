@@ -14,29 +14,26 @@ import type { RunEvent } from "../logger/types.js";
 export function mapPiEventToRunEvent(
   piEvent: { type: string; [key: string]: unknown },
   sessionId: string,
-  runId: string,
 ): RunEvent | null {
   switch (piEvent.type) {
     case "agent_start":
-      return { type: "agent_run_start", sessionId, runId, timestamp: Date.now() };
+      return { type: "agent_run_start", sessionId, timestamp: Date.now() };
 
     case "agent_end":
       return {
         type: "agent_done",
         sessionId,
-        runId,
         timestamp: Date.now(),
         messageCount: Array.isArray(piEvent["messages"]) ? (piEvent["messages"] as unknown[]).length : 0,
       };
 
     case "turn_end":
-      return { type: "agent_turn_end", sessionId, runId, timestamp: Date.now() };
+      return { type: "agent_turn_end", sessionId, timestamp: Date.now() };
 
     case "tool_execution_start":
       return {
         type: "tool_call",
         sessionId,
-        runId,
         timestamp: Date.now(),
         toolName: String(piEvent["toolName"] ?? "unknown"),
         toolCallId: typeof piEvent["toolCallId"] === "string" ? String(piEvent["toolCallId"]) : undefined,
@@ -47,7 +44,6 @@ export function mapPiEventToRunEvent(
       return {
         type: "tool_result",
         sessionId,
-        runId,
         timestamp: Date.now(),
         toolName: String(piEvent["toolName"] ?? "unknown"),
         toolCallId: typeof piEvent["toolCallId"] === "string" ? String(piEvent["toolCallId"]) : undefined,

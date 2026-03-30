@@ -35,12 +35,6 @@ const sessionId: string = process.env["OBSIDI_SESSION_ID"];
 const rootDir = process.env["OBSIDI_ROOT_DIR"] ?? process.cwd();
 
 // ---------------------------------------------------------------------------
-// Track active run ID — set via custom notification from TUI
-// ---------------------------------------------------------------------------
-
-let currentRunId = "";
-
-// ---------------------------------------------------------------------------
 // Stack + MCP server
 // ---------------------------------------------------------------------------
 
@@ -50,7 +44,7 @@ const mcpServer = createContextEngineMcpServer({
   engine: stack.engine,
   pruneStorage: stack.noteMetrics.pruneStorage,
   workspaceRegistry: stack.workspaceRegistry,
-  getRunId: () => currentRunId,
+  mdDbPath: stack.paths.mdDbPath,
   onContextBuilt: (pkg) => {
     const noteHits = pkg.retrievedNotes.map((n) => ({
       noteId: n.noteId,
@@ -65,7 +59,6 @@ const mcpServer = createContextEngineMcpServer({
     stack.logger.logEvent({
       type: "context_retrieved",
       sessionId,
-      runId: currentRunId,
       timestamp: ts,
       query: pkg.query,
       seedCount: pkg.seedNoteIds?.length ?? 0,
@@ -81,7 +74,6 @@ const mcpServer = createContextEngineMcpServer({
     } as RunEvent);
     stack.noteMetrics.logRetrieval({
       sessionId,
-      runId: currentRunId,
       timestamp: ts,
       query: pkg.query,
       seedCount: pkg.seedNoteIds?.length ?? 0,
@@ -99,7 +91,6 @@ const mcpServer = createContextEngineMcpServer({
     stack.logger.logEvent({
       type: "context_rated",
       sessionId,
-      runId: currentRunId,
       timestamp: ts,
       query: rating.query,
       score: rating.score,
@@ -108,7 +99,6 @@ const mcpServer = createContextEngineMcpServer({
     } as RunEvent);
     stack.noteMetrics.logRating({
       sessionId,
-      runId: currentRunId,
       timestamp: ts,
       query: rating.query,
       score: rating.score,
@@ -120,7 +110,6 @@ const mcpServer = createContextEngineMcpServer({
     stack.logger.logEvent({
       type: "diagnostic",
       sessionId,
-      runId: currentRunId,
       timestamp: Date.now(),
       module: "mcp_server",
       level: "error",
@@ -143,16 +132,6 @@ stack.engine.on("indexProgress", (done: number, total: number) => {
     },
   }).catch(() => {});
 });
-
-// ---------------------------------------------------------------------------
-// Custom notification handler: TUI sends run ID updates
-// ---------------------------------------------------------------------------
-
-mcpServer.server.fallbackNotificationHandler = async (notification: { method: string; params?: Record<string, unknown> }) => {
-  if (notification.method === "obsidi-claw/setRunId") {
-    currentRunId = String(notification.params?.runId ?? "");
-  }
-};
 
 // ---------------------------------------------------------------------------
 // Connect transport + initialize
@@ -178,7 +157,6 @@ async function main(): Promise<void> {
     stack.logger.logEvent({
       type: "diagnostic",
       sessionId,
-      runId: "",
       timestamp: Date.now(),
       module: "mcp_process",
       level: "error",
@@ -217,6 +195,7 @@ async function main(): Promise<void> {
           name: w.name,
           mode: w.mode,
           languages: w.languages,
+          sourceDir: w.sourceDir,
         })),
       },
     } as any).catch(() => {});

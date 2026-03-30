@@ -34,6 +34,7 @@ for (const ws of workspaces) {
     workspacesPath: paths.workspacesPath,
     personalitiesDir: paths.personalitiesDir,
     registry,
+    force: true,
   });
   console.log(`[force-summarize] ${ws.name} done`);
 }

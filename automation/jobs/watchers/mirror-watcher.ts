@@ -4,18 +4,10 @@ import { existsSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { spawn, type ChildProcess } from "child_process";
 
-import { runMirrorTs, type MirrorTsOptions } from "../../scripts/mirror-codebase.js";
-import { runMirrorPy, type MirrorPyOptions } from "../../scripts/mirror-codebase-py.js";
+import { runWorkspaceMirror } from "../../scripts/run-workspace-mirror.js";
 import type { WorkspaceLanguage, WorkspaceRegistry } from "../../workspaces/workspace-registry.js";
 import type { SummarizeWorkerConfig } from "../summarize-worker.js";
 import type { RunEvent } from "../../../logger/types.js";
-
-// ---------------------------------------------------------------------------
-// Defaults (mirror the CLI defaults from each script)
-// ---------------------------------------------------------------------------
-
-const DEFAULT_TS_OMIT = ["dist", "node_modules", "_legacy", ".claude", "*.d.ts"];
-const DEFAULT_PY_OMIT = ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist", "node_modules"];
 
 // Glob patterns per language — appended to sourceDir
 const LANG_GLOBS: Record<WorkspaceLanguage, string> = {
@@ -85,6 +77,10 @@ export interface WorkspaceMirrorConfig {
   sessionId?: string;
   /** Callback for emitting structured trace events. Optional. */
   onEvent?: (event: RunEvent) => void;
+  /** Called when a summarize worker spawns — used to suspend the reindex watcher debounce. */
+  onSummarizerStart?: () => void;
+  /** Called when a summarize worker exits (and no pending re-run) — used to flush the reindex watcher. */
+  onSummarizerDone?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -148,8 +144,6 @@ export function startWorkspaceMirrorWatcher(
   }
 
   async function runMirrors(): Promise<void> {
-    const tsOmit = config.omitPatterns?.ts ?? DEFAULT_TS_OMIT;
-    const pyOmit = config.omitPatterns?.py ?? DEFAULT_PY_OMIT;
     const sid = config.sessionId ?? "";
     const t0 = Date.now();
 
@@ -157,25 +151,27 @@ export function startWorkspaceMirrorWatcher(
 
     let tsWritten = 0;
     let pyWritten = 0;
+    let notesCleaned = 0;
 
     try {
-      const tsPromise = config.languages.includes("ts")
-        ? runMirrorTs({ scanDir: config.sourceDir, mirrorDir: config.mirrorDir, omitPatterns: tsOmit, force: true, workspace: config.workspace, wikilinkPrefix: config.wikilinkPrefix })
-        : Promise.resolve({ written: 0, skipped: 0, validPaths: new Set<string>() });
-
-      const pyPromise = config.languages.includes("py")
-        ? runMirrorPy({ scanDir: config.sourceDir, mirrorDir: config.mirrorDir, omitPatterns: pyOmit, force: true, workspace: config.workspace, wikilinkPrefix: config.wikilinkPrefix })
-        : Promise.resolve({ written: 0, skipped: 0, validPaths: new Set<string>() });
-
-      const [tsResult, pyResult] = await Promise.all([tsPromise, pyPromise]);
-      tsWritten = tsResult.written;
-      pyWritten = pyResult.written;
+      const result = await runWorkspaceMirror({
+        scanDir: config.sourceDir,
+        mirrorDir: config.mirrorDir,
+        languages: config.languages,
+        force: true,
+        workspace: config.workspace,
+        wikilinkPrefix: config.wikilinkPrefix,
+        omitPatterns: config.omitPatterns,
+      });
+      tsWritten = result.tsWritten;
+      pyWritten = result.pyWritten;
+      notesCleaned = result.cleaned;
     } catch (err) {
       config.onEvent?.({ type: "mirror_run_error", sessionId: sid, timestamp: Date.now(), workspace: config.workspace, error: err instanceof Error ? err.message : String(err) });
       return;
     }
 
-    config.onEvent?.({ type: "mirror_run_done", sessionId: sid, timestamp: Date.now(), workspace: config.workspace, durationMs: Date.now() - t0, tsNotesUpdated: tsWritten, pyNotesUpdated: pyWritten });
+    config.onEvent?.({ type: "mirror_run_done", sessionId: sid, timestamp: Date.now(), workspace: config.workspace, durationMs: Date.now() - t0, tsNotesUpdated: tsWritten, pyNotesUpdated: pyWritten, notesCleaned });
 
     // Spawn summarize worker if configured — fire-and-forget, never blocks TUI
     if (config.personalitiesDir && config.mdDbPath && config.workspacesPath) {
@@ -258,6 +254,7 @@ function spawnSummarizeWorker(config: WorkspaceMirrorConfig): void {
   });
 
   activeWorkers.set(workspace, child);
+  config.onSummarizerStart?.();
 
   const sid = config.sessionId ?? "";
   const spawnTs = Date.now();
@@ -272,10 +269,14 @@ function spawnSummarizeWorker(config: WorkspaceMirrorConfig): void {
 
     config.onEvent?.({ type: "summarizer_done", sessionId: sid, timestamp: Date.now(), workspace, durationMs: Date.now() - spawnTs, exitCode: code ?? -1 });
 
-    // If a source change arrived while we were running, do one more pass
+    // If a source change arrived while we were running, do one more pass.
+    // Call onSummarizerDone only if no re-spawn — the new spawn will call
+    // onSummarizerStart again, keeping the ref count elevated until truly done.
     if (pendingRerun.has(workspace)) {
       pendingRerun.delete(workspace);
       spawnSummarizeWorker(config);
+    } else {
+      config.onSummarizerDone?.();
     }
   });
 

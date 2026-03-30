@@ -38,7 +38,6 @@
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
-import { cleanMirrorDir } from "./mirror-codebase.js";
 
 const __filename = fileURLToPath(import.meta.url);
 
@@ -727,6 +726,7 @@ function generateModuleNote(
   today: string,
   prefix = MIRROR_PREFIX,
   workspace?: string,
+  childModuleLinks: string[] = [],
 ): string {
   const lines: string[] = [];
   const dirName = dirRel === "." ? "root" : path.posix.basename(dirRel);
@@ -747,6 +747,13 @@ function generateModuleNote(
 
   lines.push(`# ${dirName}`, "");
   lines.push("*Module summary not yet generated.*", "");
+
+  if (childModuleLinks.length > 0) {
+    lines.push("## Submodules", "");
+    for (const link of childModuleLinks) lines.push(`- ${link}`);
+    lines.push("");
+  }
+
   lines.push("## Files", "");
   for (const { relPath, stem } of fileEntries) {
     const d = path.posix.dirname(relPath);
@@ -767,6 +774,18 @@ function extractModuleFileLinks(modulePath: string): string[] | null {
   }
   const section = content.match(/^## Files\s*\n((?:- \[\[.+\]\]\n?)*)/m);
   if (!section) return null;
+  return section[1].trim().split("\n").map((l) => l.replace(/^- /, "").trim());
+}
+
+function extractModuleSubmoduleLinks(modulePath: string): string[] {
+  let content: string;
+  try {
+    content = fs.readFileSync(modulePath, "utf8");
+  } catch {
+    return [];
+  }
+  const section = content.match(/^## Submodules\s*\n((?:- \[\[.+\]\]\n?)*)/m);
+  if (!section) return [];
   return section[1].trim().split("\n").map((l) => l.replace(/^- /, "").trim());
 }
 
@@ -866,16 +885,40 @@ export async function runMirrorPy(
     const modPath = moduleNotePath(opts.mirrorDir, dirRel);
     validMirrorPaths.add(path.resolve(modPath));
 
-    const existingLinks = extractModuleFileLinks(modPath);
-    const currentLinks = fileEntries.map(({ relPath, stem }) => {
+    // Child submodule links: union of this language's byDir children + *_module.md files
+    // already on disk from the other-language mirror pass.
+    const childModuleLinksSet = new Set<string>();
+    for (const k of byDir.keys()) {
+      if (path.posix.dirname(k) === dirRel) {
+        const childName = path.posix.basename(k);
+        const link = dirRel === "." ? `${prefix}/${childName}_module` : `${prefix}/${dirRel}/${childName}_module`;
+        childModuleLinksSet.add(`[[${link}]]`);
+      }
+    }
+    const mirrorSubdir = dirRel === "." ? opts.mirrorDir : path.join(opts.mirrorDir, dirRel);
+    try {
+      for (const entry of fs.readdirSync(mirrorSubdir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        if (fs.existsSync(path.join(mirrorSubdir, entry.name + "_module.md"))) {
+          const link = dirRel === "." ? `${prefix}/${entry.name}_module` : `${prefix}/${dirRel}/${entry.name}_module`;
+          childModuleLinksSet.add(`[[${link}]]`);
+        }
+      }
+    } catch { /* mirror subdir may not exist yet on first run */ }
+    const childModuleLinks = [...childModuleLinksSet].sort();
+
+    const existingFileLinks = extractModuleFileLinks(modPath);
+    const existingSubmoduleLinks = extractModuleSubmoduleLinks(modPath);
+    const currentFileLinks = fileEntries.map(({ relPath, stem }) => {
       const d = path.posix.dirname(relPath);
       return d === "." ? `[[${prefix}/${stem}]]` : `[[${prefix}/${d}/${stem}]]`;
     }).sort();
-    const needsWrite = opts.force || existingLinks === null
-      || JSON.stringify(existingLinks.sort()) !== JSON.stringify(currentLinks);
+    const needsWrite = opts.force || existingFileLinks === null
+      || JSON.stringify(existingFileLinks.sort()) !== JSON.stringify(currentFileLinks)
+      || JSON.stringify(existingSubmoduleLinks.sort()) !== JSON.stringify(childModuleLinks);
 
     if (needsWrite) {
-      const modMarkdown = generateModuleNote(dirRel, fileEntries, today, prefix, opts.workspace);
+      const modMarkdown = generateModuleNote(dirRel, fileEntries, today, prefix, opts.workspace, childModuleLinks);
       const modPreserved = extractSummarySection(modPath);
       const modFinal = modPreserved ? modMarkdown.trimEnd() + "\n\n" + modPreserved + "\n" : modMarkdown;
       fs.mkdirSync(path.dirname(modPath), { recursive: true });

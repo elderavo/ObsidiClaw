@@ -25,6 +25,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { type ExtensionFactory, type ExtensionUIContext } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
+import { Type } from "@sinclair/typebox";
 import { resolvePaths, getEmbedConfig } from "../core/config.js";
 import { extractMcpText } from "../core/text-utils.js";
 import { ensureDir, writeText, readText, listDir, fileExists } from "../core/os/fs.js";
@@ -33,6 +34,7 @@ import { RunLogger } from "../logger/run-logger.js";
 import { mapPiEventToRunEvent } from "../agents/pi-event-mapper.js";
 import { buildDirectoryTree, stripDirectoryBlock } from "../automation/scripts/update-directory-tree.js";
 import { TOOL_REMINDER, ENGINE_UNAVAILABLE_WARNING } from "../agents/prompts.js";
+import { buildNoteContent, buildInboxFilename, VAULT_NOTE_TYPES, NOTE_TYPE_DESCRIPTIONS, type VaultNoteType } from "../knowledge/markdown/vault-schema.js";
 import type { RunEvent } from "../logger/types.js";
 import type { ToolContext } from "./tools/types.js";
 import { registerRetrieveContextTool } from "./tools/retrieve-context.js";
@@ -57,7 +59,7 @@ interface ReadyParams {
   noteCount: number;
   edgeCount: number;
   indexLoaded: boolean;
-  activeWorkspaces: { name: string; mode: string; languages: string[] }[];
+  activeWorkspaces: { name: string; mode: string; languages: string[]; sourceDir: string }[];
 }
 
 async function showStartupSplash(
@@ -218,8 +220,11 @@ export function createObsidiClawExtension(
     // Both write to the same runs.db via WAL mode.
     const logger = new RunLogger({ dbPath: paths.dbPath });
 
-    // UI handle for status bar updates
-    let latestCtxUI: { setStatus(key: string, text: string | undefined): void } | undefined;
+    // UI handle — full ExtensionUIContext (used for status updates + note capture modal)
+    let latestCtxUI: ExtensionUIContext | undefined;
+
+    // Vault inbox path — set from the first active "know" workspace in ready notification
+    let vaultInboxPath: string | undefined;
 
     // Active workspace for concept filtering. Set by /workspace command.
     let activeWorkspace: string | undefined;
@@ -240,11 +245,12 @@ export function createObsidiClawExtension(
     let transport: StdioClientTransport;
 
     // Shared mutable state for tool registrations.
-    const toolCtx: ToolContext = { client: null as unknown as Client, currentRunId: "", engineState: "ok" };
+    const toolCtx: ToolContext = { client: null as unknown as Client, engineState: "ok" };
 
     // ── session_start: spawn MCP child process ──────────────────────────────
     pi.on("session_start", async (_event, ctx) => {
       latestCtxUI = ctx.hasUI ? ctx.ui : undefined;
+
       ensureDir(join(paths.rootDir, ".obsidi-claw"));
 
       // One-time migration: strip directory tree block from preferences.md if present.
@@ -278,7 +284,6 @@ export function createObsidiClawExtension(
               logger.logEvent({
                 type: "ce_subprocess_log",
                 sessionId,
-                runId: "",
                 timestamp: Date.now(),
                 message: line,
               } as RunEvent);
@@ -297,6 +302,12 @@ export function createObsidiClawExtension(
           readyParams = params;
           engineState = params.engineState;
           toolCtx.engineState = params.engineState;
+
+          // Resolve vault inbox path from first active "know" workspace
+          const knowWs = params.activeWorkspaces.find((w) => w.mode === "know");
+          if (knowWs) {
+            vaultInboxPath = join(knowWs.sourceDir, "notes", "inbox");
+          }
 
           if (params.engineState === "degraded" && ctx.hasUI) {
             const reason = params.degradedReason || "embedding provider unavailable";
@@ -414,27 +425,105 @@ export function createObsidiClawExtension(
       },
     });
 
+    // ── Note capture ─────────────────────────────────────────────────────────
+
+    /**
+     * Show the note capture modal and write the result to the vault inbox.
+     * Returns a status string for tool result or notification.
+     */
+    async function captureNoteToInbox(
+      ui: ExtensionUIContext,
+      suggestedTitle?: string,
+      suggestedContent?: string,
+    ): Promise<string> {
+      if (!vaultInboxPath) {
+        return "No vault workspace registered. Use /workspace to register a 'know' workspace first.";
+      }
+
+      const title = await ui.input("Note Title", suggestedTitle ?? "Untitled");
+      if (title === undefined) return "Note capture cancelled.";
+      const finalTitle = title.trim() || "Untitled";
+
+      const content = await ui.editor("Note Content", suggestedContent ?? "");
+      if (content === undefined) return "Note capture cancelled.";
+
+      const typeLabels = VAULT_NOTE_TYPES.map((t) => NOTE_TYPE_DESCRIPTIONS[t]);
+      const typeChoice = await ui.select("Note Type", typeLabels);
+      if (!typeChoice) return "Note capture cancelled.";
+      const noteType = VAULT_NOTE_TYPES[typeLabels.indexOf(typeChoice)] ?? "permanent";
+
+      ensureDir(vaultInboxPath);
+      const filename = buildInboxFilename(finalTitle);
+      const fileContent = buildNoteContent(noteType as VaultNoteType, finalTitle, content);
+      writeText(join(vaultInboxPath, filename), fileContent);
+
+      ui.notify(`Note saved to inbox: ${filename}`, "info");
+      return `Note "${finalTitle}" saved to vault inbox (${filename}). The inbox pipeline will lint and suggest links shortly.`;
+    }
+
+    // ── /note command ─────────────────────────────────────────────────────────
+    pi.registerCommand("note", {
+      description: "Capture a note to your vault inbox — opens the note editor modal",
+      handler: async (_args, ctx) => {
+        if (!ctx.hasUI) {
+          ctx.ui.notify("Note capture requires interactive mode", "warning");
+          return;
+        }
+        await captureNoteToInbox(ctx.ui);
+      },
+    });
+
+    // ── capture_note tool (Pi LLM-callable) ───────────────────────────────────
+    pi.registerTool({
+      name: "capture_note",
+      label: "Capture Note",
+      description:
+        "Open the note capture modal so the user can save a note to their vault inbox. " +
+        "Call this when the user asks to 'make a note', 'save this', or 'note that down'. " +
+        "Pass suggested_title and suggested_content pre-filled from the conversation context — " +
+        "the user will review and edit before submitting.",
+      promptSnippet: "capture_note(suggested_title?, suggested_content?) — open note capture modal",
+      parameters: Type.Object({
+        suggested_title: Type.Optional(Type.String({
+          description: "Pre-filled title for the note, derived from the conversation.",
+        })),
+        suggested_content: Type.Optional(Type.String({
+          description: "Pre-filled body for the note, derived from the conversation.",
+        })),
+      }),
+      execute: async (_toolCallId, args) => {
+        const { suggested_title, suggested_content } = args as {
+          suggested_title?: string;
+          suggested_content?: string;
+        };
+
+        if (!latestCtxUI) {
+          return {
+            content: [{ type: "text" as const, text: "UI not available. Run `notetaker` from the CLI instead." }],
+            details: {},
+          };
+        }
+
+        const result = await captureNoteToInbox(latestCtxUI, suggested_title, suggested_content);
+        return {
+          content: [{ type: "text" as const, text: result }],
+          details: {},
+        };
+      },
+    });
+
     // Track prompt start time for prompt_complete durationMs
     let promptStartTs = 0;
 
     // ── before_agent_start: inject preferences + standing tool reminder ─────
     pi.on("before_agent_start", async (event, ctx) => {
-      toolCtx.currentRunId = randomUUID();
       promptStartTs = Date.now();
       logger.logEvent({
         type: "prompt_received",
         sessionId,
-        runId: toolCtx.currentRunId,
         timestamp: promptStartTs,
         text: "(pi-tui-prompt)",
       } as RunEvent);
-
-      // Notify child process of current run ID (fire-and-forget notification)
-      try {
-        await client.notification({ method: "obsidi-claw/setRunId", params: { runId: toolCtx.currentRunId } } as any);
-      } catch {
-        // Non-fatal
-      }
 
       // Fast path: engine is completely unavailable
       if (engineState === "unavailable") {
@@ -491,7 +580,6 @@ export function createObsidiClawExtension(
       const mapped = mapPiEventToRunEvent(
         event as { type: string; [key: string]: unknown },
         sessionId,
-        toolCtx.currentRunId,
       );
       if (mapped) logger.logEvent(mapped);
     };
@@ -508,14 +596,12 @@ export function createObsidiClawExtension(
       const mapped = mapPiEventToRunEvent(
         event as unknown as { type: string; [key: string]: unknown },
         sessionId,
-        toolCtx.currentRunId,
       );
       if (mapped) logger.logEvent(mapped);
 
       logger.logEvent({
         type: "prompt_complete",
         sessionId,
-        runId: toolCtx.currentRunId,
         timestamp: Date.now(),
         durationMs: Date.now() - promptStartTs,
       } as RunEvent);
@@ -557,7 +643,7 @@ export function createObsidiClawExtension(
         });
         child.unref();
       } catch (err) {
-        logger.logEvent({ type: "diagnostic", sessionId, runId: toolCtx.currentRunId, timestamp: Date.now(), module: "extension", level: "error", message: `session_review enqueue failed: ${err instanceof Error ? err.message : String(err)}` } as RunEvent);
+        logger.logEvent({ type: "diagnostic", sessionId, timestamp: Date.now(), module: "extension", level: "error", message: `session_review enqueue failed: ${err instanceof Error ? err.message : String(err)}` } as RunEvent);
       } finally {
         logger.logEvent({
           type: "session_end",

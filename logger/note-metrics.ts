@@ -33,7 +33,6 @@ export interface NoteHit {
 
 export interface RetrievalEvent {
   sessionId: string;
-  runId?: string;
   timestamp: number;
   query: string;
   seedCount: number;
@@ -48,14 +47,12 @@ export interface RetrievalEvent {
 
 export interface RetrievalErrorEvent {
   sessionId: string;
-  runId?: string;
   timestamp: number;
   errorPayload: string;
 }
 
 export interface RatingEvent {
   sessionId: string;
-  runId?: string;
   timestamp: number;
   query: string;
   score: number;
@@ -200,7 +197,7 @@ export class NoteMetricsLogger {
       )
       .run(
         event.sessionId,
-        event.runId ?? null,
+        null,
         event.timestamp,
         event.query.slice(0, 120),
         event.seedCount,
@@ -225,7 +222,7 @@ export class NoteMetricsLogger {
         for (const hit of hits) {
           insertHit.run(
             event.sessionId,
-            event.runId ?? null,
+            null,
             event.timestamp,
             hit.noteId,
             hit.score,
@@ -253,7 +250,7 @@ export class NoteMetricsLogger {
       )
       .run(
         event.sessionId,
-        event.runId ?? null,
+        null,
         event.timestamp,
         "retrieve_context error",
         event.errorPayload,
@@ -270,7 +267,7 @@ export class NoteMetricsLogger {
       )
       .run(
         event.sessionId,
-        event.runId ?? null,
+        null,
         event.timestamp,
         event.query,
         event.score,

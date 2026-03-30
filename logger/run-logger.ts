@@ -12,7 +12,7 @@ export interface RunLoggerOptions {
    * Called when a retrieve_context tool_result error event is logged.
    * Used to route retrieval errors to NoteMetricsLogger.
    */
-  onRetrievalError?: (sessionId: string, runId: string | null, timestamp: number, errorPayload: string) => void;
+  onRetrievalError?: (sessionId: string, timestamp: number, errorPayload: string) => void;
 }
 
 /**
@@ -124,7 +124,6 @@ export class RunLogger {
 
   logEvent(event: RunEvent): void {
     const sessionId = event.sessionId;
-    const runId = "runId" in event ? (event.runId as string | undefined) ?? null : null;
 
     // ── Session lifecycle side effects ─────────────────────────────────────
     if (event.type === "session_start") {
@@ -143,7 +142,7 @@ export class RunLogger {
         try { return JSON.stringify(event.toolResult).slice(0, 240); }
         catch { return String(event.toolResult).slice(0, 240); }
       })();
-      this.onRetrievalError(sessionId, runId, event.timestamp, errorPayload);
+      this.onRetrievalError(sessionId, event.timestamp, errorPayload);
     }
 
     // ── Map and write structured trace row ─────────────────────────────────
@@ -155,7 +154,7 @@ export class RunLogger {
     this._getInsertStmt().run(
       eventId,
       sessionId,
-      runId,
+      null,
       seq,
       event.timestamp,
       event.type,
@@ -249,7 +248,6 @@ export interface TraceRow {
   id: number;
   event_id: string;
   session_id: string;
-  run_id: string | null;
   seq: number;
   ts: number;
   type: string;

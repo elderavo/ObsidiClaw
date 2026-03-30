@@ -13,8 +13,8 @@ import { dirname, join, relative, resolve } from "path";
 import type { FSWatcher } from "chokidar";
 
 import { startWorkspaceMirrorWatcher, type WorkspaceMirrorConfig } from "../jobs/watchers/mirror-watcher.js";
-import { runMirrorTs } from "../scripts/mirror-codebase.js";
-import { runMirrorPy } from "../scripts/mirror-codebase-py.js";
+import { startVaultWatcher, runInitialVaultCopy } from "../jobs/watchers/vault-watcher.js";
+import { runWorkspaceMirror } from "../scripts/run-workspace-mirror.js";
 import type { RunEvent } from "../../logger/types.js";
 
 // ---------------------------------------------------------------------------
@@ -87,6 +87,10 @@ export class WorkspaceRegistry {
     private readonly personalitiesDir?: string,
     /** Callback for emitting structured trace events from mirror watchers. */
     private readonly onEvent?: (event: RunEvent) => void,
+    /** Called when any summarize worker spawns — forwarded to reindex watcher for suspend. */
+    private readonly onSummarizerStart?: () => void,
+    /** Called when the last summarize worker exits — forwarded to reindex watcher for flush. */
+    private readonly onSummarizerDone?: () => void,
   ) {}
 
   // ── Persistence ──────────────────────────────────────────────────────────
@@ -221,25 +225,34 @@ export class WorkspaceRegistry {
    * No-op if a watcher is already running for this workspace.
    */
   startWatcher(entry: WorkspaceEntry): void {
-    if (entry.mode !== "code" || !entry.active) return;
+    if (!entry.active) return;
     if (this.watchers.has(entry.id)) return;
 
-    const config: WorkspaceMirrorConfig = {
-      sourceDir: entry.sourceDir,
-      mirrorDir: this.mirrorDir(entry),
-      workspace: entry.name,
-      wikilinkPrefix: WorkspaceRegistry.wikilinkPrefix(entry),
-      languages: entry.languages,
-      omitPatterns: entry.omitPatterns,
-      personalitiesDir: this.personalitiesDir,
-      mdDbPath: this.mdDbPath,
-      workspacesPath: this.registryPath,
-      registry: this,
-      onEvent: this.onEvent,
-    };
-
-    const watcher = startWorkspaceMirrorWatcher(config);
-    this.watchers.set(entry.id, watcher);
+    if (entry.mode === "code") {
+      const config: WorkspaceMirrorConfig = {
+        sourceDir: entry.sourceDir,
+        mirrorDir: this.mirrorDir(entry),
+        workspace: entry.name,
+        wikilinkPrefix: WorkspaceRegistry.wikilinkPrefix(entry),
+        languages: entry.languages,
+        omitPatterns: entry.omitPatterns,
+        personalitiesDir: this.personalitiesDir,
+        mdDbPath: this.mdDbPath,
+        workspacesPath: this.registryPath,
+        registry: this,
+        onEvent: this.onEvent,
+        onSummarizerStart: this.onSummarizerStart,
+        onSummarizerDone: this.onSummarizerDone,
+      };
+      const watcher = startWorkspaceMirrorWatcher(config);
+      this.watchers.set(entry.id, watcher);
+    } else if (entry.mode === "know") {
+      const watcher = startVaultWatcher({
+        sourceDir: entry.sourceDir,
+        mirrorDir: this.mirrorDir(entry),
+      });
+      this.watchers.set(entry.id, watcher);
+    }
   }
 
   /** Stop and remove a watcher for a workspace. */
@@ -251,11 +264,11 @@ export class WorkspaceRegistry {
     }
   }
 
-  /** Start watchers for all active code workspaces. Call during stack init. */
+  /** Start watchers for all active workspaces. Call during stack init. */
   startAllWatchers(): void {
     this.ensureLoaded();
     for (const entry of this.entries) {
-      if (entry.active && entry.mode === "code") {
+      if (entry.active) {
         this.startWatcher(entry);
       }
     }
@@ -284,49 +297,39 @@ export class WorkspaceRegistry {
     const notePaths: string[] = [];
 
     if (entry.mode === "code") {
-      const prefix = WorkspaceRegistry.wikilinkPrefix(entry);
+      // Run initial mirror + cleanup (non-forced — mtime skip handles re-registration).
+      // Cleanup runs here so that a workspace re-registration after source deletions
+      // reflects the current source tree immediately.
+      const result = await runWorkspaceMirror({
+        scanDir: entry.sourceDir,
+        mirrorDir,
+        languages: entry.languages,
+        force: false,
+        workspace: entry.name,
+        wikilinkPrefix: WorkspaceRegistry.wikilinkPrefix(entry),
+        omitPatterns: entry.omitPatterns,
+      });
+      notesGenerated = result.tsWritten + result.pyWritten;
 
-      // Run initial mirror (non-forced — mtime skip handles re-registration)
-      const promises: Promise<{ written: number }>[] = [];
-
-      if (entry.languages.includes("ts")) {
-        promises.push(
-          runMirrorTs({
-            scanDir: entry.sourceDir,
-            mirrorDir,
-            omitPatterns: entry.omitPatterns?.ts ?? ["dist", "node_modules", "_legacy", ".claude", "*.d.ts"],
-            force: false,
-            workspace: entry.name,
-            wikilinkPrefix: prefix,
-          }),
-        );
-      }
-
-      if (entry.languages.includes("py")) {
-        promises.push(
-          runMirrorPy({
-            scanDir: entry.sourceDir,
-            mirrorDir,
-            omitPatterns: entry.omitPatterns?.py ?? ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist"],
-            force: false,
-            workspace: entry.name,
-            wikilinkPrefix: prefix,
-          }),
-        );
-      }
-
-      const results = await Promise.all(promises);
-      notesGenerated = results.reduce((sum, r) => sum + r.written, 0);
-
-      // Collect paths of newly written notes for incremental index update
+      // Collect paths of newly written notes for incremental index update.
+      // collectMdPaths runs after cleanup so deleted notes are not included.
       if (notesGenerated > 0) {
         collectMdPaths(mirrorDir, this.mdDbPath, notePaths);
       }
 
       // Start watcher for continuous updates
       this.startWatcher(entry);
-    } else {
-      // "know" mode — directory created, no pipeline yet
+    } else if (entry.mode === "know") {
+      // Run initial vault copy to seed the index
+      const result = runInitialVaultCopy(entry.sourceDir, mirrorDir);
+      notesGenerated = result.count;
+
+      if (notesGenerated > 0) {
+        collectMdPaths(mirrorDir, this.mdDbPath, notePaths);
+      }
+
+      // Start vault watcher for continuous updates
+      this.startWatcher(entry);
     }
 
     return { entry, notesGenerated, notePaths };

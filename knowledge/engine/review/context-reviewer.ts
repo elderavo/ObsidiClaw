@@ -37,6 +37,13 @@ export interface ContextReviewConfig {
 
   /** Path to personalities directory. */
   personalitiesDir: string;
+
+  /**
+   * Minimum score required on the best seed note to proceed with synthesis.
+   * Below this threshold the raw notes are too weakly matched for the LLM to
+   * synthesize reliably — skip to prevent hallucination. Default: 0.45.
+   */
+  minSeedScore: number;
 }
 
 export interface ReviewResult {
@@ -50,7 +57,7 @@ export interface ReviewResult {
   skipped: boolean;
 
   /** Reason for skipping, if skipped. For errors this is prefixed with "error: " + the message. */
-  skipReason?: "disabled" | "timeout" | "no_notes" | string;
+  skipReason?: "disabled" | "timeout" | "no_notes" | "low_relevance" | string;
 }
 
 // ---------------------------------------------------------------------------
@@ -62,6 +69,7 @@ const DEFAULTS: ContextReviewConfig = {
   personality: "context-synthesizer",
   maxLatencyMs: 120_000,
   personalitiesDir: "",
+  minSeedScore: 0.45,
 };
 
 // ---------------------------------------------------------------------------
@@ -94,6 +102,16 @@ export class ContextReviewer {
     // Skip if no notes
     if (notes.length === 0) {
       return { synthesizedContext: null, reviewMs: 0, skipped: true, skipReason: "no_notes" };
+    }
+
+    // Skip if best seed score is below threshold — notes are too weakly matched
+    // to synthesize reliably; raw context is safer than a hallucinated synthesis.
+    const maxSeedScore = Math.max(
+      ...notes.filter((n) => (n.depth ?? 0) === 0).map((n) => n.score),
+      0,
+    );
+    if (maxSeedScore < this.config.minSeedScore) {
+      return { synthesizedContext: null, reviewMs: 0, skipped: true, skipReason: "low_relevance" };
     }
 
     // Load personality for system prompt and model config

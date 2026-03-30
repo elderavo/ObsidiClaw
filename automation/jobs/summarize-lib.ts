@@ -47,6 +47,8 @@ export interface WorkspaceSummarizeConfig {
   personalitiesDir: string;
   /** Optional structured logger. When absent, output goes to process.stderr. */
   log?: SummarizeLog;
+  /** When true, re-summarize all notes regardless of existing summary or staleness. */
+  force?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,7 +140,7 @@ export async function runCascadeForWorkspace(
     }
 
     // Summarize if: no existing summary OR source is newer than mirror
-    if (extractSummary(mirrorContent) && !isStale(entry)) continue;
+    if (!config.force && extractSummary(mirrorContent) && !isStale(entry)) continue;
 
     const outcome = await llmSummarize(
       mirrorContent.slice(0, TIER1_MIRROR_TRUNCATE),
@@ -183,7 +185,7 @@ export async function runCascadeForWorkspace(
     const hasUpdatedChild = childPaths.some((c) => justSummarizedT1.has(c));
 
     // Summarize if: no existing summary, source is newer, or a child was just summarized
-    if (extractSummary(mirrorContent) && !isStale(entry) && !hasUpdatedChild) continue;
+    if (!config.force && extractSummary(mirrorContent) && !isStale(entry) && !hasUpdatedChild) continue;
 
     const childSummaries = collectChildSummaries(childPaths);
     const outcome = await llmSummarize(
@@ -226,7 +228,7 @@ export async function runCascadeForWorkspace(
       continue;
     }
 
-    if (extractSummary(mirrorContent) && !hasUpdatedChild) continue;
+    if (!config.force && extractSummary(mirrorContent) && !hasUpdatedChild) continue;
 
     const childSummaries = collectChildSummaries(childPaths);
     if (childSummaries.length === 0) continue;

@@ -13,15 +13,14 @@
 import { join, relative } from "path";
 import { randomUUID } from "crypto";
 
-import chokidar, { type FSWatcher } from "chokidar";
+import chokidar from "chokidar";
 import { RunLogger } from "../logger/run-logger.js";
 import { NoteMetricsLogger } from "../logger/note-metrics.js";
 import { ContextEngine } from "../knowledge/engine/context-engine.js";
 import { resolvePaths, type ObsidiClawPaths } from "../core/config.js";
 import type { RunEvent } from "../logger/types.js";
 import { startMdDbLintWatcher } from "../automation/jobs/watchers/md-db-lint-watcher.js";
-import { runMirrorTs } from "../automation/scripts/mirror-codebase.js";
-import { runMirrorPy } from "../automation/scripts/mirror-codebase-py.js";
+import { runWorkspaceMirror } from "../automation/scripts/run-workspace-mirror.js";
 import { WorkspaceRegistry } from "../automation/workspaces/workspace-registry.js";
 
 // ---------------------------------------------------------------------------
@@ -66,8 +65,8 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
   // ── RunLogger ───────────────────────────────────────────────────────────
   const logger = new RunLogger({
     dbPath: paths.dbPath,
-    onRetrievalError: (sid, rid, timestamp, errorPayload) => {
-      noteMetrics.logRetrievalError({ sessionId: sid, runId: rid ?? undefined, timestamp, errorPayload });
+    onRetrievalError: (sid, timestamp, errorPayload) => {
+      noteMetrics.logRetrievalError({ sessionId: sid, timestamp, errorPayload });
     },
   });
 
@@ -80,6 +79,8 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     paths.mdDbPath,
     paths.personalitiesDir,
     (event) => logger.logEvent({ ...event, sessionId } as RunEvent),
+    () => { if (++activeSummarizers === 1) reindexControl.suspend(); },
+    () => { if (--activeSummarizers === 0) reindexControl.flush(); },
   );
 
   // ── ContextEngine ───────────────────────────────────────────────────────
@@ -90,7 +91,6 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
       logger.logEvent({
         ...event,
         sessionId: event.sessionId ?? sessionId,
-        runId: event.runId ?? "",
       } as RunEvent);
     },
   });
@@ -99,7 +99,16 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
   let mdDbWatcher: ReturnType<typeof startMdDbLintWatcher> | undefined;
 
   // ── md_db reindex watcher (incremental update on change) ────────────────
-  let reindexWatcher: FSWatcher | undefined;
+  let reindexWatcher: ReindexWatcherControl | undefined;
+
+  // ── Summarizer ref counter + reindex control shim ───────────────────────
+  // Suspends the reindex debounce while any summarizer worker is running.
+  // Shim methods are populated in initialize() once the watcher is created.
+  let activeSummarizers = 0;
+  const reindexControl: { suspend(): void; flush(): void } = {
+    suspend: () => {},
+    flush: () => {},
+  };
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
@@ -122,28 +131,21 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
           active: true,
         });
       } else {
-        // Subsequent boots: re-run mirrors for all active workspaces
-        // (mtime check makes this fast — skips up-to-date notes)
+        // Subsequent boots: re-run mirrors + cleanup for all active workspaces.
+        // mtime check inside each parser keeps this fast — only stale files
+        // are rewritten. cleanMirrorDir removes notes for files deleted since
+        // the last run (e.g. while the watcher was not active).
         for (const entry of workspaceRegistry.list()) {
           if (entry.active && entry.mode === "code") {
-            const mirrorDir = workspaceRegistry.mirrorDir(entry);
-            const prefix = WorkspaceRegistry.wikilinkPrefix(entry);
-            const promises: Promise<unknown>[] = [];
-            if (entry.languages.includes("ts")) {
-              promises.push(runMirrorTs({
-                scanDir: entry.sourceDir, mirrorDir,
-                omitPatterns: entry.omitPatterns?.ts ?? ["dist", "node_modules", "_legacy", ".claude", "*.d.ts"],
-                force: false, workspace: entry.name, wikilinkPrefix: prefix,
-              }));
-            }
-            if (entry.languages.includes("py")) {
-              promises.push(runMirrorPy({
-                scanDir: entry.sourceDir, mirrorDir,
-                omitPatterns: entry.omitPatterns?.py ?? ["__pycache__", "*.pyi", ".venv", "env", "venv", "dist", "node_modules"],
-                force: false, workspace: entry.name, wikilinkPrefix: prefix,
-              }));
-            }
-            await Promise.all(promises);
+            await runWorkspaceMirror({
+              scanDir: entry.sourceDir,
+              mirrorDir: workspaceRegistry.mirrorDir(entry),
+              languages: entry.languages,
+              force: false,
+              workspace: entry.name,
+              wikilinkPrefix: WorkspaceRegistry.wikilinkPrefix(entry),
+              omitPatterns: entry.omitPatterns,
+            });
           }
         }
       }
@@ -151,7 +153,6 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
       logger.logEvent({
         type: "diagnostic",
         sessionId,
-        runId: "",
         timestamp: Date.now(),
         module: "stack",
         level: "error",
@@ -167,7 +168,10 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     // incrementalUpdate() is a no-op (queued in Python background thread).
     mdDbWatcher = startMdDbLintWatcher(paths.mdDbPath);
     workspaceRegistry.startAllWatchers();
-    reindexWatcher = startMdDbReindexWatcher(paths.mdDbPath, engine, sessionId, (event) => logger.logEvent({ ...event, sessionId } as RunEvent));
+    const ctrl = startMdDbReindexWatcher(paths.mdDbPath, engine, sessionId, (event) => logger.logEvent({ ...event, sessionId } as RunEvent));
+    reindexWatcher = ctrl;
+    reindexControl.suspend = ctrl.suspend;
+    reindexControl.flush = ctrl.flush;
 
     // ── Phase 3: engine init (sees settled md_db, hash is stable) ─────────
     await engine.initialize();
@@ -206,33 +210,48 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
 
 const REINDEX_DEBOUNCE_MS = 1500;
 
+/** Control handle returned by startMdDbReindexWatcher. */
+interface ReindexWatcherControl {
+  /** Close the underlying chokidar watcher. */
+  close(): Promise<void>;
+  /** Suspend the debounce timer — paths still accumulate, no flush fires. */
+  suspend(): void;
+  /** Cancel the timer, resume, and fire incrementalUpdate immediately with accumulated paths. */
+  flush(): void;
+}
+
 /**
  * Watch md_db for .md file changes and trigger incremental engine updates.
  * Batches rapid changes (debounce) and sends only the changed/deleted paths.
+ *
+ * Supports suspend/flush so callers can hold back the debounce while a
+ * summarizer worker is running (preventing N×2 reindex events per save).
  */
 function startMdDbReindexWatcher(
   mdDbPath: string,
   engine: ContextEngine,
   sessionId: string,
   onEvent?: (event: RunEvent) => void,
-): FSWatcher {
+): ReindexWatcherControl {
   const pendingChanged = new Set<string>();
   const pendingDeleted = new Set<string>();
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+  let suspended = false;
 
   function toRelPath(absPath: string): string {
     return relative(mdDbPath, absPath).replace(/\\/g, "/");
   }
 
   function scheduleFlush(): void {
+    if (suspended) return; // accumulate paths but don't fire yet
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       debounceTimer = undefined;
-      void flush();
+      void flushInternal();
     }, REINDEX_DEBOUNCE_MS);
   }
 
-  async function flush(): Promise<void> {
+  async function flushInternal(): Promise<void> {
     const changed = [...pendingChanged];
     const deleted = [...pendingDeleted];
     pendingChanged.clear();
@@ -293,5 +312,22 @@ function startMdDbReindexWatcher(
   watcher.on("change", handleChange);
   watcher.on("unlink", handleUnlink);
 
-  return watcher;
+  return {
+    close: () => watcher.close(),
+    suspend: () => {
+      suspended = true;
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+        debounceTimer = undefined;
+      }
+    },
+    flush: () => {
+      suspended = false;
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+        debounceTimer = undefined;
+      }
+      void flushInternal();
+    },
+  };
 }

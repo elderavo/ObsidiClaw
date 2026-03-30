@@ -79,6 +79,19 @@ _Non-code heuristics, design decisions, failure modes relevant to the query._
 
 ---
 
+## Nothing Found
+
+If the retrieved notes do not substantively address the query — the content is unrelated, describes deleted/renamed features, or contains no relevant symbols, files, or concepts — output **only** this and nothing else:
+
+```
+## Nothing Found
+
+Retrieved notes do not address this query. Investigate directly:
+- [list specific files, symbols, or directories to read based on the query]
+```
+
+Do not attempt to synthesize from unrelated notes. Do not use general knowledge to fill gaps. An honest "nothing found" is always better than a plausible-sounding wrong answer.
+
 ## Hard Constraints
 
 - No conversational tone
@@ -87,6 +100,7 @@ _Non-code heuristics, design decisions, failure modes relevant to the query._
 - No meta commentary
 - **Always include file paths** for code references — do not strip them
 - **Never fabricate** — only output what is in the input notes; speculation goes in Gaps
+- **When in doubt, output Nothing Found** — the agent can investigate; it cannot un-trust a confident wrong answer
 
 ---
 

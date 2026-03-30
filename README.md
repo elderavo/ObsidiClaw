@@ -15,7 +15,6 @@ Self-improving memory and context injection system for AI agents. Maintains a ma
 
 - **`pi`** — Interactive TUI. The ObsidiClaw extension boots the full stack automatically.
 - **`npm run dev:mcp`** — Headless MCP server (no TUI). Useful for scripting, CI, and gateway integrations.
-- **`npm run start:mcp`** — Same as above, but runs built JS from `dist/`.
 
 Both paths use `createObsidiClawStack()` from `entry/stack.ts` for shared infrastructure.
 

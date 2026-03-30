@@ -9,8 +9,6 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 export interface ToolContext {
   /** MCP client — reassigned each session_start. */
   client: Client;
-  /** Current run ID — updated each before_agent_start. */
-  currentRunId: string;
   /** Engine availability — set during session_start. */
   engineState: "ok" | "degraded" | "unavailable";
 }
