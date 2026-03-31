@@ -39,6 +39,10 @@ from .models import ParsedNote, RetrievedNote
 
 log = logging.getLogger(__name__)
 
+
+class WorkspaceScopeViolationError(RuntimeError):
+    """Raised when scoped vector retrieval returns a note outside requested workspace."""
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -295,6 +299,14 @@ class ObsidiClawRetriever:
             content = parsed.body if parsed else getattr(node, "text", "")
             tier = parsed.tier if parsed else ""
             ws = parsed.workspace if parsed else str(metadata.get("workspace", ""))
+
+            # Workspace scope is a hard contract for scoped retrieval.
+            # If the vector backend violates metadata filtering, fail this path
+            # and let the engine fall back to deterministic keyword retrieval.
+            if workspace and ws != workspace:
+                raise WorkspaceScopeViolationError(
+                    f"workspace scope violated: requested={workspace!r} got={ws!r} note={file_path!r}"
+                )
 
             boosted_score = _apply_tag_boost(score, tags, query_tokens)
 

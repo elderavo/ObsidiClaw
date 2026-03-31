@@ -367,14 +367,12 @@ export class WorkspaceRegistry {
   }
 
   /**
-   * Unregister a workspace: stop watcher, optionally delete notes, remove from registry.
+   * Unregister a workspace: stop watcher, delete mirrored notes, remove from registry.
    * Returns list of deleted note paths (relative to md_db) for incremental update.
    */
   async unregister(
     name: string,
-    opts: { deleteNotes?: boolean } = {},
   ): Promise<{ removed: WorkspaceEntry | undefined; deletedPaths: string[] }> {
-    const deleteNotes = opts.deleteNotes ?? true;
     const entry = this.getByName(name);
     if (!entry) return { removed: undefined, deletedPaths: [] };
 
@@ -385,7 +383,7 @@ export class WorkspaceRegistry {
     const deletedPaths: string[] = [];
     const mirrorDir = this.mirrorDir(entry);
 
-    if (deleteNotes && existsSync(mirrorDir)) {
+    if (existsSync(mirrorDir)) {
       collectMdPaths(mirrorDir, this.mdDbPath, deletedPaths);
       rmSync(mirrorDir, { recursive: true, force: true });
     }

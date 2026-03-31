@@ -67,12 +67,13 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
       inputSchema: {
         query: z.string().describe("What to search for in the knowledge base."),
         workspace: z.string().optional().describe("Limit retrieval to a specific registered workspace by name. Omit to search all workspaces."),
+        max_chars: z.number().optional().describe("Maximum characters to return (default: 10000)."),
       },
     },
-    async ({ query, workspace }) => {
+    async ({ query, workspace, max_chars }) => {
       const pkg = await engine.build(query, workspace);
       onContextBuilt?.(pkg);
-      const budget = DEFAULT_MAX_CHARS;
+      const budget = Math.max(500, Math.floor(max_chars ?? DEFAULT_MAX_CHARS));
       let text = pkg.formattedContext.length <= budget
         ? pkg.formattedContext
         : pkg.formattedContext.slice(0, budget) + "\n\n_(context truncated to fit budget)_\n<!-- End ObsidiClaw Context -->";
@@ -352,18 +353,17 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
     "unregister_workspace",
     {
       description:
-        "Unregister a workspace: stops watcher, optionally deletes mirrored notes, and removes from registry.",
+        "Unregister a workspace: stops watcher, deletes mirrored notes, and removes from registry.",
       inputSchema: {
         name: z.string().describe("Workspace name to remove."),
-        delete_notes: z.boolean().default(true).describe("Delete mirrored notes from md_db (default: true)."),
       },
     },
-    async ({ name, delete_notes }) => {
+    async ({ name }) => {
       if (!workspaceRegistry) {
         return { content: [{ type: "text" as const, text: "Workspace registry not available." }] };
       }
       try {
-        const { removed, deletedPaths } = await workspaceRegistry.unregister(name, { deleteNotes: delete_notes });
+        const { removed, deletedPaths } = await workspaceRegistry.unregister(name);
         if (!removed) {
           return { content: [{ type: "text" as const, text: `Workspace "${name}" not found.` }] };
         }

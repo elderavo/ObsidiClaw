@@ -62,22 +62,17 @@ export function registerWorkspaceTools(pi: ExtensionAPI, ctx: ToolContext): void
     name: "unregister_workspace",
     label: "Unregister Workspace",
     description:
-      "Unregister a workspace: stops watcher, optionally deletes mirrored notes, " +
+      "Unregister a workspace: stops watcher, deletes mirrored notes, " +
       "and removes from registry.",
-    promptSnippet: "unregister_workspace(name, delete_notes?) — remove a registered workspace",
+    promptSnippet: "unregister_workspace(name) — remove a registered workspace",
     parameters: Type.Object({
       name: Type.String({
         description: "Workspace name to remove.",
       }),
-      delete_notes: Type.Optional(Type.Boolean({
-        description: "Delete mirrored notes from md_db (default: true).",
-      })),
     }),
     execute: async (_toolCallId, args, _signal, _onUpdate, _ctx) => {
-      const { name, delete_notes } = args as { name: string; delete_notes?: boolean };
-      const mcpArgs: Record<string, unknown> = { name };
-      if (delete_notes != null) mcpArgs.delete_notes = delete_notes;
-      const result = await ctx.client.callTool({ name: "unregister_workspace", arguments: mcpArgs });
+      const { name } = args as { name: string };
+      const result = await ctx.client.callTool({ name: "unregister_workspace", arguments: { name } });
       const text = extractMcpText(result);
       return {
         content: [{ type: "text" as const, text }],

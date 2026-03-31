@@ -206,7 +206,7 @@ class KnowledgeGraphEngine:
         # Try vector retrieval first
         if self.index is not None:
             try:
-                from .retriever import ObsidiClawRetriever
+                from .retriever import ObsidiClawRetriever, WorkspaceScopeViolationError
 
                 retriever = ObsidiClawRetriever(
                     index=self.index,
@@ -216,6 +216,10 @@ class KnowledgeGraphEngine:
                     similarity_top_k=k,
                 )
                 seed_notes, expanded_notes = retriever.retrieve(query, workspace=workspace)
+            except WorkspaceScopeViolationError as exc:
+                log.error("Vector retrieval violated workspace scope, falling back to keyword: %s", exc)
+                seed_notes = []
+                expanded_notes = []
             except Exception as exc:
                 log.warning("Vector retrieval failed, falling back to keyword: %s", exc)
                 seed_notes = []
