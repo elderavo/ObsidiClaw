@@ -38,13 +38,40 @@ const rootDir = process.env["OBSIDI_ROOT_DIR"] ?? process.cwd();
 // Stack + MCP server
 // ---------------------------------------------------------------------------
 
-const stack = createObsidiClawStack({ rootDir, sessionId });
+// Build knowVaults map before stack init so it's ready for the MCP server.
+// Populated once stack (and workspaceRegistry) is created.
+const knowVaults = new Map<string, string>();
+
+const stack = createObsidiClawStack({
+  rootDir,
+  sessionId,
+  onInboxNote: (workspaceName, filePath) => {
+    // Fire-and-forget: process_inbox_note MCP tool handles it properly.
+    // Here we just log the event so runs.db has a trace.
+    stack.logger.logEvent({
+      type: "diagnostic",
+      sessionId,
+      timestamp: Date.now(),
+      module: "inbox_watcher",
+      level: "info",
+      message: `Inbox note queued: ${workspaceName}/${filePath.split(/[\\/]/).pop()}`,
+    } as RunEvent);
+  },
+});
+
+// Populate knowVaults after stack is created
+for (const ws of stack.workspaceRegistry.list()) {
+  if (ws.mode === "know" && ws.active) {
+    knowVaults.set(ws.name, ws.sourceDir);
+  }
+}
 
 const mcpServer = createContextEngineMcpServer({
   engine: stack.engine,
   pruneStorage: stack.noteMetrics.pruneStorage,
   workspaceRegistry: stack.workspaceRegistry,
   mdDbPath: stack.paths.mdDbPath,
+  knowVaults,
   onContextBuilt: (pkg) => {
     const noteHits = pkg.retrievedNotes.map((n) => ({
       noteId: n.noteId,

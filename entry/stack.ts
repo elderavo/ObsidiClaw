@@ -32,6 +32,8 @@ export interface StackOptions {
   rootDir?: string;
   /** Session ID override. Generated if not provided. */
   sessionId?: string;
+  /** Called when a new note lands in a know workspace's inbox. */
+  onInboxNote?: (workspaceName: string, filePath: string) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -57,6 +59,7 @@ export interface ObsidiClawStack {
 // ---------------------------------------------------------------------------
 
 export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack {
+  const { onInboxNote } = opts;
   const paths = resolvePaths(opts.rootDir);
   const sessionId = opts.sessionId ?? randomUUID();
   const reviewEnabledRaw = (process.env["OBSIDI_CONTEXT_REVIEW"] ?? "1").toLowerCase();
@@ -81,6 +84,7 @@ export function createObsidiClawStack(opts: StackOptions = {}): ObsidiClawStack 
     (event) => logger.logEvent({ ...event, sessionId } as RunEvent),
     () => { if (++activeSummarizers === 1) reindexControl.suspend(); },
     () => { if (--activeSummarizers === 0) reindexControl.flush(); },
+    onInboxNote,
   );
 
   // ── ContextEngine ───────────────────────────────────────────────────────

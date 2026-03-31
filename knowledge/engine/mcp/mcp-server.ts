@@ -20,6 +20,7 @@ import type { ContextPackage, PruneMemberStatus } from "../types.js";
 import type { PruneClusterStorage } from "../prune/prune-storage.js";
 import type { WorkspaceRegistry } from "../../../automation/workspaces/workspace-registry.js";
 import { RATE_CONTEXT_REMINDER } from "../../../agents/prompts.js";
+import { processInboxNote } from "./process-inbox-note.js";
 
 export type OnContextBuilt = (pkg: ContextPackage) => void;
 export type OnContextRated = (rating: { query: string; score: number; missing: string; helpful: string }) => void;
@@ -36,6 +37,11 @@ export interface McpServerOptions {
   onBackgroundError?: (context: string, err: unknown) => void;
   /** Absolute path to md_db root — required for create_concept_note. */
   mdDbPath?: string;
+  /**
+   * Map of know workspace name → vault source dir.
+   * Required for process_inbox_note / list_inbox_notes tools.
+   */
+  knowVaults?: Map<string, string>;
 }
 
 export function createContextEngineMcpServer(opts: McpServerOptions): McpServer {
@@ -43,7 +49,7 @@ export function createContextEngineMcpServer(opts: McpServerOptions): McpServer 
 }
 
 function _createMcpServer(opts: McpServerOptions): McpServer {
-  const { engine, onContextBuilt, onContextRated, pruneStorage, workspaceRegistry, onBackgroundError, mdDbPath } = opts;
+  const { engine, onContextBuilt, onContextRated, pruneStorage, workspaceRegistry, onBackgroundError, mdDbPath, knowVaults } = opts;
   const server = new McpServer({ name: "obsidi-claw-context", version: "1.0.0" });
 
   // ── retrieve_context ──────────────────────────────────────────────────────
@@ -453,6 +459,112 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
         content: [{
           type: "text" as const,
           text: `Concept note created: ${noteId}\nPath: ${notePath}\nThe reindex watcher will pick this up within ~2 seconds.`,
+        }],
+      };
+    },
+  );
+
+  // ── list_inbox_notes ────────────────────────────────────────────────────────
+
+  server.registerTool(
+    "list_inbox_notes",
+    {
+      description:
+        "List pending .md files in the inbox for a know workspace. " +
+        "Call at session start to find notes awaiting pipeline processing.",
+      inputSchema: {
+        workspace: z.string().describe("Name of a registered know workspace."),
+      },
+    },
+    async ({ workspace }) => {
+      const vaultDir = knowVaults?.get(workspace);
+      if (!vaultDir) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `No know workspace named "${workspace}" found. Use list_workspaces to see registered workspaces.`,
+          }],
+        };
+      }
+
+      const inboxDir = path.join(vaultDir, "notes", "inbox");
+      let files: string[];
+      try {
+        files = fs.readdirSync(inboxDir).filter((f) => f.endsWith(".md"));
+      } catch {
+        return { content: [{ type: "text" as const, text: `Inbox directory not found: ${inboxDir}` }] };
+      }
+
+      if (files.length === 0) {
+        return { content: [{ type: "text" as const, text: "Inbox is empty." }] };
+      }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `${files.length} note(s) pending in inbox:\n` + files.map((f) => `- ${f}`).join("\n"),
+        }],
+      };
+    },
+  );
+
+  // ── process_inbox_note ───────────────────────────────────────────────────────
+
+  server.registerTool(
+    "process_inbox_note",
+    {
+      description:
+        "Run the inbox pipeline on a single note: resolve #TODOs, suggest tags, check atomicity, promote to notes/permanent or notes/synthesized. " +
+        "Call after list_inbox_notes or when the inbox watcher fires.",
+      inputSchema: {
+        workspace: z.string().describe("Name of the know workspace the note belongs to."),
+        filename: z.string().describe("Filename only (e.g. attention-transformers.md), not a full path."),
+      },
+    },
+    async ({ workspace, filename }) => {
+      const vaultDir = knowVaults?.get(workspace);
+      if (!vaultDir) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `No know workspace named "${workspace}" found.`,
+          }],
+        };
+      }
+
+      const filePath = path.join(vaultDir, "notes", "inbox", filename);
+      if (!fs.existsSync(filePath)) {
+        return {
+          content: [{ type: "text" as const, text: `File not found: ${filePath}` }],
+        };
+      }
+
+      const result = await processInboxNote({
+        vaultDir,
+        filePath,
+        workspace,
+        retrieveContext: async (query, ws) => {
+          try {
+            const pkg = await engine.build(query, ws);
+            return pkg.formattedContext;
+          } catch {
+            return "## Nothing Found\n\nContext engine unavailable.";
+          }
+        },
+      });
+
+      const stepLines = result.steps.map(
+        (s) => `**${s.step}** [${s.status}]: ${s.detail}`,
+      );
+
+      const summary = result.promoted
+        ? `✓ Promoted to: ${result.destination}`
+        : `✗ Not promoted — review the note and re-run process_inbox_note.`;
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: [summary, "", ...stepLines].join("\n"),
         }],
       };
     },

@@ -102,6 +102,18 @@ Aim for root cause, not symptom description.
 
 ---
 
+## Know Workspace — Inbox Pipeline
+
+At session start, for every active `know` workspace:
+
+1. Call `list_inbox_notes(workspace)` to check for pending inbox notes.
+2. For each note returned, call `process_inbox_note(workspace, filename)`.
+3. Report the result: promoted notes, blocked notes (and why), any errors.
+
+Do this before taking any other action. Notes blocked by a `## ⚠️ Atomicity` section need user review in Obsidian — flag them clearly.
+
+---
+
 ## Gap Filling Loop
 
 When `retrieve_context` returns a response starting with `## Nothing Found`:

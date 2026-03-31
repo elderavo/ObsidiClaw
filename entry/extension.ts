@@ -34,7 +34,7 @@ import { RunLogger } from "../logger/run-logger.js";
 import { mapPiEventToRunEvent } from "../agents/pi-event-mapper.js";
 import { buildDirectoryTree, stripDirectoryBlock } from "../automation/scripts/update-directory-tree.js";
 import { TOOL_REMINDER, ENGINE_UNAVAILABLE_WARNING } from "../agents/prompts.js";
-import { buildNoteContent, buildInboxFilename, VAULT_NOTE_TYPES, NOTE_TYPE_DESCRIPTIONS, type VaultNoteType } from "../knowledge/markdown/vault-schema.js";
+import { buildNoteContent, buildNoteFilename, VAULT_NOTE_TYPES, NOTE_TYPE_DESCRIPTIONS, type VaultNoteType } from "../knowledge/markdown/vault-schema.js";
 import type { RunEvent } from "../logger/types.js";
 import type { ToolContext } from "./tools/types.js";
 import { registerRetrieveContextTool } from "./tools/retrieve-context.js";
@@ -440,25 +440,144 @@ export function createObsidiClawExtension(
         return "No vault workspace registered. Use /workspace to register a 'know' workspace first.";
       }
 
+      // Step 1: Title
       const title = await ui.input("Note Title", suggestedTitle ?? "Untitled");
       if (title === undefined) return "Note capture cancelled.";
       const finalTitle = title.trim() || "Untitled";
 
+      // Step 2: Content
       const content = await ui.editor("Note Content", suggestedContent ?? "");
       if (content === undefined) return "Note capture cancelled.";
 
+      // Step 3: Type
       const typeLabels = VAULT_NOTE_TYPES.map((t) => NOTE_TYPE_DESCRIPTIONS[t]);
       const typeChoice = await ui.select("Note Type", typeLabels);
       if (!typeChoice) return "Note capture cancelled.";
       const noteType = VAULT_NOTE_TYPES[typeLabels.indexOf(typeChoice)] ?? "permanent";
 
+      // Step 4: Suggested Links
+      const selectedLinks = await suggestLinksModal(ui, finalTitle, content);
+
       ensureDir(vaultInboxPath);
-      const filename = buildInboxFilename(finalTitle);
-      const fileContent = buildNoteContent(noteType as VaultNoteType, finalTitle, content);
+      const filename = buildNoteFilename(finalTitle);
+      const fileContent = buildNoteContent(noteType as VaultNoteType, finalTitle, content, [], selectedLinks);
       writeText(join(vaultInboxPath, filename), fileContent);
 
+      const linkNote = selectedLinks.length > 0 ? ` with ${selectedLinks.length} link(s)` : "";
       ui.notify(`Note saved to inbox: ${filename}`, "info");
-      return `Note "${finalTitle}" saved to vault inbox (${filename}). The inbox pipeline will lint and suggest links shortly.`;
+      return `Note "${finalTitle}" saved to vault inbox (${filename})${linkNote}. The inbox pipeline will process it shortly.`;
+    }
+
+    /**
+     * Call retrieve_context, parse wikilinks from the result, and show a
+     * looping single-select that simulates multi-select. Returns selected links.
+     */
+    async function suggestLinksModal(
+      ui: ExtensionUIContext,
+      title: string,
+      body: string,
+    ): Promise<string[]> {
+      // Find the active know workspace for scoping
+      const knowWorkspace = readyParams?.activeWorkspaces.find((w) => w.mode === "know")?.name;
+
+      ui.notify("Fetching link suggestions…", "info");
+
+      let contextText: string;
+      try {
+        const result = await Promise.race([
+          client.callTool({
+            name: "retrieve_context",
+            arguments: {
+              prompt: `${title} ${body.slice(0, 300)}`,
+              ...(knowWorkspace ? { workspace: knowWorkspace } : {}),
+            },
+          }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 4000)),
+        ]);
+        contextText = extractMcpText(result as { content: { type: string; text: string }[] });
+      } catch {
+        // Timeout or error — skip links step silently
+        return [];
+      }
+
+      if (!contextText || contextText.startsWith("## Nothing Found")) {
+        ui.notify("No related notes found — skipping link suggestions.", "info");
+        return [];
+      }
+
+      // Extract [[wikilinks]] with surrounding sentence as context blurb
+      const linkItems = parseWikilinkSuggestions(contextText);
+      if (linkItems.length === 0) return [];
+
+      // Looping single-select simulates multi-select:
+      // selected items get a ✓ prefix; "Done" exits.
+      const selected = new Set<string>();
+
+      while (true) {
+        const doneLabel = `✓ Done  (${selected.size} selected)`;
+        const options = [
+          doneLabel,
+          ...linkItems.map(({ link, blurb }) => {
+            const prefix = selected.has(link) ? "✓ " : "  ";
+            return `${prefix}${link}${blurb ? `  —  ${blurb}` : ""}`;
+          }),
+        ];
+
+        const choice = await ui.select(
+          `Suggested Links  (↑↓ scroll · Enter select · pick "Done" to finish)`,
+          options,
+        );
+
+        if (!choice || choice === doneLabel) break;
+
+        // Find the link corresponding to this option
+        const idx = options.indexOf(choice) - 1; // -1 because first option is "Done"
+        const item = linkItems[idx];
+        if (item) {
+          if (selected.has(item.link)) {
+            selected.delete(item.link); // toggle off
+          } else {
+            selected.add(item.link);
+          }
+        }
+      }
+
+      // Format as "- [[link]] — blurb" entries
+      return [...selected].map((link) => {
+        const item = linkItems.find((l) => l.link === link);
+        return item?.blurb ? `${link} — ${item.blurb}` : link;
+      });
+    }
+
+    /** Extract [[wikilinks]] from context markdown with a short surrounding blurb. */
+    function parseWikilinkSuggestions(markdown: string): { link: string; blurb: string }[] {
+      const seen = new Set<string>();
+      const results: { link: string; blurb: string }[] = [];
+      const wikilinkRe = /\[\[([^\]]+)\]\]/g;
+      const lines = markdown.split("\n");
+
+      for (const line of lines) {
+        let m: RegExpExecArray | null;
+        wikilinkRe.lastIndex = 0;
+        while ((m = wikilinkRe.exec(line)) !== null) {
+          const raw = m[1]!;
+          // Strip path prefix — keep only the last segment as the display title
+          const parts = raw.split("/");
+          const title = parts[parts.length - 1]!;
+          const link = `[[${title}]]`;
+          if (seen.has(link)) continue;
+          seen.add(link);
+          // Use the line text (minus the wikilink itself) as blurb, trimmed to 60 chars
+          const blurb = line
+            .replace(/\[\[[^\]]+\]\]/g, "")
+            .replace(/^[#*>\-\s]+/, "")
+            .trim()
+            .slice(0, 60);
+          results.push({ link, blurb });
+        }
+      }
+
+      return results;
     }
 
     // ── /note command ─────────────────────────────────────────────────────────

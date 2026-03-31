@@ -60,11 +60,18 @@ class KeywordRetriever:
                 normalize_token(w) for w in note.body.split() if normalize_token(w)
             }
 
-    def retrieve(self, query: str, top_k: int = 8) -> list[RetrievedNote]:
+    def retrieve(
+        self,
+        query: str,
+        top_k: int = 8,
+        workspace: str | None = None,
+    ) -> list[RetrievedNote]:
         """Retrieve notes ranked by keyword overlap with the query.
 
         Returns at most top_k RetrievedNote objects with scores normalized
         so the best match has score 1.0.
+
+        If workspace is set, only notes with matching workspace are considered.
         """
         query_tokens = {
             normalize_token(w) for w in query.lower().split() if normalize_token(w)
@@ -78,6 +85,9 @@ class KeywordRetriever:
         for note_id, note in self._notes.items():
             # Skip index notes
             if note.note_type == "index":
+                continue
+
+            if workspace and note.workspace != workspace:
                 continue
 
             title_overlap = len(query_tokens & self._title_tokens.get(note_id, set()))
@@ -121,6 +131,8 @@ class KeywordRetriever:
                     tags=note.tags,
                     linked_from=None,
                     depth=0,
+                    tier=note.tier,
+                    workspace=note.workspace,
                 )
             )
 

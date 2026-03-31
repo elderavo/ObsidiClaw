@@ -14,6 +14,7 @@ import type { FSWatcher } from "chokidar";
 
 import { startWorkspaceMirrorWatcher, type WorkspaceMirrorConfig } from "../jobs/watchers/mirror-watcher.js";
 import { startVaultWatcher, runInitialVaultCopy } from "../jobs/watchers/vault-watcher.js";
+import { startInboxWatcher } from "../jobs/watchers/inbox-watcher.js";
 import { runWorkspaceMirror } from "../scripts/run-workspace-mirror.js";
 import type { RunEvent } from "../../logger/types.js";
 
@@ -91,6 +92,11 @@ export class WorkspaceRegistry {
     private readonly onSummarizerStart?: () => void,
     /** Called when the last summarize worker exits — forwarded to reindex watcher for flush. */
     private readonly onSummarizerDone?: () => void,
+    /**
+     * Called when a new note lands in a know workspace's inbox.
+     * Args: workspace name, absolute file path.
+     */
+    private readonly onInboxNote?: (workspaceName: string, filePath: string) => void,
   ) {}
 
   // ── Persistence ──────────────────────────────────────────────────────────
@@ -219,6 +225,7 @@ export class WorkspaceRegistry {
   // ── Watcher lifecycle ─────────────────────────────────────────────────
 
   private watchers = new Map<string, FSWatcher>();
+  private inboxWatchers = new Map<string, FSWatcher>();
 
   /**
    * Start a mirror watcher for a single workspace entry.
@@ -247,11 +254,19 @@ export class WorkspaceRegistry {
       const watcher = startWorkspaceMirrorWatcher(config);
       this.watchers.set(entry.id, watcher);
     } else if (entry.mode === "know") {
-      const watcher = startVaultWatcher({
+      const vaultWatcher = startVaultWatcher({
         sourceDir: entry.sourceDir,
         mirrorDir: this.mirrorDir(entry),
       });
-      this.watchers.set(entry.id, watcher);
+      this.watchers.set(entry.id, vaultWatcher);
+
+      if (this.onInboxNote) {
+        const inboxWatcher = startInboxWatcher({
+          vaultDir: entry.sourceDir,
+          onInboxNote: (filePath) => this.onInboxNote!(entry.name, filePath),
+        });
+        this.inboxWatchers.set(entry.id, inboxWatcher);
+      }
     }
   }
 
@@ -261,6 +276,11 @@ export class WorkspaceRegistry {
     if (watcher) {
       await watcher.close();
       this.watchers.delete(id);
+    }
+    const inboxWatcher = this.inboxWatchers.get(id);
+    if (inboxWatcher) {
+      await inboxWatcher.close();
+      this.inboxWatchers.delete(id);
     }
   }
 

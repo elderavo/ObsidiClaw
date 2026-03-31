@@ -23,7 +23,7 @@ from llama_index.core.schema import TextNode, Document
 
 from .indexer import build_index, load_index, _scan_md_db, _build_graph_store
 from .keyword_retriever import KeywordRetriever
-from .markdown_utils import compute_md_db_hash
+from .markdown_utils import compute_md_db_hash, normalize_token
 from .models import ParsedNote, RetrievedNote
 from .providers import get_embed_config, check_reachable, create_embedding
 
@@ -223,8 +223,16 @@ class KnowledgeGraphEngine:
 
         # Fallback to keyword retrieval if vector produced no results
         if not seed_notes and self.keyword_retriever is not None:
-            seed_notes = self.keyword_retriever.retrieve(query, top_k=k)
-            expanded_notes = self._expand_via_graph(seed_notes)
+            seed_notes = self.keyword_retriever.retrieve(
+                query,
+                top_k=k,
+                workspace=workspace,
+            )
+            expanded_notes = self._expand_via_graph(
+                seed_notes,
+                query=query,
+                workspace=workspace,
+            )
 
         return {
             "seed_notes": [self._note_to_dict(n) for n in seed_notes],
@@ -235,58 +243,28 @@ class KnowledgeGraphEngine:
     # Graph expansion (reusable)
     # ------------------------------------------------------------------
 
-    def _expand_via_graph(self, seed_notes: list[RetrievedNote]) -> list[RetrievedNote]:
-        """Expand seed notes via graph store (depth-1 neighbors)."""
-        if not self.graph_store or not seed_notes:
-            return []
+    def _expand_via_graph(
+        self,
+        seed_notes: list[RetrievedNote],
+        query: str,
+        workspace: Optional[str] = None,
+    ) -> list[RetrievedNote]:
+        """Expand seed notes via tier-aware graph expansion shared with retriever."""
+        from .retriever import expand_graph_neighbors
 
-        from .retriever import NEIGHBOR_SCORE_DECAY
+        query_tokens = {
+            normalize_token(w)
+            for w in query.lower().split()
+            if normalize_token(w)
+        }
 
-        seed_ids = {n.note_id for n in seed_notes}
-        seed_scores = {n.note_id: n.score for n in seed_notes}
-        expanded: list[RetrievedNote] = []
-        expanded_ids: set[str] = set()
-
-        for seed in seed_notes:
-            try:
-                triplets = self.graph_store.get_triplets(entity_names=[seed.note_id])
-            except Exception as exc:
-                log.warning("get_triplets failed for %s: %s", seed.note_id, exc)
-                continue
-
-            for source_node, _relation, target_node in triplets:
-                source_name = getattr(source_node, "name", "")
-                target_name = getattr(target_node, "name", "")
-                neighbor_id = target_name if source_name == seed.note_id else source_name
-
-                if neighbor_id in seed_ids or neighbor_id in expanded_ids:
-                    continue
-
-                parsed = self._parsed_notes.get(neighbor_id)
-                if not parsed or parsed.note_type == "index":
-                    continue
-
-                parent_score = seed_scores.get(seed.note_id, 0.5)
-                neighbor_score = parent_score * NEIGHBOR_SCORE_DECAY
-
-                expanded.append(
-                    RetrievedNote(
-                        note_id=neighbor_id,
-                        path=neighbor_id,
-                        content=parsed.body,
-                        score=neighbor_score,
-                        type=parsed.note_type,
-                        tool_id=parsed.tool_id,
-                        tags=parsed.tags,
-                        retrieval_source="graph",
-                        linked_from=[seed.note_id],
-                        depth=1,
-                    )
-                )
-                expanded_ids.add(neighbor_id)
-
-        expanded.sort(key=lambda n: n.score, reverse=True)
-        return expanded
+        return expand_graph_neighbors(
+            graph_store=self.graph_store,
+            parsed_notes=self._parsed_notes,
+            seed_notes=seed_notes,
+            query_tokens=query_tokens,
+            workspace=workspace,
+        )
 
     # ------------------------------------------------------------------
     # Note content

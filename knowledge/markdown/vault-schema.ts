@@ -22,6 +22,22 @@ export const NOTE_TYPE_DESCRIPTIONS: Record<VaultNoteType, string> = {
 };
 
 // ---------------------------------------------------------------------------
+// ID helpers
+// ---------------------------------------------------------------------------
+
+/** Generate a timestamp-based Zettelkasten ID: YYYYMMDDHHmm */
+export function generateNoteId(date: Date = new Date()): string {
+  const pad = (n: number, len = 2) => String(n).padStart(len, "0");
+  return (
+    String(date.getFullYear()) +
+    pad(date.getMonth() + 1) +
+    pad(date.getDate()) +
+    pad(date.getHours()) +
+    pad(date.getMinutes())
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Frontmatter builder
 // ---------------------------------------------------------------------------
 
@@ -33,11 +49,12 @@ export function buildVaultFrontmatter(
   type: VaultNoteType,
   title: string,
   tags: string[] = [],
+  id?: string,
 ): string {
   const fields: Record<string, unknown> = {
+    id: id ?? generateNoteId(),
     title,
     type,
-    date: new Date().toISOString().slice(0, 10), // YYYY-MM-DD
     tags,
   };
 
@@ -68,10 +85,14 @@ export function slugifyTitle(title: string): string {
   );
 }
 
-/** Build an inbox filename: {ISO-timestamp}-{slug}.md */
+/** Build a note filename: {slug}.md */
+export function buildNoteFilename(title: string): string {
+  return `${slugifyTitle(title)}.md`;
+}
+
+/** @deprecated Use buildNoteFilename instead */
 export function buildInboxFilename(title: string): string {
-  const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  return `${ts}-${slugifyTitle(title)}.md`;
+  return buildNoteFilename(title);
 }
 
 /** Build the full note file content (frontmatter + title heading + body). */
@@ -80,8 +101,15 @@ export function buildNoteContent(
   title: string,
   body: string,
   tags: string[] = [],
+  links: string[] = [],
 ): string {
   const fm = buildVaultFrontmatter(type, title, tags);
   const trimmedBody = body.trim();
-  return fm + "\n# " + title + (trimmedBody ? "\n\n" + trimmedBody : "\n") + "\n";
+  let content = fm + "\n# " + title + (trimmedBody ? "\n\n" + trimmedBody : "\n");
+
+  if (links.length > 0) {
+    content += "\n\n## Links\n\n" + links.map((l) => `- ${l}`).join("\n");
+  }
+
+  return content + "\n";
 }
