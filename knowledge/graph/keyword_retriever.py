@@ -133,6 +133,7 @@ class KeywordRetriever:
                     depth=0,
                     tier=note.tier,
                     workspace=note.workspace,
+                    title=note.title,
                 )
             )
 

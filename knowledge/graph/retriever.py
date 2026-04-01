@@ -195,6 +195,7 @@ def expand_graph_neighbors(
                     depth=1,
                     tier=neighbor_parsed.tier,
                     workspace=neighbor_parsed.workspace,
+                    title=neighbor_parsed.title,
                 )
             )
             expanded_ids.add(neighbor_id)
@@ -324,6 +325,7 @@ class ObsidiClawRetriever:
                     depth=0,
                     tier=tier,
                     workspace=ws,
+                    title=parsed.title if parsed else str(metadata.get("title", "")),
                 )
             )
             seed_ids.add(file_path)

@@ -64,6 +64,7 @@ class RetrievedNote:
     depth: Optional[int] = None  # 0 = seed, 1+ = graph expansion
     tier: str = ""               # "1" | "2" | "3" | ""
     workspace: str = ""          # workspace name (empty for non-workspace notes)
+    title: str = ""              # human-readable title from frontmatter/H1
 
 
 # ---------------------------------------------------------------------------

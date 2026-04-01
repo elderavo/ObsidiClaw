@@ -796,6 +796,7 @@ interface RpcRetrievedNote {
   retrievalSource: string;
   linkedFrom?: string[] | null;
   depth?: number | null;
+  title?: string | null;
 }
 
 function rpcNoteToRetrievedNote(n: RpcRetrievedNote): RetrievedNote {
@@ -810,6 +811,7 @@ function rpcNoteToRetrievedNote(n: RpcRetrievedNote): RetrievedNote {
     retrievalSource: n.retrievalSource as RetrievedNote["retrievalSource"],
     linkedFrom: n.linkedFrom ?? undefined,
     depth: n.depth ?? undefined,
+    title: n.title ?? undefined,
   };
 }
 

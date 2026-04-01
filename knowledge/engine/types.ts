@@ -54,6 +54,9 @@ export interface RetrievedNote {
 
   /** Symbol kind for tier-1 notes: 'function', 'class', 'interface', 'type', 'const'. */
   symbolKind?: string;
+
+  /** Human-readable title from frontmatter or H1, set by the Python engine at retrieval time. */
+  title?: string;
 }
 
 // ---------------------------------------------------------------------------

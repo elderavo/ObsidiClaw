@@ -4,20 +4,15 @@
  * Steps (run in order, each blocking the next):
  *   1. TODO resolution   — fill #TODO lines via LLM
  *   2. Tag suggestions   — propose tags from context + LLM; must be non-empty to promote
- *   3. Atomicity check   — detect multi-concept notes; flag with ## ⚠️ Atomicity section
- *   4. Promotion         — obsidian move to notes/permanent | notes/synthesized | sources/
+ *   3. Promotion         — fs.rename to permanent/ | synthesized/ | sources/ within md_db/know/{ws}/
  *
  * Returns a StepResult per step so callers can report details back to Pi.
  */
 
-import { execFile } from "child_process";
-import { promisify } from "util";
-import { readFileSync, writeFileSync } from "fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import { llmChat, ProviderUnreachableError } from "../../../core/llm-client.js";
 import { parseFrontmatter, buildFrontmatter } from "../../../knowledge/markdown/frontmatter.js";
-
-const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -76,6 +71,11 @@ export async function processInboxNote(opts: InboxPipelineOptions): Promise<Inbo
 
   const { frontmatter, body } = splitNote(raw);
 
+  // Ensure know workspace notes always carry explicit workspace metadata.
+  if (workspace && (typeof frontmatter.workspace !== "string" || !frontmatter.workspace.trim())) {
+    frontmatter.workspace = workspace;
+  }
+
   const noteTitle = String(frontmatter.title ?? basename(filePath, ".md"));
 
   // ── Step 1: TODO resolution ────────────────────────────────────────────────
@@ -108,24 +108,10 @@ export async function processInboxNote(opts: InboxPipelineOptions): Promise<Inbo
     return { filePath, steps, promoted: false };
   }
 
-  // ── Step 3: Atomicity check ────────────────────────────────────────────────
-  const atomicityResult = await checkAtomicity(
-    resolvedBody,
-    noteTitle,
-    llmTimeoutMs,
-  );
-  steps.push(atomicityResult.step);
-
-  if (atomicityResult.blocked) {
-    resolvedBody = resolvedBody.trimEnd() + "\n\n" + atomicityResult.flagSection;
-    writeNote(filePath, frontmatter, resolvedBody);
-    return { filePath, steps, promoted: false };
-  }
-
   // Write back resolved body + updated tags before promotion
   writeNote(filePath, frontmatter, resolvedBody);
 
-  // ── Step 4: Promotion ──────────────────────────────────────────────────────
+  // ── Step 3: Promotion ──────────────────────────────────────────────────────
   const promotionResult = await promote(vaultDir, filePath, String(frontmatter.type ?? "permanent"));
   steps.push(promotionResult.step);
 
@@ -305,81 +291,7 @@ async function suggestTags(
 }
 
 // ---------------------------------------------------------------------------
-// Step 3: Atomicity check
-// ---------------------------------------------------------------------------
-
-interface AtomicityStepResult {
-  step: StepResult;
-  blocked: boolean;
-  flagSection: string;
-}
-
-async function checkAtomicity(body: string, title: string, timeoutMs: number): Promise<AtomicityStepResult> {
-  try {
-    const { content } = await llmChat(
-      [
-        {
-          role: "system",
-          content:
-            `You are a Zettelkasten reviewer. Determine whether the given note covers exactly one atomic concept. ` +
-            `If it covers exactly one concept, respond with: ATOMIC\n` +
-            `If it covers multiple concepts, respond with: SPLIT\n` +
-            `Then on subsequent lines, list each concept as a bullet point starting with "- ". ` +
-            `Nothing else.`,
-        },
-        {
-          role: "user",
-          content: `Title: ${title}\n\n${body.slice(0, 1200)}`,
-        },
-      ],
-      { timeout: timeoutMs, temperature: 0.1 },
-    );
-
-    const trimmed = content.trim();
-    if (trimmed.startsWith("SPLIT")) {
-      const bullets = trimmed
-        .split("\n")
-        .filter((l) => l.startsWith("- "))
-        .join("\n");
-      const flagSection =
-        `## ⚠️ Atomicity\n\n` +
-        `This note may cover multiple concepts. Consider splitting into:\n\n${bullets}\n\n` +
-        `Resolve this section and delete it before the note can be promoted.`;
-      return {
-        step: {
-          step: "atomicity",
-          status: "blocked",
-          detail: `Multi-concept note detected. Split suggestions added to note body.`,
-        },
-        blocked: true,
-        flagSection,
-      };
-    }
-
-    return {
-      step: { step: "atomicity", status: "ok", detail: "Single concept confirmed." },
-      blocked: false,
-      flagSection: "",
-    };
-  } catch (err) {
-    if (err instanceof ProviderUnreachableError) {
-      // Non-blocking: skip atomicity check if LLM is unavailable
-      return {
-        step: { step: "atomicity", status: "skipped", detail: "LLM unreachable — atomicity check skipped." },
-        blocked: false,
-        flagSection: "",
-      };
-    }
-    return {
-      step: { step: "atomicity", status: "skipped", detail: `Atomicity check failed (non-blocking): ${err}` },
-      blocked: false,
-      flagSection: "",
-    };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Step 4: Promotion
+// Step 3: Promotion
 // ---------------------------------------------------------------------------
 
 interface PromotionStepResult {
@@ -392,38 +304,32 @@ async function promote(
   filePath: string,
   noteType: string,
 ): Promise<PromotionStepResult> {
-  const destinationDir =
+  const destinationSubdir =
     noteType === "source" ? "sources" :
-    noteType === "synthesized" ? "notes/synthesized" :
-    "notes/permanent";
+    noteType === "synthesized" ? "synthesized" :
+    "permanent";
 
   const slug = basename(filePath);
-  const destination = `${destinationDir}/${slug}`;
-  const vaultName = basename(vaultDir);
+  const destDir = join(vaultDir, destinationSubdir);
+  const destPath = join(destDir, slug);
 
   try {
-    await execFileAsync("obsidian", [
-      `vault=${vaultName}`,
-      "move",
-      `path=notes/inbox/${slug}`,
-      `to=${destinationDir}`,
-    ]);
-
+    mkdirSync(destDir, { recursive: true });
+    renameSync(filePath, destPath);
     return {
       step: {
         step: "promote",
         status: "ok",
-        detail: `Moved to ${destination}`,
+        detail: `Moved to ${destinationSubdir}/${slug}`,
       },
-      destination: join(vaultDir, destinationDir, slug),
+      destination: destPath,
     };
   } catch (err) {
-    // obsidian CLI may fail if Obsidian isn't open — write exact error so user can diagnose
     return {
       step: {
         step: "promote",
         status: "error",
-        detail: `obsidian move failed: ${err instanceof Error ? err.message : String(err)}`,
+        detail: `Promotion failed: ${err instanceof Error ? err.message : String(err)}`,
       },
     };
   }

@@ -636,6 +636,7 @@ class KnowledgeGraphEngine:
                 depth=i,
                 tier=parsed.tier,
                 workspace=parsed.workspace,
+                title=parsed.title,
             )
             path_notes.append(self._note_to_dict(note))
 
@@ -768,4 +769,5 @@ class KnowledgeGraphEngine:
             "linkedFrom": note.linked_from,
             "depth": note.depth,
             "workspace": note.workspace,
+            "title": note.title,
         }

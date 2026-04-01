@@ -23,7 +23,7 @@ import { RATE_CONTEXT_REMINDER } from "../../../agents/prompts.js";
 import { processInboxNote } from "./process-inbox-note.js";
 
 export type OnContextBuilt = (pkg: ContextPackage) => void;
-export type OnContextRated = (rating: { query: string; score: number; missing: string; helpful: string }) => void;
+export type OnContextRated = (rating: { retrievalId: string; query: string; score: number; missing: string; helpful: string }) => void;
 
 export interface McpServerOptions {
   engine: ContextEngine;
@@ -54,8 +54,8 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
 
   // ── retrieve_context ──────────────────────────────────────────────────────
 
-  // Default budget: ~2500 tokens. Generous enough for multi-tier symbol + call context.
-  const DEFAULT_MAX_CHARS = 10000;
+  // Default budget: ~3750 tokens. Generous enough for multi-tier symbol + call context.
+  const DEFAULT_MAX_CHARS = 15000;
 
   server.registerTool(
     "retrieve_context",
@@ -71,13 +71,14 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
       },
     },
     async ({ query, workspace, max_chars }) => {
+      const retrievalId = `r-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
       const pkg = await engine.build(query, workspace);
       onContextBuilt?.(pkg);
       const budget = Math.max(500, Math.floor(max_chars ?? DEFAULT_MAX_CHARS));
       let text = pkg.formattedContext.length <= budget
         ? pkg.formattedContext
         : pkg.formattedContext.slice(0, budget) + "\n\n_(context truncated to fit budget)_\n<!-- End ObsidiClaw Context -->";
-      text += "\n\n" + RATE_CONTEXT_REMINDER;
+      text += `\n\n<!-- retrieval_id: ${retrievalId} -->\n` + RATE_CONTEXT_REMINDER;
       return { content: [{ type: "text" as const, text }] };
     },
   );
@@ -136,6 +137,7 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
         "Call this AFTER you've used the retrieved context to answer or act. " +
         "Your rating helps the knowledge base improve over time.",
       inputSchema: {
+        retrieval_id: z.string().describe("The retrieval_id from the <!-- retrieval_id: ... --> comment in the retrieve_context response."),
         query: z.string().describe("The original query you searched for."),
         score: z
           .number()
@@ -154,8 +156,8 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
           .describe("Which notes or sections were most useful? Empty string if none."),
       },
     },
-    async ({ query, score, missing, helpful }) => {
-      onContextRated?.({ query, score, missing, helpful });
+    async ({ retrieval_id, query, score, missing, helpful }) => {
+      onContextRated?.({ retrievalId: retrieval_id, query, score, missing, helpful });
       return {
         content: [{
           type: "text" as const,
@@ -487,7 +489,7 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
         };
       }
 
-      const inboxDir = path.join(vaultDir, "notes", "inbox");
+      const inboxDir = path.join(vaultDir, "inbox");
       let files: string[];
       try {
         files = fs.readdirSync(inboxDir).filter((f) => f.endsWith(".md"));
@@ -514,7 +516,7 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
     "process_inbox_note",
     {
       description:
-        "Run the inbox pipeline on a single note: resolve #TODOs, suggest tags, check atomicity, promote to notes/permanent or notes/synthesized. " +
+        "Run the inbox pipeline on a single note: resolve #TODOs, suggest tags, promote to permanent/ or synthesized/ within md_db. " +
         "Call after list_inbox_notes or when the inbox watcher fires.",
       inputSchema: {
         workspace: z.string().describe("Name of the know workspace the note belongs to."),
@@ -532,7 +534,7 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
         };
       }
 
-      const filePath = path.join(vaultDir, "notes", "inbox", filename);
+      const filePath = path.join(vaultDir, "inbox", filename);
       if (!fs.existsSync(filePath)) {
         return {
           content: [{ type: "text" as const, text: `File not found: ${filePath}` }],
@@ -570,12 +572,95 @@ function _createMcpServer(opts: McpServerOptions): McpServer {
     },
   );
 
+  // ── retrieve_link_candidates ──────────────────────────────────────────────
+
+  server.registerTool(
+    "retrieve_link_candidates",
+    {
+      description:
+        "Return a structured JSON list of real note candidates for wikilink insertion. " +
+        "Unlike retrieve_context, this returns validated note metadata (title, path, score) " +
+        "rather than formatted prose — use it to populate a link picker without hallucination risk.",
+      inputSchema: {
+        query: z.string().describe("What to search for."),
+        workspace: z.string().optional().describe("Limit to a specific workspace by name."),
+        max_candidates: z.number().optional().describe("Max candidates to return (default 20, cap 100)."),
+      },
+    },
+    async ({ query, workspace, max_candidates }) => {
+      const limit = Math.min(max_candidates ?? 20, 100);
+
+      let pkg: ContextPackage;
+      try {
+        pkg = await engine.build(query, workspace);
+      } catch (err) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ query, workspace: workspace ?? null, candidates: [], retrievalMs: 0, error: String(err) }),
+          }],
+        };
+      }
+
+      const seen = new Set<string>();
+      const candidates: Array<{
+        noteId: string;
+        path: string;
+        filename: string;
+        display: string;
+        score: number;
+        depth: number;
+        retrievalSource: string;
+        type: string;
+      }> = [];
+
+      for (const note of pkg.retrievedNotes) {
+        if (seen.has(note.path)) continue;
+        seen.add(note.path);
+        candidates.push({
+          noteId: note.noteId,
+          path: note.path,
+          filename: path.basename(note.path, ".md"),
+          display: note.title || titleFromNote(note.content, note.path),
+          score: note.score,
+          depth: note.depth ?? 0,
+          retrievalSource: note.retrievalSource,
+          type: note.type,
+        });
+        if (candidates.length >= limit) break;
+      }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            query,
+            workspace: workspace ?? null,
+            candidates,
+            retrievalMs: pkg.retrievalMs,
+            degraded: engine.isDegraded,
+          }),
+        }],
+      };
+    },
+  );
+
   return server;
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Fallback title extraction from note body (no frontmatter — Python strips it before storing).
+ * Primary source is note.title from the Python engine; this is only used when that's absent.
+ */
+function titleFromNote(content: string, notePath: string): string {
+  const h1 = content.match(/^#\s+(.+)$/m);
+  if (h1) return h1[1]!.trim();
+  return path.basename(notePath, ".md").replace(/-/g, " ");
+}
 
 
 function formatClusterListMarkdown(clusters: import("../types.js").PruneCluster[]): string {

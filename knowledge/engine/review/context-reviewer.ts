@@ -67,7 +67,7 @@ export interface ReviewResult {
 const DEFAULTS: ContextReviewConfig = {
   enabled: true,
   personality: "context-synthesizer",
-  maxLatencyMs: 120_000,
+  maxLatencyMs: 20_000,
   personalitiesDir: "",
   minSeedScore: 0.45,
 };
