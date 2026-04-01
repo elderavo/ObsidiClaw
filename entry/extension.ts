@@ -25,7 +25,6 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { type ExtensionFactory, type ExtensionUIContext } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
 import { resolvePaths, getEmbedConfig } from "../core/config.js";
 import { extractMcpText } from "../core/text-utils.js";
 import { ensureDir, writeText, readText, listDir, fileExists } from "../core/os/fs.js";
@@ -41,7 +40,28 @@ import { registerRetrieveContextTool } from "./tools/retrieve-context.js";
 import { registerRateContextTool } from "./tools/rate-context.js";
 import { registerWorkspaceTools } from "./tools/workspace.js";
 import { registerFindPathTool } from "./tools/find-path.js";
+import { registerCaptureNoteTool } from "./tools/capture-note.js";
 
+
+// ---------------------------------------------------------------------------
+// Active workspace persistence
+// ---------------------------------------------------------------------------
+
+const ACTIVE_WS_FILE = ".obsidi-claw/active-workspace.json";
+
+function saveActiveWorkspace(rootDir: string, name: string | undefined): void {
+  try {
+    writeText(join(rootDir, ACTIVE_WS_FILE), JSON.stringify({ workspace: name ?? null }));
+  } catch { /* non-fatal */ }
+}
+
+function loadActiveWorkspace(rootDir: string): string | undefined {
+  try {
+    const raw = readText(join(rootDir, ACTIVE_WS_FILE));
+    const parsed = JSON.parse(raw) as { workspace?: string | null };
+    return parsed.workspace ?? undefined;
+  } catch { return undefined; }
+}
 
 // ---------------------------------------------------------------------------
 // TUI helpers
@@ -147,13 +167,70 @@ export interface ObsidiClawExtensionConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Workspace context builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the workspace-specific context block injected when a workspace is
+ * first loaded or changes.
+ *
+ * - code mode: full directory tree of sourceDir
+ * - know mode: file listing of permanent/ + inbox/ subdirs
+ */
+function buildWorkspaceContext(
+  entry: { name: string; mode: string; sourceDir: string },
+  mdDbPath: string,
+): string {
+  if (entry.mode === "code") {
+    const treeContent = buildDirectoryTree(entry.sourceDir);
+    return [
+      `<!-- ObsidiClaw: Project Structure -->`,
+      ``,
+      `## Project directory structure`,
+      ``,
+      treeContent,
+      ``,
+      `<!-- End ObsidiClaw Project Structure -->`,
+    ].join("\n");
+  }
+
+  // know mode — list permanent + inbox notes
+  const sections: string[] = [];
+  for (const subdir of ["permanent", "inbox"] as const) {
+    const dir = join(mdDbPath, "know", entry.name, subdir);
+    let files: string[] = [];
+    try {
+      files = listDir(dir).filter((f) => f.endsWith(".md")).sort();
+    } catch {
+      // subdir may not exist yet
+    }
+    if (files.length > 0) {
+      sections.push(`### ${subdir}/`);
+      sections.push(...files.map((f) => `- ${f}`));
+    }
+  }
+
+  if (sections.length === 0) return "";
+
+  return [
+    `<!-- ObsidiClaw: Workspace Notes -->`,
+    ``,
+    `## Workspace notes — ${entry.name}`,
+    ``,
+    ...sections,
+    ``,
+    `<!-- End ObsidiClaw Workspace Notes -->`,
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // Concepts index builder
 // ---------------------------------------------------------------------------
 
 /**
  * Scans md_db/concepts/ and returns a compact block listing each concept note
- * by filename + H1 title + workspace scope. Injected at session start so Pi
- * always knows which design principles exist and can retrieve the full note on demand.
+ * by filename + H1 title + workspace scope. Injected when a workspace is loaded
+ * so Pi always knows which design principles exist and can retrieve the full note on demand.
  */
 function buildConceptsIndex(conceptsDir: string, activeWorkspace?: string): string {
   if (!fileExists(conceptsDir)) return "";
@@ -223,10 +300,7 @@ export function createObsidiClawExtension(
     // UI handle — full ExtensionUIContext (used for status updates + note capture modal)
     let latestCtxUI: ExtensionUIContext | undefined;
 
-    // Vault inbox path — set from the first active "know" workspace in ready notification
-    let vaultInboxPath: string | undefined;
-
-    // Active workspace for concept filtering. Set by /workspace command.
+    // Active workspace for concept filtering and UI defaults. Set by /workspace command.
     let activeWorkspace: string | undefined;
 
     // Engine state — populated when child process sends obsidi-claw/ready
@@ -240,12 +314,48 @@ export function createObsidiClawExtension(
     // Track latest transcript (updated on agent_end) for review hook
     let latestMessages: unknown[] = [];
 
+    // Context injection state — preferences injected once per session;
+    // workspace context injected once per workspace load/change.
+    let prefsInjected = false;
+    let lastInjectedWorkspace: string | undefined = undefined;
+
     // MCP client — talks to child process over stdio
     let client: Client;
     let transport: StdioClientTransport;
 
     // Shared mutable state for tool registrations.
     const toolCtx: ToolContext = { client: null as unknown as Client, engineState: "ok" };
+
+    /** Persist + apply a workspace selection. Pass undefined to clear. */
+    function setActiveWorkspace(name: string | undefined, ui?: ExtensionUIContext): void {
+      activeWorkspace = name;
+      toolCtx.activeWorkspace = name;
+      saveActiveWorkspace(paths.rootDir, name);
+      ui?.setStatus("workspace", name);
+    }
+
+    /**
+     * Fire-and-forget inbox sweep for a know workspace.
+     * Calls list_inbox_notes then process_inbox_note for each pending file.
+     */
+    async function sweepInboxForWorkspace(workspace: string, ui: ExtensionUIContext): Promise<void> {
+      try {
+        const listResult = await client.callTool({ name: "list_inbox_notes", arguments: { workspace } });
+        const listText = extractMcpText(listResult as { content: { type: string; text: string }[] });
+        if (!listText || listText === "Inbox is empty.") return;
+
+        const filenames = [...listText.matchAll(/^- (.+\.md)$/gm)].map((m) => m[1]!);
+        if (filenames.length === 0) return;
+
+        ui.notify(`Sweeping ${filenames.length} inbox note(s) for "${workspace}"…`, "info");
+        for (const filename of filenames) {
+          await client.callTool({ name: "process_inbox_note", arguments: { workspace, filename } });
+        }
+        ui.notify(`Inbox sweep complete for "${workspace}"`, "info");
+      } catch {
+        // Non-fatal — engine may not be ready yet
+      }
+    }
 
     // ── session_start: spawn MCP child process ──────────────────────────────
     pi.on("session_start", async (_event, ctx) => {
@@ -303,12 +413,6 @@ export function createObsidiClawExtension(
           engineState = params.engineState;
           toolCtx.engineState = params.engineState;
 
-          // Resolve vault inbox path from first active "know" workspace
-          const knowWs = params.activeWorkspaces.find((w) => w.mode === "know");
-          if (knowWs) {
-            vaultInboxPath = join(knowWs.sourceDir, "notes", "inbox");
-          }
-
           if (params.engineState === "degraded" && ctx.hasUI) {
             const reason = params.degradedReason || "embedding provider unavailable";
             ctx.ui.notify(
@@ -323,9 +427,20 @@ export function createObsidiClawExtension(
             );
           }
 
+          // Restore persisted workspace selection (verify it still exists)
+          const persisted = loadActiveWorkspace(paths.rootDir);
+          if (persisted && params.activeWorkspaces.some((w) => w.name === persisted)) {
+            setActiveWorkspace(persisted, ctx.hasUI ? ctx.ui : undefined);
+            // Sweep inbox if it's a know workspace
+            if (ctx.hasUI) {
+              const ws = params.activeWorkspaces.find((w) => w.name === persisted);
+              if (ws?.mode === "know") sweepInboxForWorkspace(persisted, ctx.ui).catch(() => {});
+            }
+          }
+
           // Show startup splash
           if (ctx.hasUI) {
-            const wsLabel = params.activeWorkspaces.map((w) => w.name).join(", ") || "no workspaces";
+            const wsLabel = activeWorkspace ?? params.activeWorkspaces.map((w) => w.name).join(", ") ?? "no workspaces";
             ctx.ui.setTitle(`ObsidiClaw — ${wsLabel} — ${params.noteCount} notes`);
             showStartupSplash(ctx.ui, params).catch(() => {});
           }
@@ -372,10 +487,14 @@ export function createObsidiClawExtension(
     registerRateContextTool(pi, toolCtx);
     registerWorkspaceTools(pi, toolCtx);
     registerFindPathTool(pi, toolCtx);
+    registerCaptureNoteTool(pi, {
+      getLatestUI: () => latestCtxUI,
+      captureNoteToInbox,
+    });
 
     // ── /workspace command ───────────────────────────────────────────────────
     pi.registerCommand("workspace", {
-      description: "Pick active workspace — scopes concept injection and context",
+      description: "Workspace actions: select (stub), add, or remove registered workspaces",
       handler: async (_args, ctx) => {
         if (!ctx.hasUI) return;
 
@@ -383,18 +502,26 @@ export function createObsidiClawExtension(
         const rp = readyParams ?? await Promise.race([readyPromise, new Promise<null>((r) => setTimeout(() => r(null), 3000))]);
         const workspaces = rp?.activeWorkspaces ?? [];
 
-        const MAX_LISTED = 4;
-        const listed = workspaces.slice(0, MAX_LISTED);
-        const options = [
-          ...listed.map((w) => w.name),
-          "＋ Add new workspace",
-        ];
+        const action = await ctx.ui.select("Workspace action", ["Select", "Add", "Remove"]);
+        if (!action) return;
 
-        const choice = await ctx.ui.select("Active workspace", options);
+        if (action === "Select") {
+          if (workspaces.length === 0) {
+            ctx.ui.notify("No workspaces registered.", "info");
+            return;
+          }
+          const choice = await ctx.ui.select("Select workspace", workspaces.map((w) => `${w.name}  (${w.mode})`));
+          if (!choice) return;
+          const chosenName = choice.split("  ")[0]!;
+          setActiveWorkspace(chosenName, ctx.ui);
+          ctx.ui.notify(`Active workspace: ${chosenName}`, "info");
+          // Sweep inbox if it's a know workspace
+          const chosenWs = workspaces.find((w) => w.name === chosenName);
+          if (chosenWs?.mode === "know") sweepInboxForWorkspace(chosenName, ctx.ui).catch(() => {});
+          return;
+        }
 
-        if (!choice) return;
-
-        if (choice === "＋ Add new workspace") {
+        if (action === "Add") {
           const name = await ctx.ui.input("Workspace name", "e.g. my-app");
           if (!name) return;
           const sourceDir = await ctx.ui.input(
@@ -419,108 +546,182 @@ export function createObsidiClawExtension(
           return;
         }
 
-        activeWorkspace = choice;
-        ctx.ui.notify(`Active workspace: ${choice}`, "info");
-        ctx.ui.setStatus("workspace", choice);
+        // Remove
+        if (workspaces.length === 0) {
+          ctx.ui.notify("No registered workspaces to remove.", "info");
+          return;
+        }
+
+        const removeTarget = await ctx.ui.select(
+          "Remove workspace",
+          workspaces.map((w) => w.name),
+        );
+        if (!removeTarget) return;
+
+        try {
+          const result = await client.callTool({
+            name: "unregister_workspace",
+            arguments: { name: removeTarget },
+          });
+          const text = extractMcpText(result as { content: { type: string; text: string }[] });
+
+          if (removeTarget === activeWorkspace) setActiveWorkspace(undefined, ctx.ui);
+          ctx.ui.notify(text || `Workspace "${removeTarget}" unregistered`, "info");
+        } catch (err) {
+          ctx.ui.notify(`Unregister failed: ${String(err)}`, "error");
+        }
       },
     });
 
     // ── Note capture ─────────────────────────────────────────────────────────
 
     /**
-     * Show the note capture modal and write the result to the vault inbox.
-     * Returns a status string for tool result or notification.
+     * Show the note capture modal and write either a regular inbox note
+     * (know workspace) or a concept note (md_db concepts workspace).
      */
     async function captureNoteToInbox(
       ui: ExtensionUIContext,
       suggestedTitle?: string,
       suggestedContent?: string,
     ): Promise<string> {
-      if (!vaultInboxPath) {
-        return "No vault workspace registered. Use /workspace to register a 'know' workspace first.";
+      const modeLabels = ["Regular note", "Concept note"] as const;
+      const modeChoice = await ui.select("Capture Type", [...modeLabels]);
+      if (!modeChoice) return "Note capture cancelled.";
+      const captureMode = modeChoice === "Concept note" ? "concept" : "regular";
+
+      const allWorkspaces = readyParams?.activeWorkspaces ?? [];
+      const workspaceNames = (captureMode === "regular"
+        ? allWorkspaces.filter((w) => w.mode === "know")
+        : allWorkspaces
+      ).map((w) => w.name);
+
+      if (workspaceNames.length === 0) {
+        return captureMode === "regular"
+          ? "No know workspace registered. Use /workspace to register one first."
+          : "No workspace registered. Use /workspace to register one first.";
       }
 
-      // Step 1: Title
+      // Only prompt for workspace if there's ambiguity.
+      let selectedWorkspace: string;
+      if (workspaceNames.length === 1) {
+        selectedWorkspace = workspaceNames[0]!;
+      } else {
+        const orderedWorkspaceOptions = [
+          ...(activeWorkspace && workspaceNames.includes(activeWorkspace) ? [activeWorkspace] : []),
+          ...workspaceNames.filter((w) => w !== activeWorkspace),
+        ];
+        const choice = await ui.select("Workspace", orderedWorkspaceOptions);
+        if (!choice) return "Note capture cancelled.";
+        selectedWorkspace = choice;
+      }
+
+      // Shared fields
       const title = await ui.input("Note Title", suggestedTitle ?? "Untitled");
       if (title === undefined) return "Note capture cancelled.";
       const finalTitle = title.trim() || "Untitled";
 
-      // Step 2: Content
       const content = await ui.editor("Note Content", suggestedContent ?? "");
       if (content === undefined) return "Note capture cancelled.";
 
-      // Step 3: Type
+      // Concept note path: write to md_db/concepts/<workspace>/ via MCP tool.
+      if (captureMode === "concept") {
+        const tagsInput = await ui.input("Concept Tags (comma-separated, optional)", "");
+        if (tagsInput === undefined) return "Note capture cancelled.";
+        const tags = tagsInput
+          .split(",")
+          .map((t) => t.trim())
+          .filter((t) => t.length > 0);
+
+        const result = await client.callTool({
+          name: "create_concept_note",
+          arguments: {
+            title: finalTitle,
+            body: content,
+            workspace: selectedWorkspace,
+            ...(tags.length > 0 ? { tags } : {}),
+          },
+        });
+        const text = extractMcpText(result as { content: { type: string; text: string }[] });
+        ui.notify(`Concept note submitted for workspace: ${selectedWorkspace}`, "info");
+        return text || `Concept note "${finalTitle}" submitted.`;
+      }
+
+      // Regular note path: write to selected know workspace inbox.
       const typeLabels = VAULT_NOTE_TYPES.map((t) => NOTE_TYPE_DESCRIPTIONS[t]);
       const typeChoice = await ui.select("Note Type", typeLabels);
       if (!typeChoice) return "Note capture cancelled.";
       const noteType = VAULT_NOTE_TYPES[typeLabels.indexOf(typeChoice)] ?? "permanent";
 
-      // Step 4: Suggested Links
-      const selectedLinks = await suggestLinksModal(ui, finalTitle, content);
+      const selectedLinks = await suggestLinksModal(ui, finalTitle, content, selectedWorkspace);
 
-      ensureDir(vaultInboxPath);
+      const selectedInboxPath = join(mdDbPath, "know", selectedWorkspace, "inbox");
+      ensureDir(selectedInboxPath);
       const filename = buildNoteFilename(finalTitle);
-      const fileContent = buildNoteContent(noteType as VaultNoteType, finalTitle, content, [], selectedLinks);
-      writeText(join(vaultInboxPath, filename), fileContent);
+      const fileContent = buildNoteContent(noteType as VaultNoteType, finalTitle, content, [], selectedLinks, selectedWorkspace);
+      writeText(join(selectedInboxPath, filename), fileContent);
 
       const linkNote = selectedLinks.length > 0 ? ` with ${selectedLinks.length} link(s)` : "";
       ui.notify(`Note saved to inbox: ${filename}`, "info");
-      return `Note "${finalTitle}" saved to vault inbox (${filename})${linkNote}. The inbox pipeline will process it shortly.`;
+      return `Note "${finalTitle}" saved to vault inbox (${filename}) in workspace "${selectedWorkspace}"${linkNote}. The inbox pipeline will process it shortly.`;
     }
 
     /**
-     * Call retrieve_context, parse wikilinks from the result, and show a
-     * looping single-select that simulates multi-select. Returns selected links.
+     * Call retrieve_link_candidates, build a picker from validated note metadata.
+     * Returns selected wikilinks — only titles that correspond to real notes on disk.
      */
     async function suggestLinksModal(
       ui: ExtensionUIContext,
       title: string,
       body: string,
+      knowWorkspace?: string,
     ): Promise<string[]> {
-      // Find the active know workspace for scoping
-      const knowWorkspace = readyParams?.activeWorkspaces.find((w) => w.mode === "know")?.name;
-
       ui.notify("Fetching link suggestions…", "info");
 
-      let contextText: string;
+      type Candidate = { noteId: string; path: string; filename: string; display: string; score: number; type: string };
+
+      let candidates: Candidate[];
       try {
         const result = await Promise.race([
           client.callTool({
-            name: "retrieve_context",
+            name: "retrieve_link_candidates",
             arguments: {
-              prompt: `${title} ${body.slice(0, 300)}`,
+              query: `${title} ${body.slice(0, 300)}`,
               ...(knowWorkspace ? { workspace: knowWorkspace } : {}),
             },
           }),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 4000)),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 8000)),
         ]);
-        contextText = extractMcpText(result as { content: { type: string; text: string }[] });
+        const raw = extractMcpText(result as { content: { type: string; text: string }[] });
+        candidates = (JSON.parse(raw) as { candidates?: Candidate[] }).candidates ?? [];
       } catch {
-        // Timeout or error — skip links step silently
         return [];
       }
 
-      if (!contextText || contextText.startsWith("## Nothing Found")) {
+      if (candidates.length === 0) {
         ui.notify("No related notes found — skipping link suggestions.", "info");
         return [];
       }
 
-      // Extract [[wikilinks]] with surrounding sentence as context blurb
-      const linkItems = parseWikilinkSuggestions(contextText);
-      if (linkItems.length === 0) return [];
+      // Build picker items: link target is always the filename (Obsidian canonical),
+      // display label is the human-readable H1. Disambiguate on duplicate filenames with folder.
+      const filenameCount = new Map<string, number>();
+      for (const c of candidates) filenameCount.set(c.filename, (filenameCount.get(c.filename) ?? 0) + 1);
 
-      // Looping single-select simulates multi-select:
-      // selected items get a ✓ prefix; "Done" exits.
+      const items = candidates.map((c) => {
+        const isDup = (filenameCount.get(c.filename) ?? 0) > 1;
+        const folder = c.path.split("/").slice(-2, -1)[0] ?? "";
+        const label = `${c.display}${isDup ? `  (${folder})` : ""}`;
+        return { label, link: `[[${c.filename}]]`, path: c.path };
+      });
+
+      // Looping single-select simulates multi-select
       const selected = new Set<string>();
 
       while (true) {
         const doneLabel = `✓ Done  (${selected.size} selected)`;
         const options = [
           doneLabel,
-          ...linkItems.map(({ link, blurb }) => {
-            const prefix = selected.has(link) ? "✓ " : "  ";
-            return `${prefix}${link}${blurb ? `  —  ${blurb}` : ""}`;
-          }),
+          ...items.map(({ label, link }) => (selected.has(link) ? `✓ ${label}` : `  ${label}`)),
         ];
 
         const choice = await ui.select(
@@ -530,59 +731,26 @@ export function createObsidiClawExtension(
 
         if (!choice || choice === doneLabel) break;
 
-        // Find the link corresponding to this option
-        const idx = options.indexOf(choice) - 1; // -1 because first option is "Done"
-        const item = linkItems[idx];
+        const idx = options.indexOf(choice) - 1;
+        const item = items[idx];
         if (item) {
-          if (selected.has(item.link)) {
-            selected.delete(item.link); // toggle off
-          } else {
-            selected.add(item.link);
-          }
+          if (selected.has(item.link)) selected.delete(item.link);
+          else selected.add(item.link);
         }
       }
 
-      // Format as "- [[link]] — blurb" entries
-      return [...selected].map((link) => {
-        const item = linkItems.find((l) => l.link === link);
-        return item?.blurb ? `${link} — ${item.blurb}` : link;
+      if (selected.size === 0) return [];
+
+      // Validate: ensure each note file still exists before writing the link
+      return [...selected].filter((link) => {
+        const item = items.find((i) => i.link === link);
+        return item && fileExists(join(mdDbPath, item.path));
       });
-    }
-
-    /** Extract [[wikilinks]] from context markdown with a short surrounding blurb. */
-    function parseWikilinkSuggestions(markdown: string): { link: string; blurb: string }[] {
-      const seen = new Set<string>();
-      const results: { link: string; blurb: string }[] = [];
-      const wikilinkRe = /\[\[([^\]]+)\]\]/g;
-      const lines = markdown.split("\n");
-
-      for (const line of lines) {
-        let m: RegExpExecArray | null;
-        wikilinkRe.lastIndex = 0;
-        while ((m = wikilinkRe.exec(line)) !== null) {
-          const raw = m[1]!;
-          // Strip path prefix — keep only the last segment as the display title
-          const parts = raw.split("/");
-          const title = parts[parts.length - 1]!;
-          const link = `[[${title}]]`;
-          if (seen.has(link)) continue;
-          seen.add(link);
-          // Use the line text (minus the wikilink itself) as blurb, trimmed to 60 chars
-          const blurb = line
-            .replace(/\[\[[^\]]+\]\]/g, "")
-            .replace(/^[#*>\-\s]+/, "")
-            .trim()
-            .slice(0, 60);
-          results.push({ link, blurb });
-        }
-      }
-
-      return results;
     }
 
     // ── /note command ─────────────────────────────────────────────────────────
     pi.registerCommand("note", {
-      description: "Capture a note to your vault inbox — opens the note editor modal",
+      description: "Capture a regular inbox note or a concept note — opens interactive capture modals", 
       handler: async (_args, ctx) => {
         if (!ctx.hasUI) {
           ctx.ui.notify("Note capture requires interactive mode", "warning");
@@ -592,49 +760,17 @@ export function createObsidiClawExtension(
       },
     });
 
-    // ── capture_note tool (Pi LLM-callable) ───────────────────────────────────
-    pi.registerTool({
-      name: "capture_note",
-      label: "Capture Note",
-      description:
-        "Open the note capture modal so the user can save a note to their vault inbox. " +
-        "Call this when the user asks to 'make a note', 'save this', or 'note that down'. " +
-        "Pass suggested_title and suggested_content pre-filled from the conversation context — " +
-        "the user will review and edit before submitting.",
-      promptSnippet: "capture_note(suggested_title?, suggested_content?) — open note capture modal",
-      parameters: Type.Object({
-        suggested_title: Type.Optional(Type.String({
-          description: "Pre-filled title for the note, derived from the conversation.",
-        })),
-        suggested_content: Type.Optional(Type.String({
-          description: "Pre-filled body for the note, derived from the conversation.",
-        })),
-      }),
-      execute: async (_toolCallId, args) => {
-        const { suggested_title, suggested_content } = args as {
-          suggested_title?: string;
-          suggested_content?: string;
-        };
-
-        if (!latestCtxUI) {
-          return {
-            content: [{ type: "text" as const, text: "UI not available. Run `notetaker` from the CLI instead." }],
-            details: {},
-          };
-        }
-
-        const result = await captureNoteToInbox(latestCtxUI, suggested_title, suggested_content);
-        return {
-          content: [{ type: "text" as const, text: result }],
-          details: {},
-        };
-      },
-    });
-
     // Track prompt start time for prompt_complete durationMs
     let promptStartTs = 0;
 
-    // ── before_agent_start: inject preferences + standing tool reminder ─────
+    // ── before_agent_start: inject context blocks ────────────────────────────
+    //
+    // Injection strategy (avoids re-flooding the system prompt every turn):
+    //   - preferences.md   → once per session (first turn only); already in
+    //                        conversation history on subsequent turns
+    //   - workspace block  → once per workspace load/change; re-injected
+    //                        automatically when activeWorkspace switches
+    //   - TOOL_REMINDER    → every turn (tiny, behaviorally critical)
     pi.on("before_agent_start", async (event, ctx) => {
       promptStartTs = Date.now();
       logger.logEvent({
@@ -644,54 +780,73 @@ export function createObsidiClawExtension(
         text: "(pi-tui-prompt)",
       } as RunEvent);
 
-      // Fast path: engine is completely unavailable
-      if (engineState === "unavailable") {
-        const treeContent = buildDirectoryTree(paths.rootDir);
-        const treeBlock = `<!-- ObsidiClaw: Project Structure -->\n\n## Project directory structure\n\n${treeContent}\n\n<!-- End ObsidiClaw Project Structure -->`;
+      const blocks: string[] = [];
 
-        return {
-          systemPrompt:
-            event.systemPrompt +
-            "\n\n" + ENGINE_UNAVAILABLE_WARNING +
-            "\n\n" + treeBlock,
-        };
+      // Fast path: engine completely unavailable
+      if (engineState === "unavailable") {
+        blocks.push(ENGINE_UNAVAILABLE_WARNING);
+        return { systemPrompt: event.systemPrompt + "\n\n" + blocks.join("\n\n") };
       }
 
       try {
-        const result = await client.callTool({ name: "get_preferences", arguments: {} });
-        const prefsContent = extractMcpText(result);
+        // ── preferences: first turn only ───────────────────────────────────
+        if (!prefsInjected) {
+          const result = await client.callTool({ name: "get_preferences", arguments: {} });
+          const prefsContent = extractMcpText(result);
+          if (prefsContent) {
+            blocks.push(
+              `<!-- ObsidiClaw: Preferences -->\n\n${prefsContent}\n\n<!-- End ObsidiClaw Preferences -->`,
+            );
+          }
+          prefsInjected = true;
+        }
 
-        const prefsBlock = prefsContent
-          ? `<!-- ObsidiClaw: Preferences -->\n\n${prefsContent}\n\n<!-- End ObsidiClaw Preferences -->`
-          : "";
+        // ── workspace context: on load / change only ────────────────────────
+        if (activeWorkspace !== lastInjectedWorkspace) {
+          if (activeWorkspace) {
+            // If switching from a previous workspace, note that prior context is superseded.
+            const switchNotice = lastInjectedWorkspace
+              ? `\n<!-- previous workspace context (${lastInjectedWorkspace}) in conversation history is superseded -->`
+              : "";
 
-        const conceptsBlock = buildConceptsIndex(join(paths.mdDbPath, "concepts"), activeWorkspace);
+            // Active workspace header
+            blocks.push(
+              `<!-- ObsidiClaw: Active Workspace -->${switchNotice}\n\nActive workspace: **${activeWorkspace}**\nAll \`retrieve_context\` calls default to this workspace. Pass an explicit \`workspace\` arg to override.\n\n<!-- End ObsidiClaw Active Workspace -->`,
+            );
 
-        const treeContent = buildDirectoryTree(paths.rootDir);
-        const treeBlock = `<!-- ObsidiClaw: Project Structure -->\n\n## Project directory structure\n\n${treeContent}\n\n<!-- End ObsidiClaw Project Structure -->`;
+            // Mode-specific context (tree for code, file list for know).
+            // Only mark as injected once wsEntry is resolved — guards against
+            // readyParams not yet available on the first prompt.
+            const wsEntry = readyParams?.activeWorkspaces.find((w) => w.name === activeWorkspace);
+            if (wsEntry) {
+              const wsContext = buildWorkspaceContext(wsEntry, mdDbPath);
+              if (wsContext) blocks.push(wsContext);
 
-        return {
-          systemPrompt:
-            event.systemPrompt +
-            (prefsBlock ? "\n\n" + prefsBlock : "") +
-            (conceptsBlock ? "\n\n" + conceptsBlock : "") +
-            "\n\n" + treeBlock +
-            "\n\n" +
-            TOOL_REMINDER,
-        };
+              // Concept note headers scoped to this workspace
+              const conceptsBlock = buildConceptsIndex(join(mdDbPath, "concepts"), activeWorkspace);
+              if (conceptsBlock) blocks.push(conceptsBlock);
+
+              // Mark injected only after a successful wsEntry lookup.
+              // If readyParams wasn't ready, leave lastInjectedWorkspace dirty
+              // so the next turn retries and gets the full context.
+              lastInjectedWorkspace = activeWorkspace;
+            }
+          } else {
+            // Workspace cleared — no context to inject, just mark clean.
+            lastInjectedWorkspace = undefined;
+          }
+        }
       } catch {
         if (ctx.hasUI) ctx.ui.notify("Context engine unavailable this turn", "warning");
-
-        const treeContent = buildDirectoryTree(paths.rootDir);
-        const treeBlock = `<!-- ObsidiClaw: Project Structure -->\n\n## Project directory structure\n\n${treeContent}\n\n<!-- End ObsidiClaw Project Structure -->`;
-
-        return {
-          systemPrompt:
-            event.systemPrompt +
-            "\n\n" + ENGINE_UNAVAILABLE_WARNING +
-            "\n\n" + treeBlock,
-        };
+        if (!prefsInjected) blocks.push(ENGINE_UNAVAILABLE_WARNING);
       }
+
+      // ── tool reminder: every turn ─────────────────────────────────────────
+      blocks.push(TOOL_REMINDER);
+
+      return {
+        systemPrompt: event.systemPrompt + (blocks.length ? "\n\n" + blocks.join("\n\n") : ""),
+      };
     });
 
     // ── Pi event logging ──────────────────────────────────────────────────────

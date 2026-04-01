@@ -11,8 +11,9 @@ export function registerRateContextTool(pi: ExtensionAPI, ctx: ToolContext): voi
       "Rate how well the last retrieve_context result answered your query. " +
       "Call this AFTER you've used the retrieved context to answer or act. " +
       "Your rating helps the knowledge base improve over time.",
-    promptSnippet: "rate_context(query, score, missing, helpful) — rate last retrieval quality",
+    promptSnippet: "rate_context(retrieval_id, query, score, missing, helpful) — rate last retrieval quality",
     parameters: Type.Object({
+      retrieval_id: Type.String({ description: "The retrieval_id from the <!-- retrieval_id: ... --> comment in the retrieve_context response." }),
       query: Type.String({ description: "The original query you searched for." }),
       score: Type.Number({
         description: "1=irrelevant, 2=mostly unhelpful, 3=partial, 4=good, 5=exactly right.",
