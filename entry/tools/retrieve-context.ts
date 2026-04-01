@@ -39,14 +39,16 @@ export function registerRetrieveContextTool(pi: ExtensionAPI, ctx: ToolContext):
       })),
       max_chars: Type.Optional(Type.Number({
         description:
-          "Maximum characters to return (default: 3000). Use a smaller value for tighter, " +
+          "Maximum characters to return (default: 15000). Use a smaller value for tighter, " +
           "more focused context when you only need a quick answer.",
       })),
     }),
     execute: async (_toolCallId, args, _signal, _onUpdate, _ctx) => {
       const { query, workspace, max_chars } = args as { query: string; workspace?: string; max_chars?: number };
       const mcpArgs: Record<string, unknown> = { query };
-      if (workspace) mcpArgs.workspace = workspace;
+      // Explicit workspace arg wins; fall back to active workspace selection.
+      const effectiveWorkspace = workspace ?? ctx.activeWorkspace;
+      if (effectiveWorkspace) mcpArgs.workspace = effectiveWorkspace;
       if (max_chars != null) mcpArgs.max_chars = max_chars;
       const result = await ctx.client.callTool({ name: "retrieve_context", arguments: mcpArgs });
       const text = extractMcpText(result);

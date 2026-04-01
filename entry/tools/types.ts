@@ -11,4 +11,6 @@ export interface ToolContext {
   client: Client;
   /** Engine availability — set during session_start. */
   engineState: "ok" | "degraded" | "unavailable";
+  /** Currently selected workspace — scopes retrieve_context by default. */
+  activeWorkspace?: string;
 }

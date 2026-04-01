@@ -40,7 +40,7 @@ import { buildNoteContent, buildInboxFilename, VAULT_NOTE_TYPES, NOTE_TYPE_DESCR
 // Vault path resolution
 // ---------------------------------------------------------------------------
 
-function findVaultInboxPath(): string | undefined {
+function findVaultInboxPath(): { inboxPath: string; workspace: string } | undefined {
   const paths = resolvePaths();
   const registryPath = join(paths.rootDir, ".obsidi-claw", "workspaces.json");
   if (!existsSync(registryPath)) return undefined;
@@ -48,12 +48,15 @@ function findVaultInboxPath(): string | undefined {
   try {
     const entries = JSON.parse(readFileSync(registryPath, "utf-8")) as Array<{
       mode: string;
-      sourceDir: string;
+      name: string;
       active: boolean;
     }>;
     const ws = entries.find((e) => e.mode === "know" && e.active);
     if (!ws) return undefined;
-    return join(ws.sourceDir, "notes", "inbox");
+    return {
+      inboxPath: join(paths.mdDbPath, "know", ws.name, "inbox"),
+      workspace: ws.name,
+    };
   } catch {
     return undefined;
   }
@@ -202,8 +205,8 @@ class NoteTakerApp extends Container {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  const inboxPath = findVaultInboxPath();
-  if (!inboxPath) {
+  const vaultTarget = findVaultInboxPath();
+  if (!vaultTarget) {
     process.stderr.write(
       "No active 'know' workspace found.\n" +
       "Register your vault with: register_workspace(name, path, mode='know')\n",
@@ -230,13 +233,13 @@ async function main(): Promise<void> {
   }
 
   // Write to inbox
-  mkdirSync(inboxPath, { recursive: true });
+  mkdirSync(vaultTarget.inboxPath, { recursive: true });
   const filename = buildInboxFilename(result.title);
-  const fileContent = buildNoteContent(result.type, result.title, result.content);
-  writeFileSync(join(inboxPath, filename), fileContent, "utf-8");
+  const fileContent = buildNoteContent(result.type, result.title, result.content, [], [], vaultTarget.workspace);
+  writeFileSync(join(vaultTarget.inboxPath, filename), fileContent, "utf-8");
 
   process.stdout.write(`\n✓ Note saved: ${filename}\n`);
-  process.stdout.write(`  → ${inboxPath}\n`);
+  process.stdout.write(`  → ${vaultTarget.inboxPath}\n`);
   process.stdout.write("  The inbox pipeline will process it when Pi is next active.\n\n");
 }
 

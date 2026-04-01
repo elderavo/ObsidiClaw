@@ -13,7 +13,6 @@ import { dirname, join, relative, resolve } from "path";
 import type { FSWatcher } from "chokidar";
 
 import { startWorkspaceMirrorWatcher, type WorkspaceMirrorConfig } from "../jobs/watchers/mirror-watcher.js";
-import { startVaultWatcher, runInitialVaultCopy } from "../jobs/watchers/vault-watcher.js";
 import { startInboxWatcher } from "../jobs/watchers/inbox-watcher.js";
 import { runWorkspaceMirror } from "../scripts/run-workspace-mirror.js";
 import type { RunEvent } from "../../logger/types.js";
@@ -254,15 +253,11 @@ export class WorkspaceRegistry {
       const watcher = startWorkspaceMirrorWatcher(config);
       this.watchers.set(entry.id, watcher);
     } else if (entry.mode === "know") {
-      const vaultWatcher = startVaultWatcher({
-        sourceDir: entry.sourceDir,
-        mirrorDir: this.mirrorDir(entry),
-      });
-      this.watchers.set(entry.id, vaultWatcher);
-
       if (this.onInboxNote) {
+        const inboxDir = join(this.mirrorDir(entry), "inbox");
+        mkdirSync(inboxDir, { recursive: true });
         const inboxWatcher = startInboxWatcher({
-          vaultDir: entry.sourceDir,
+          inboxDir,
           onInboxNote: (filePath) => this.onInboxNote!(entry.name, filePath),
         });
         this.inboxWatchers.set(entry.id, inboxWatcher);
@@ -340,15 +335,8 @@ export class WorkspaceRegistry {
       // Start watcher for continuous updates
       this.startWatcher(entry);
     } else if (entry.mode === "know") {
-      // Run initial vault copy to seed the index
-      const result = runInitialVaultCopy(entry.sourceDir, mirrorDir);
-      notesGenerated = result.count;
-
-      if (notesGenerated > 0) {
-        collectMdPaths(mirrorDir, this.mdDbPath, notePaths);
-      }
-
-      // Start vault watcher for continuous updates
+      // Notes are authored directly in md_db/know/{ws}/ — just ensure dirs exist.
+      mkdirSync(join(mirrorDir, "inbox"), { recursive: true });
       this.startWatcher(entry);
     }
 

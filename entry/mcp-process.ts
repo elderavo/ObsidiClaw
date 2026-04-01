@@ -59,10 +59,10 @@ const stack = createObsidiClawStack({
   },
 });
 
-// Populate knowVaults after stack is created
+// Populate knowVaults after stack is created — use mirrorDir (md_db/know/{ws})
 for (const ws of stack.workspaceRegistry.list()) {
   if (ws.mode === "know" && ws.active) {
-    knowVaults.set(ws.name, ws.sourceDir);
+    knowVaults.set(ws.name, stack.workspaceRegistry.mirrorDir(ws));
   }
 }
 
@@ -119,12 +119,14 @@ const mcpServer = createContextEngineMcpServer({
       type: "context_rated",
       sessionId,
       timestamp: ts,
+      retrievalId: rating.retrievalId,
       query: rating.query,
       score: rating.score,
       missing: rating.missing,
       helpful: rating.helpful,
     } as RunEvent);
     stack.noteMetrics.logRating({
+      retrievalId: rating.retrievalId,
       sessionId,
       timestamp: ts,
       query: rating.query,
