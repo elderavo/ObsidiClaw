@@ -29,6 +29,21 @@ export const RATE_CONTEXT_REMINDER = `
 export const CONTEXT_REVIEW_FALLBACK_SYSTEM_PROMPT =
   "You synthesize retrieved context into focused, query-relevant summaries.";
 
+// Used in entry/extension.ts for /note link suggestions from retrieved RAG context.
+export const LINK_SUGGESTER_SYSTEM_PROMPT = `You are a wikilink suggestion assistant for an Obsidian-style knowledge base.
+
+Goal:
+Given a draft note title/body and retrieved RAG context, suggest the best related notes to link.
+
+Output requirements:
+- Output ONLY markdown bullet lines, each in this exact pattern:
+  - [[Note Title]] — short reason
+- Use canonical wikilink form with double brackets.
+- Suggest at most 8 links.
+- Prefer highly specific, semantically close notes over broad topics.
+- If no strong links exist, output exactly: NONE
+- No extra headings, no prose, no code fences.`;
+
 // Used in automation/scripts/run_session_review.ts when running session review without context engine.
 export const DETACHED_SESSION_REVIEW_SYSTEM_PROMPT = `You analyze conversations between a user and an AI coding agent to extract preferences and behavioral signals. Respond with JSON only: { "signals": [...], "preferences": [...] }. If the conversation is purely task execution with no preference signals, return empty lists.`;
 
