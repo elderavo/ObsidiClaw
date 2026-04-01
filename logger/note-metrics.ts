@@ -52,6 +52,7 @@ export interface RetrievalErrorEvent {
 }
 
 export interface RatingEvent {
+  retrievalId: string;
   sessionId: string;
   timestamp: number;
   query: string;
@@ -75,6 +76,7 @@ export class NoteMetricsLogger {
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
     this._initSchema();
+    this._migrate();
     this._pruneStorage = new PruneClusterStorage(this.db);
   }
 
@@ -125,6 +127,7 @@ export class NoteMetricsLogger {
 
       CREATE TABLE IF NOT EXISTS context_ratings (
         id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        retrieval_id TEXT,
         session_id   TEXT    NOT NULL,
         run_id       TEXT,
         timestamp    INTEGER NOT NULL,
@@ -173,6 +176,13 @@ export class NoteMetricsLogger {
 
       CREATE INDEX IF NOT EXISTS idx_job_logs_run ON job_logs(job_run_id);
     `);
+  }
+
+  private _migrate(): void {
+    const cols = (this.db.prepare("PRAGMA table_info(context_ratings)").all() as { name: string }[]).map((r) => r.name);
+    if (!cols.includes("retrieval_id")) {
+      this.db.exec("ALTER TABLE context_ratings ADD COLUMN retrieval_id TEXT");
+    }
   }
 
   // ── Retrieval logging ─────────────────────────────────────────────────────
@@ -262,10 +272,11 @@ export class NoteMetricsLogger {
   logRating(event: RatingEvent): void {
     this.db
       .prepare(
-        `INSERT INTO context_ratings (session_id, run_id, timestamp, query, score, missing, helpful)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO context_ratings (retrieval_id, session_id, run_id, timestamp, query, score, missing, helpful)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
+        event.retrievalId,
         event.sessionId,
         null,
         event.timestamp,
