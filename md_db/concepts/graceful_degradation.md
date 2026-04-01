@@ -9,6 +9,7 @@ tags:
     - resilience
     - fallback
 md_db: true
+workspace: obsidi-claw
 ---
 # Graceful Degradation
 

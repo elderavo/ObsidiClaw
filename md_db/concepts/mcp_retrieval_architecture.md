@@ -3,14 +3,14 @@ id: mcp-retrieval-architecture
 type: concept
 created: 20260321-230000
 updated: 20260321-230000
+workspace: obsidi-claw
 tags:
     - architecture
     - mcp
     - retrieval
-    - context-engine
+    - context_engine
     - llamaindex
 ---
-
 # MCP Retrieval Architecture — 6-Layer Breakdown
 
 How context flows from an agent's `retrieve_context` call to a synthesized markdown response.

@@ -1,0 +1,8 @@
+{
+	"nodes":[
+		{"id":"81a3f495d439e4c8","x":-448,"y":-190,"width":250,"height":60,"type":"text","text":"Talk to CAPT Owen\n"},
+		{"id":"079cff5244ed69bd","x":-44,"y":-287,"width":250,"height":60,"type":"text","text":"Attend mtg with Bergin+Bordetsky"},
+		{"id":"b992499fcbad6b13","x":-160,"y":-50,"width":250,"height":60,"type":"text","text":"Create sample plan (vLLM, model, API, infrastructure)"}
+	],
+	"edges":[]
+}

@@ -1,8 +1,6 @@
 ---
 id: 650cb65c-8d47-42ac-a2f7-a2dc3637008e
 type: rule
-created: 2026-03-20T19:11:47.553Z
-updated: 2026-03-29T00:00:00.000Z
 ---
 ## Operating Contract (Read First)
 

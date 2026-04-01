@@ -4,6 +4,7 @@ uuid: bde05fea-1ea0-4b7f-a162-06b808db4338
 type: concept
 created: 20260323
 updated: 2026-03-23T05:37:06.126Z
+workspace: obsidi-claw
 tags:
     - architecture
     - providers

@@ -63,7 +63,7 @@ Pending proposals auto-derived from sessions. Review and merge manually.
 - **[moderate imperative]** "please run the reindex job"
   → User wants the agent to execute specific jobs when requested
 
-# TODO - agent is hallucinating and can't tell difference between user and llm, mis-identifying basic convo as preferences. 
+# TODO - agent is hallucinating and can't tell difference between user and llm, mis-identifying basic convo as preferences.
 ## Session 97e83ec6 (2026-03-22)
 
 ### Signals
@@ -185,3 +185,37 @@ Pending proposals auto-derived from sessions. Review and merge manually.
 ### Synthesized Preferences
 - **[moderate]** ask targeted questions and surface assumptions to iteratively refine the plan
   - Evidence: user explicitly requested this approach in the initial conversation
+
+## Session a119347d (2026-03-31)
+
+### Signals
+- **[strong imperative]** "quit"
+  → The user expects the agent to terminate the session when explicitly instructed to do so.
+
+### Synthesized Preferences
+- **[strong]** Terminate the session when the user issues a 'quit' command
+  - Evidence: The user explicitly instructed the agent to quit, demonstrating a clear imperative
+
+## Session a390e4ae (2026-03-31)
+
+### Signals
+- **[strong imperative]** "ok, now git commit your changes with a clear and explicit message that matches previous commits"
+  → The user requires explicit instructions for commit messages to align with prior commits
+
+### Synthesized Preferences
+- **[strong]** Commit with clear, explicit messages that match previous commit conventions
+  - Evidence: User explicitly instructed to follow this pattern for commit messages
+
+## Session 3e49ea1a (2026-03-31)
+
+### Signals
+- **[moderate preference]** "currently, 'active' doesn't really DO anything - it doesn't help or hurt. so, all we really need for the remove option is whether or not its registered"
+  → The priority is checking registration status rather than active workspace semantics
+- **[strong imperative]** "for 2, leave a TODO with a reminder. Yeah, leave a TODO in the code too"
+  → Mandatory TODO addition with specific reminder in code
+
+### Synthesized Preferences
+- **[moderate]** Implement remove functionality by checking workspace registration status
+  - Evidence: User emphasized registration status over active workspace semantics
+- **[strong]** Always add TODOs with specific reminders in code
+  - Evidence: User explicitly requested TODO addition with reminder
