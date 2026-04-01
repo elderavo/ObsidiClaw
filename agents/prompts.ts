@@ -86,3 +86,19 @@ Respond with JSON only:
 }
 
 If nothing needs to change, return {"additions": [], "modifications": [], "dropped": []}`;
+
+/** 
+ * Summarization Prompt
+ * Used by summarize-lib.ts and force-summarize.ts
+ */
+export const PROMPT_SUMMARIZE_NOTE = {
+  system: `You are a concise and neutral assistant that summarizes notes.
+You output markdown with no commentary or metadata.`,
+  user: (noteContent: string) => [
+    "## Task",
+    "Summarize the following note accurately and briefly.",
+    "",
+    "## Note",
+    noteContent,
+  ].join("\n"),
+} as const;

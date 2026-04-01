@@ -1,43 +1,48 @@
 ---
-id: 45259ca7-8df0-4891-bdf3-89e0013a24a7
-uuid: 45259ca7-8df0-4891-bdf3-89e0013a24a7
 type: concept
-created: 20260401
-updated: 2026-04-01T02:34:22.765903Z
-workspace: obsidi-claw
-tags:
-    - prompts
-    - llm
-    - maintainability
-    - architecture
-md_db: true
 ---
-# LLM Prompts Are Centralized in prompts.ts
+# LLM Prompt Centralization
 
-LLM-facing prompt strings should be centralized in `agents/prompts.ts` instead of being hardcoded inline across runtime code.
+## Purpose
+All static, reusable text that is automatically sent to large language models (LLMs) must be defined in a single central module—`agents/prompts.ts`. This ensures predictable model behavior and simplifies auditing.
 
-## Principle
+## Design Rules
+1. **Single Source of Truth** – All non-personality prompts live in `agents/prompts.ts`.
+2. **Functional Prompt Interface** – Each prompt exports both a `system` string and a `user()` builder function.
+3. **No Inline Prompts** – No direct multi-line or raw string literals passed to `llmChat()` in runtime code.
+4. **Personality Separation** – Agent tone and style guidelines remain in `agents/personalities/*.md`.
+5. **Encapsulation of Logic** – Business logic and prompt text remain clearly separated.
 
-When adding or changing an LLM prompt template, put it in `agents/prompts.ts` and import it where needed.
+## Example Implementation
+```ts
+// agents/prompts.ts
+export const PROMPT_SUMMARIZE_NOTE = {
+  system: `You are a concise and neutral assistant that summarizes notes in markdown format without additional commentary.`,
+  user: (note: string) => [
+    "## Task",
+    "Summarize the following note accurately and succinctly.",
+    "",
+    "## Note",
+    note,
+  ].join('\n'),
+};
+```
 
-## Why
+Usage example:
+```ts
+import { PROMPT_SUMMARIZE_NOTE } from "agents/prompts";
+const messages = [
+  { role: "system", content: PROMPT_SUMMARIZE_NOTE.system },
+  { role: "user", content: PROMPT_SUMMARIZE_NOTE.user(note.content) },
+];
+await llmChat(messages);
+```
 
-- Keeps prompt behavior discoverable in one place
-- Reduces drift and duplicated wording
-- Makes prompt changes safer and easier to review
-- Improves consistency across tools/jobs/engines
-
-## Rule of Thumb
-
-- **Do:** define reusable/static prompt text in `agents/prompts.ts`
-- **Do:** import prompt constants from `agents/prompts.ts`
-- **Avoid:** inline multi-line prompt literals in runtime code paths
-
-## Exception
-
-Personality content belongs in `agents/personalities/*.md` (loaded via the personality loader), not in `prompts.ts`.
+## Enforcement
+- Concept audit check: search for inline `content:` literals passed to `llmChat()`.
+- A linter or script should warn when `PROMPT_` constants are not used.
 
 ## Related
-
 - [[provider_abstraction]]
 - [[mcp_retrieval_architecture]]
+- [[agents/prompts]]
