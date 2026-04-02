@@ -1,5 +1,6 @@
 ---
 type: concept
+workspace: obsidi-claw
 ---
 # LLM Prompt Centralization
 

@@ -434,7 +434,7 @@ export function createObsidiClawExtension(
             // Sweep inbox if it's a know workspace
             if (ctx.hasUI) {
               const ws = params.activeWorkspaces.find((w) => w.name === persisted);
-              if (ws?.mode === "know") sweepInboxForWorkspace(persisted, ctx.ui).catch(() => {});
+              // if (ws?.mode === "know") sweepInboxForWorkspace(persisted, ctx.ui).catch(() => {});
             }
           }
 
@@ -517,7 +517,7 @@ export function createObsidiClawExtension(
           ctx.ui.notify(`Active workspace: ${chosenName}`, "info");
           // Sweep inbox if it's a know workspace
           const chosenWs = workspaces.find((w) => w.name === chosenName);
-          if (chosenWs?.mode === "know") sweepInboxForWorkspace(chosenName, ctx.ui).catch(() => {});
+          // if (chosenWs?.mode === "know") sweepInboxForWorkspace(chosenName, ctx.ui).catch(() => {});
           return;
         }
 
@@ -791,8 +791,17 @@ export function createObsidiClawExtension(
       try {
         // ── preferences: first turn only ───────────────────────────────────
         if (!prefsInjected) {
-          const result = await client.callTool({ name: "get_preferences", arguments: {} });
-          const prefsContent = extractMcpText(result);
+          let prefsContent = "";
+          if (activeWorkspace === "vaultus-sapiens") {
+            try {
+              prefsContent = readText(join(mdDbPath, "preferences-vaultus-sapiens.md"));
+            } catch {
+              prefsContent = "(workspace-specific preferences missing)";
+            }
+          } else {
+            const result = await client.callTool({ name: "get_preferences", arguments: {} });
+            prefsContent = extractMcpText(result);
+          }
           if (prefsContent) {
             blocks.push(
               `<!-- ObsidiClaw: Preferences -->\n\n${prefsContent}\n\n<!-- End ObsidiClaw Preferences -->`,

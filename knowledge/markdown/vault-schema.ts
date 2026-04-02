@@ -50,12 +50,13 @@ export function buildVaultFrontmatter(
   title: string,
   tags: string[] = [],
   id?: string,
+  workspace?: string,
 ): string {
   const fields: Record<string, unknown> = {
     id: id ?? generateNoteId(),
-    title,
     type,
     tags,
+    ...(workspace ? { workspace } : {}),
   };
 
   if (type === "synthesized") {
@@ -102,8 +103,9 @@ export function buildNoteContent(
   body: string,
   tags: string[] = [],
   links: string[] = [],
+  workspace?: string,
 ): string {
-  const fm = buildVaultFrontmatter(type, title, tags);
+  const fm = buildVaultFrontmatter(type, title, tags, undefined, workspace);
   const trimmedBody = body.trim();
   let content = fm + "\n# " + title + (trimmedBody ? "\n\n" + trimmedBody : "\n");
 

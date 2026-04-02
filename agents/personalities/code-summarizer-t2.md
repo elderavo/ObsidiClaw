@@ -2,7 +2,8 @@
 type: personality
 title: Code Summarizer — Tier 2 (File)
 provider:
-  model: qwen3:8b
+  type: openai
+  model: gpt-4o-mini
   numCtx: 16384
   temperature: 0.1
 ---

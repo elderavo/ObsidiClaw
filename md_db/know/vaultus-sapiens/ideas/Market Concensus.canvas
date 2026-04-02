@@ -1,9 +1,10 @@
 {
 	"nodes":[
-		{"id":"bd98e8e9b11fc34a","x":-357,"y":-292,"width":250,"height":60,"type":"text","text":"What are we buying/selling?"},
-		{"id":"d9f0ee0db19190dc","x":-55,"y":-238,"width":250,"height":60,"type":"text","text":"What question are they trying to answer?"},
-		{"id":"b8218d2456db3b12","x":-431,"y":-111,"width":250,"height":60,"type":"text","text":"How effective is it? "},
-		{"id":"3af35aa38fb4b276","x":0,"y":-81,"width":250,"height":60,"type":"text","text":"Edge cases  - immediate consensus? Thrashing? "}
+		{"id":"bd98e8e9b11fc34a","type":"text","text":"What are we buying/selling?","x":-357,"y":-292,"width":250,"height":60},
+		{"id":"d9f0ee0db19190dc","type":"text","text":"What question are they trying to answer?","x":-55,"y":-238,"width":250,"height":60},
+		{"id":"b8218d2456db3b12","type":"text","text":"How effective is it? ","x":-431,"y":-111,"width":250,"height":60},
+		{"id":"3af35aa38fb4b276","type":"text","text":"Edge cases  - immediate consensus? Thrashing? ","x":0,"y":-81,"width":250,"height":60},
+		{"id":"dd33fbfdd0e2a275","x":-459,"y":-2,"width":319,"height":102,"type":"text","text":"Measure performance by what the environment state desired is, not by trying to define agent behavior. DECLARATIVE, not IMPERATIVE"}
 	],
 	"edges":[]
 }

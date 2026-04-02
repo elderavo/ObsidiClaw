@@ -57,10 +57,17 @@ export interface LlmConfig {
 }
 
 export function getLlmConfig(): LlmConfig {
+  const rawLlmHost = process.env["OBSIDI_LLM_HOST"];
+  const rawOllamaBase = process.env["OLLAMA_BASE_URL"]; // may include /v1
+  const normalizedHost = (rawLlmHost ?? rawOllamaBase ?? "http://localhost:11434")
+    // Strip common suffixes accidentally provided by users ("/v1" or full endpoint path)
+    .replace(/\/$/, "")
+    .replace(/\/v1(?:\/chat\/completions)?\/?$/, "");
+
   return {
     provider: (process.env["OBSIDI_LLM_PROVIDER"] as LlmProvider) ?? "ollama",
     model: process.env["OBSIDI_LLM_MODEL"] ?? process.env["OLLAMA_MODEL"] ?? "cogito:8b",
-    host: process.env["OBSIDI_LLM_HOST"] ?? process.env["OLLAMA_BASE_URL"]?.replace(/\/v1\/?$/, "") ?? "http://localhost:11434",
+    host: normalizedHost,
     apiKey: process.env["OPENAI_API_KEY"],
     contextWindow: parseInt(process.env["OBSIDI_LLM_CONTEXT_WINDOW"] ?? "32768", 10),
     maxTokens: parseInt(process.env["OBSIDI_LLM_MAX_TOKENS"] ?? "4096", 10),

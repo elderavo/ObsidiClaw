@@ -280,17 +280,6 @@ class ObsidiClawRetriever:
             file_path = str(metadata.get("file_path", note_id))
             note_type_str = str(metadata.get("note_type", "concept"))
 
-            # If we already have a seed for this note (from another chunk), keep highest score
-            if file_path in seed_ids:
-                if score > seed_scores.get(file_path, 0.0):
-                    seed_scores[file_path] = score
-                    # Update the existing seed's score
-                    for s in seeds:
-                        if s.note_id == file_path:
-                            s.score = score
-                            break
-                continue
-
             if note_type_str == "index":
                 continue
 
@@ -310,6 +299,17 @@ class ObsidiClawRetriever:
                 )
 
             boosted_score = _apply_tag_boost(score, tags, query_tokens)
+
+            # If we already have a seed for this note (from another chunk), keep highest score
+            if file_path in seed_ids:
+                if boosted_score > seed_scores.get(file_path, 0.0):
+                    seed_scores[file_path] = boosted_score
+                    # Update the existing seed's score
+                    for s in seeds:
+                        if s.note_id == file_path:
+                            s.score = boosted_score
+                            break
+                continue
 
             seeds.append(
                 RetrievedNote(

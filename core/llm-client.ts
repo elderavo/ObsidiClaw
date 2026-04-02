@@ -181,8 +181,10 @@ async function callOpenAI(
   opts: ChatOptions | undefined,
   timeout: number,
 ): Promise<ChatResult> {
-  const host = config.host || "https://api.openai.com";
-  const url = `${host}/v1/chat/completions`;
+  // Normalize host to avoid common misconfigurations like including "/v1" or the full endpoint path
+  const rawHost = config.host || "https://api.openai.com";
+  const baseHost = rawHost.replace(/\/$/, "").replace(/\/v1(?:\/chat\/completions)?\/?$/, "");
+  const url = `${baseHost}/v1/chat/completions`;
 
   const body: Record<string, unknown> = {
     model,
@@ -194,15 +196,26 @@ async function callOpenAI(
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
-  if (config.apiKey) {
-    headers["Authorization"] = `Bearer ${config.apiKey}`;
+  const apiKey = opts?.apiKey ?? config.apiKey ?? process.env["OPENAI_API_KEY"];
+  if (apiKey) {
+    headers["Authorization"] = `Bearer ${apiKey}`;
   }
 
-  const response = await axios.post(url, body, {
-    headers,
-    timeout,
-    signal: AbortSignal.timeout(timeout),
-  });
+  let response;
+  try {
+    response = await axios.post(url, body, {
+      headers,
+      timeout,
+      signal: AbortSignal.timeout(timeout),
+    });
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const status = err.response?.status ?? err.code ?? "network";
+      const msg = (err.response?.data as any)?.error?.message ?? err.message;
+      throw new Error(`OpenAI request failed (${status}): ${msg} — url=${url}`);
+    }
+    throw err;
+  }
 
   const choice = response.data?.choices?.[0];
   return {

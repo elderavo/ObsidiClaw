@@ -1,11 +1,12 @@
 """Tests for KnowledgeGraphEngine — incremental update, endpoint resolution, degraded retrieval."""
 
 import os
-import tempfile
+import shutil
 import unittest
+import uuid
+from pathlib import Path
 
 from knowledge.graph.engine import KnowledgeGraphEngine
-from knowledge.graph.models import ParsedNote, RetrievedNote
 
 
 # ---------------------------------------------------------------------------
@@ -26,36 +27,17 @@ def _remove_note(md_db_path: str, rel_path: str) -> None:
         os.remove(abs_path)
 
 
-def _blank_engine(md_db_path: str, db_dir: str) -> KnowledgeGraphEngine:
-    """Engine pre-seeded with md_db_path and db_dir but no vector index."""
-    engine = KnowledgeGraphEngine()
-    engine.md_db_path = md_db_path
-    engine.db_dir = db_dir
-    engine.graph_store = None
-    engine._parsed_notes = {}
-    engine.note_cache = {}
-    engine._note_hashes = {}
-    engine._embed_context_length = 8192
-
-    # Keyword retriever initialised with empty notes
-    from knowledge.graph.keyword_retriever import KeywordRetriever
-    engine.keyword_retriever = KeywordRetriever({})
-
-    return engine
-
-
-def _parsed(note_id, title="", body="", workspace="", tags=None):
-    return ParsedNote(
-        note_id=note_id,
-        path=note_id,
-        title=title or note_id,
-        note_type="concept",
-        body=body,
-        frontmatter={},
-        links_out=[],
-        tags=tags or [],
-        workspace=workspace,
-    )
+def _make_tmp_dir() -> Path:
+    """Create a writable unique temp dir (avoids tempfile on locked-down Windows setups)."""
+    override = os.environ.get("OBSIDICLAW_TEST_TMPDIR", "").strip()
+    if override:
+        base = Path(override)
+    else:
+        base = Path.home() / ".codex" / "memories" / "obsidiclaw_manual_tmp"
+    base.mkdir(parents=True, exist_ok=True)
+    d = base / f"t{uuid.uuid4().hex}"
+    d.mkdir(parents=True, exist_ok=False)
+    return d
 
 
 # ---------------------------------------------------------------------------
@@ -65,14 +47,15 @@ def _parsed(note_id, title="", body="", workspace="", tags=None):
 
 class IncrementalUpdateTests(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.md_db = self._tmp.name
-        self.db_dir = os.path.join(self._tmp.name, ".db")
+        self._tmp_dir = _make_tmp_dir()
+        self.md_db = str(self._tmp_dir)
+        self.db_dir = str(self._tmp_dir / "db")
         os.makedirs(self.db_dir, exist_ok=True)
-        self.engine = _blank_engine(self.md_db, self.db_dir)
+        self.engine = KnowledgeGraphEngine()
+        self.engine.initialize(self.md_db, self.db_dir, top_k=8)
 
     def tearDown(self):
-        self._tmp.cleanup()
+        shutil.rmtree(self._tmp_dir, ignore_errors=True)
 
     # ── Add ──────────────────────────────────────────────────────────────────
 
@@ -167,20 +150,19 @@ class IncrementalUpdateTests(unittest.TestCase):
 
 class ResolveEndpointTests(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.engine = _blank_engine(self._tmp.name, os.path.join(self._tmp.name, ".db"))
-        self.engine._parsed_notes = {
-            "code/ws/engine/context-engine.ts.md": _parsed(
-                "code/ws/engine/context-engine.ts.md",
-                title="ContextEngine",
-            ),
-            "concepts/ws/rag.md": _parsed("concepts/ws/rag.md", title="RAG"),
-        }
-        from knowledge.graph.keyword_retriever import KeywordRetriever
-        self.engine.keyword_retriever = KeywordRetriever(self.engine._parsed_notes)
+        self._tmp_dir = _make_tmp_dir()
+        self.md_db = str(self._tmp_dir)
+        self.db_dir = str(self._tmp_dir / "db")
+        os.makedirs(self.db_dir, exist_ok=True)
+
+        _write_note(self.md_db, "code/ws/engine/context-engine.ts.md", "# ContextEngine\n\nengine details")
+        _write_note(self.md_db, "concepts/ws/rag.md", "# RAG\n\nretrieval augmented generation")
+
+        self.engine = KnowledgeGraphEngine()
+        self.engine.initialize(self.md_db, self.db_dir, top_k=8)
 
     def tearDown(self):
-        self._tmp.cleanup()
+        shutil.rmtree(self._tmp_dir, ignore_errors=True)
 
     def test_exact_match(self):
         note_id, method = self.engine._resolve_endpoint("concepts/ws/rag.md")
@@ -212,28 +194,27 @@ class ResolveEndpointTests(unittest.TestCase):
 
 class DegradedModeRetrieveTests(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.engine = _blank_engine(self._tmp.name, os.path.join(self._tmp.name, ".db"))
-        notes = {
-            "concepts/ws/attention.md": _parsed(
-                "concepts/ws/attention.md",
-                title="Attention Transformers",
-                body="Q K V weight matrices",
-                workspace="ws",
-            ),
-            "concepts/ws/ffn.md": _parsed(
-                "concepts/ws/ffn.md",
-                title="FFN Layer",
-                body="feed-forward network transformer",
-                workspace="ws",
-            ),
-        }
-        self.engine._parsed_notes = notes
-        from knowledge.graph.keyword_retriever import KeywordRetriever
-        self.engine.keyword_retriever = KeywordRetriever(notes)
+        self._tmp_dir = _make_tmp_dir()
+        self.md_db = str(self._tmp_dir)
+        self.db_dir = str(self._tmp_dir / "db")
+        os.makedirs(self.db_dir, exist_ok=True)
+
+        _write_note(
+            self.md_db,
+            "concepts/ws/attention.md",
+            "---\nworkspace: ws\n---\n# Attention Transformers\n\nQ K V weight matrices\n",
+        )
+        _write_note(
+            self.md_db,
+            "concepts/ws/ffn.md",
+            "---\nworkspace: ws\n---\n# FFN Layer\n\nfeed-forward network transformer\n",
+        )
+
+        self.engine = KnowledgeGraphEngine()
+        self.engine.initialize(self.md_db, self.db_dir, top_k=8)
 
     def tearDown(self):
-        self._tmp.cleanup()
+        shutil.rmtree(self._tmp_dir, ignore_errors=True)
 
     def test_retrieves_by_keyword_when_no_index(self):
         out = self.engine.retrieve("attention")
@@ -247,17 +228,12 @@ class DegradedModeRetrieveTests(unittest.TestCase):
             self.assertEqual(note["workspace"], "ws")
 
     def test_workspace_filter_excludes_other_workspace(self):
-        from knowledge.graph.keyword_retriever import KeywordRetriever
-        extra = {
-            "concepts/other/attention.md": _parsed(
-                "concepts/other/attention.md",
-                title="Attention",
-                workspace="other",
-            ),
-            **self.engine._parsed_notes,
-        }
-        self.engine._parsed_notes = extra
-        self.engine.keyword_retriever = KeywordRetriever(extra)
+        _write_note(
+            self.md_db,
+            "concepts/other/attention.md",
+            "---\nworkspace: other\n---\n# Attention\n\nother workspace\n",
+        )
+        self.engine.reindex()
 
         out = self.engine.retrieve("attention", workspace="ws")
         for note in out["seed_notes"]:
