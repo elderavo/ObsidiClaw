@@ -54,4 +54,3 @@ Embedding provider factory. `create_embedding()` reads `OBSIDI_EMBED_*` env vars
 ## Related
 
 - [[graceful_degradation]] — what happens when providers are unavailable
-- [[context_synthesis_pipeline]] — context reviewer uses `llmChat()`

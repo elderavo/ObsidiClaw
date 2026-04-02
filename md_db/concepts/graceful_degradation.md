@@ -83,5 +83,3 @@ Scores are normalized so the best match = 1.0. Graph expansion still runs on top
 ## Related
 
 - [[provider_abstraction]] — environment variable config for providers
-- [[hybrid_retrieval_workflow]] — full retrieval pipeline
-- [[context_engine_startup_fast_path]] — hash-based fast/slow path

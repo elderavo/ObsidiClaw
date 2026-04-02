@@ -63,6 +63,19 @@ function loadActiveWorkspace(rootDir: string): string | undefined {
   } catch { return undefined; }
 }
 
+const WORKSPACE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/;
+
+function validateWorkspaceName(name: string): string | null {
+  const trimmed = name.trim();
+  if (trimmed.length < 2 || trimmed.length > 64) {
+    return "Workspace name must be 2-64 characters long.";
+  }
+  if (!WORKSPACE_NAME_RE.test(trimmed)) {
+    return "Workspace name must be lowercase alphanumeric with optional hyphens (no leading or trailing hyphen).";
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // TUI helpers
 // ---------------------------------------------------------------------------
@@ -522,26 +535,69 @@ export function createObsidiClawExtension(
         }
 
         if (action === "Add") {
-          const name = await ctx.ui.input("Workspace name", "e.g. my-app");
-          if (!name) return;
+          const rawName = await ctx.ui.input("Workspace name", "e.g. my-app");
+          if (!rawName) return;
+          const name = rawName.trim();
+          const nameError = validateWorkspaceName(name);
+          if (nameError) {
+            ctx.ui.notify(nameError, "error");
+            return;
+          }
+
           const sourceDir = await ctx.ui.input(
             "Source directory",
             "e.g. C:\\Projects\\MyApp",
           );
           if (!sourceDir) return;
 
+          const languageChoice = await ctx.ui.select("Languages to mirror", [
+            "TypeScript only",
+            "Python only",
+            "TypeScript + Python",
+          ]);
+          if (!languageChoice) return;
+
+          let languages: ("ts" | "py")[];
+          switch (languageChoice) {
+            case "Python only":
+              languages = ["py"];
+              break;
+            case "TypeScript + Python":
+              languages = ["ts", "py"];
+              break;
+            case "TypeScript only":
+            default:
+              languages = ["ts"];
+              break;
+          }
+
+          const previousWorkspaceStatus = activeWorkspace;
           ctx.ui.setStatus("workspace", "registering…");
           try {
-            await client.callTool({
+            const result = await client.callTool({
               name: "register_workspace",
-              arguments: { name, source_dir: sourceDir, mode: "code", languages: ["ts", "py"] },
+              arguments: { name, source_dir: sourceDir, mode: "code", languages },
             });
-            activeWorkspace = name;
-            ctx.ui.setStatus("workspace", name);
-            ctx.ui.notify(`Workspace "${name}" registered`, "info");
+            const text = extractMcpText(result as { content: { type: string; text: string }[] }).trim();
+            if (!text || /^Failed to register workspace:/i.test(text)) {
+              const message = text || "Workspace registration failed.";
+              ctx.ui.notify(message, "error");
+              ctx.ui.setStatus("workspace", previousWorkspaceStatus ?? undefined);
+              return;
+            }
+
+            setActiveWorkspace(name, ctx.ui);
+            if (readyParams) {
+              const existingIndex = readyParams.activeWorkspaces.findIndex((w) => w.name === name);
+              const entry = { name, mode: "code", languages, sourceDir };
+              if (existingIndex >= 0) readyParams.activeWorkspaces[existingIndex] = entry;
+              else readyParams.activeWorkspaces.push(entry);
+            }
+
+            ctx.ui.notify(text.split("\n")[0] || `Workspace "${name}" registered`, "info");
           } catch (err) {
             ctx.ui.notify(`Registration failed: ${String(err)}`, "error");
-            ctx.ui.setStatus("workspace", undefined);
+            ctx.ui.setStatus("workspace", previousWorkspaceStatus ?? undefined);
           }
           return;
         }

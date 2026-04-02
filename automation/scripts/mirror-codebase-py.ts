@@ -95,6 +95,7 @@ interface InRepoCall {
 interface CallIn {
   callerFile: string;
   calledName: string;
+  callerName?: string;
 }
 
 interface FileData {
@@ -315,10 +316,12 @@ function extractDefinitions(source: string): {
     const classMatch = trimmed.match(/^class\s+(\w+)(?:\s*\(([^)]*)\))?\s*:/);
     if (classMatch) {
       const name = classMatch[1];
+      const baseList = classMatch[2]?.trim();
+      const classSignature = baseList ? `class ${name}(${baseList})` : `class ${name}`;
       if (indent === 0) {
         currentClass = { name, indent: 0 };
         if (!explicitExports || explicitExports.has(name)) {
-          exports.push({ name, kind: "class" });
+          exports.push({ name, kind: "class", signature: classSignature });
         }
       }
       pendingDecorators = [];
@@ -495,12 +498,32 @@ function buildCallGraph(files: FileData[]): void {
           });
         }
 
+        let callerName: string | undefined;
+        const callerFn = file.functions.find(
+          (fn) => site.position >= fn.bodyStart && site.position <= fn.bodyEnd
+        );
+        if (callerFn) {
+          if (callerFn.isMethod && callerFn.className) {
+            const classExported = file.exports.some(
+              (exp) => exp.kind === "class" && exp.name === callerFn.className
+            );
+            if (classExported) {
+              callerName = callerFn.className;
+            }
+          } else if (callerFn.isExported) {
+            callerName = callerFn.name;
+          }
+        }
+
         if (
           !src.callIns.some(
-            (c) => c.callerFile === file.relativePath && c.calledName === site.name
+            (c) =>
+              c.callerFile === file.relativePath &&
+              c.calledName === site.name &&
+              c.callerName === callerName
           )
         ) {
-          src.callIns.push({ callerFile: file.relativePath, calledName: site.name });
+          src.callIns.push({ callerFile: file.relativePath, calledName: site.name, callerName });
         }
       }
     }
@@ -523,6 +546,134 @@ function toWikiLink(relPath: string, prefix = MIRROR_PREFIX): string {
   const dir = path.posix.dirname(relPath);
   const stem = mirrorStem(relPath);
   return dir === "." ? `${prefix}/${stem}` : `${prefix}/${dir}/${stem}`;
+}
+
+/** Safe filename for a symbol name (strip punctuation used in generic declarations). */
+function sanitizeSymbolName(name: string): string {
+  return name.replace(/[<>,:\.\s\[\]]/g, "_").replace(/__+/g, "_").replace(/^_|_$/g, "");
+}
+
+/**
+ * Convert a .py relative path + symbol name to a tier-1 symbol wikilink target.
+ *   ("knowledge/graph/retriever.py", "expand_graph_neighbors") →
+ *   "code/knowledge/graph/retriever/expand_graph_neighbors"
+ */
+function toSymbolWikiLink(relPath: string, symbolName: string, prefix = MIRROR_PREFIX): string {
+  const fileLink = toWikiLink(relPath, prefix);
+  return `${fileLink}/${sanitizeSymbolName(symbolName)}`;
+}
+
+/** Absolute path for a tier-1 symbol note. */
+function symbolNotePath(mirrorDir: string, relPath: string, symbolName: string): string {
+  const dirRel = path.posix.dirname(relPath);
+  const stem = mirrorStem(relPath);
+  const subdir = dirRel === "." ? stem : `${dirRel}/${stem}`;
+  return path.join(mirrorDir, subdir, sanitizeSymbolName(symbolName) + ".md");
+}
+
+function generateSymbolNote(
+  file: FileData,
+  exp: ExportInfo,
+  today: string,
+  prefix = MIRROR_PREFIX,
+  workspace?: string,
+): string {
+  const lines: string[] = [];
+  const dirRel = path.posix.dirname(file.relativePath);
+  const stem = mirrorStem(file.relativePath);
+  const parentFileLink = dirRel === "." ? `${prefix}/${stem}` : `${prefix}/${dirRel}/${stem}`;
+  const parentModuleLink = dirRel === "." ? `${prefix}/root_module` : `${prefix}/${dirRel}_module`;
+
+  lines.push(
+    "---",
+    "type: codeSymbol",
+    "tier: 1",
+    `path: ${file.relativePath}`,
+    `parentFile: ${parentFileLink}`,
+    `parentModule: ${parentModuleLink}`,
+    `symbolKind: ${exp.kind}`,
+    "language: py",
+    ...(workspace ? [`workspace: ${workspace}`] : []),
+    "tags:",
+    "  - codeUnit",
+    "---",
+    "",
+  );
+
+  lines.push(`# ${exp.name}`, "");
+  lines.push(`**Kind:** \`${exp.kind}\`  `);
+  lines.push(`**File:** [[${parentFileLink}]]`, "");
+
+  if (exp.signature) {
+    lines.push("## Signature", "");
+    lines.push("```py");
+    lines.push(exp.signature);
+    lines.push("```", "");
+  }
+
+  const seenTargets = new Set<string>();
+  const appendCalls = (calls: InRepoCall[]) => {
+    for (const call of calls) {
+      const target = toSymbolWikiLink(call.sourceFile, call.calleeName, prefix);
+      if (seenTargets.has(target)) continue;
+      seenTargets.add(target);
+      lines.push(`- [[${target}|${call.calleeName}]]`);
+    }
+  };
+
+  if (exp.kind === "function") {
+    const fn = file.functions.find(
+      (f) => !f.isMethod && f.name === exp.name && f.isExported,
+    );
+    if (fn) {
+      const ownCalls = file.inRepoCalls.filter(
+        (c) => c.position >= fn.bodyStart && c.position <= fn.bodyEnd,
+      );
+      if (ownCalls.length) {
+        lines.push("## Calls Into", "");
+        appendCalls(ownCalls);
+        lines.push("");
+      }
+    }
+  } else if (exp.kind === "class") {
+    const methods = file.functions.filter(
+      (f) => f.isMethod && f.className === exp.name,
+    );
+    const classCalls: InRepoCall[] = [];
+    for (const method of methods) {
+      const ownCalls = file.inRepoCalls.filter(
+        (c) => c.position >= method.bodyStart && c.position <= method.bodyEnd,
+      );
+      classCalls.push(...ownCalls);
+    }
+    if (classCalls.length) {
+      lines.push("## Calls Into", "");
+      appendCalls(classCalls);
+      lines.push("");
+    }
+  }
+
+  const callers = file.callIns.filter((c) => c.calledName === exp.name);
+  if (callers.length) {
+    lines.push("## Called By", "");
+    const seen = new Set<string>();
+    for (const caller of callers) {
+      if (caller.callerName) {
+        const symLink = toSymbolWikiLink(caller.callerFile, caller.callerName, prefix);
+        if (seen.has(symLink)) continue;
+        seen.add(symLink);
+        lines.push(`- [[${symLink}|${caller.callerName}]]`);
+      } else {
+        const fileLink = toWikiLink(caller.callerFile, prefix);
+        if (seen.has(fileLink)) continue;
+        seen.add(fileLink);
+        lines.push(`- [[${fileLink}]]`);
+      }
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n");
 }
 
 /**
@@ -858,19 +1009,55 @@ export async function runMirrorPy(
   for (const file of files) {
     validMirrorPaths.add(path.resolve(file.mirrorPath));
 
+    const definedSymbols = file.exports.filter((exp) => exp.kind !== "reexport");
+    for (const exp of definedSymbols) {
+      const symPath = symbolNotePath(opts.mirrorDir, file.relativePath, exp.name);
+      validMirrorPaths.add(path.resolve(symPath));
+    }
+
+    let isStale = true;
     if (!opts.force) {
       try {
         const srcStat = fs.statSync(file.absolutePath);
         const mirrorStat = fs.statSync(file.mirrorPath);
-        if (mirrorStat.mtimeMs >= srcStat.mtimeMs) { skipped++; continue; }
-      } catch { /* mirror doesn't exist yet — proceed */ }
+        if (mirrorStat.mtimeMs >= srcStat.mtimeMs) {
+          isStale = false;
+        }
+      } catch {
+        // mirror doesn't exist yet — proceed
+      }
     }
+
+    if (!isStale) {
+      for (const exp of definedSymbols) {
+        const symPath = symbolNotePath(opts.mirrorDir, file.relativePath, exp.name);
+        if (!fs.existsSync(symPath)) {
+          const symMarkdown = generateSymbolNote(file, exp, today, prefix, opts.workspace);
+          const symPreserved = extractSummarySection(symPath);
+          const symFinal = symPreserved ? symMarkdown.trimEnd() + "\n\n" + symPreserved + "\n" : symMarkdown;
+          fs.mkdirSync(path.dirname(symPath), { recursive: true });
+          fs.writeFileSync(symPath, symFinal, "utf8");
+        }
+      }
+      skipped++;
+      continue;
+    }
+
     const markdown = generateMarkdown(file, files, today, prefix, opts.workspace);
     const preserved = extractSummarySection(file.mirrorPath);
     const final = preserved ? markdown.trimEnd() + "\n\n" + preserved + "\n" : markdown;
     fs.mkdirSync(path.dirname(file.mirrorPath), { recursive: true });
     fs.writeFileSync(file.mirrorPath, final, "utf8");
     written++;
+
+    for (const exp of definedSymbols) {
+      const symPath = symbolNotePath(opts.mirrorDir, file.relativePath, exp.name);
+      const symMarkdown = generateSymbolNote(file, exp, today, prefix, opts.workspace);
+      const symPreserved = extractSummarySection(symPath);
+      const symFinal = symPreserved ? symMarkdown.trimEnd() + "\n\n" + symPreserved + "\n" : symMarkdown;
+      fs.mkdirSync(path.dirname(symPath), { recursive: true });
+      fs.writeFileSync(symPath, symFinal, "utf8");
+    }
   }
 
   // ── Tier-3 module notes ───────────────────────────────────────────────
