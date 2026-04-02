@@ -2,26 +2,34 @@
 
 Replaces the TS hybrid-retrieval.ts:
   - VectorStoreIndex.as_retriever() for semantic vector search (seeds)
-  - SimplePropertyGraphStore.get_triplets() for depth-1 graph expansion
-  - Tier-aware score multipliers (vs. flat 0.7 decay)
+  - SimplePropertyGraphStore.get_triplets() for graph expansion (depth-1 + depth-2 CALLS)
+  - Tier-aware score multipliers
   - Tag boosting + index note filtering
+
+Symbol-centric graph model
+──────────────────────────
+Classes and methods (tier-1 codeSymbol) are the primary interlinked core.
+Files and modules (tier-2/3) form the outer containment layer.
 
 Tier-aware expansion heuristics
 ────────────────────────────────
 Going UP (always):
-  DEFINED_IN   tier-1 → tier-2   0.80×   symbol's parent file
-  BELONGS_TO   tier-2 → tier-3   0.50×   file's parent module
+  DEFINED_IN   tier-1 → tier-2   0.70×   symbol's parent file
+  BELONGS_TO   tier-2 → tier-3   0.40×   file's parent module
 
 Going DOWN (selective — only when seed score ≥ DOWN_SEED_THRESHOLD):
-  CONTAINS_SYMBOL  tier-2 → tier-1   0.90×   symbols inside a file
-  CONTAINS         tier-3 → tier-2   0.85×   files inside a module
+  CONTAINS_SYMBOL  tier-2 → tier-1   0.85×   symbols inside a file
+  CONTAINS         tier-3 → tier-2   0.70×   files inside a module
 
-Going SIDEWAYS (conditional — only when neighbor name overlaps query):
-  CALLS    tier-1 → tier-1   0.60×
-  IMPORTS  tier-2 → tier-2   0.60×
+Going SIDEWAYS (unconditional for CALLS, overlap-gated for IMPORTS):
+  CALLS    tier-1 → tier-1   0.80×   symbol calls another symbol
+  IMPORTS  tier-2 → tier-2   0.60×   file imports another file
+
+CALLS edges get depth-2 expansion: if seed A --CALLS--> B --CALLS--> C,
+C is included at score = seed × 0.80 × 0.80.
 
 Generic (non-code notes):
-  LINKS_TO  any   0.70×
+  LINKS_TO  any   0.50×
 """
 
 from __future__ import annotations
@@ -50,22 +58,26 @@ class WorkspaceScopeViolationError(RuntimeError):
 TAG_BOOST_PER_TAG = 0.10   # +10% per matching tag
 TAG_BOOST_MAX = 0.30       # cap at +30%
 
-# Score multipliers for each edge type
+# Score multipliers for each edge type — symbol-centric weighting
 _EDGE_MULTIPLIER: dict[str, float] = {
-    "DEFINED_IN": 0.80,         # up: symbol → file
-    "BELONGS_TO": 0.50,         # up: file → module
-    "CONTAINS_SYMBOL": 0.90,    # down: file → symbol
-    "CONTAINS": 0.85,           # down: module → file
-    "CALLS": 0.60,              # sideways: symbol → symbol
+    "CALLS": 0.80,              # sideways: symbol → symbol (primary axis)
+    "CONTAINS_SYMBOL": 0.85,    # down: file → symbol
+    "DEFINED_IN": 0.70,         # up: symbol → file
+    "CONTAINS": 0.70,           # down: module → file
     "IMPORTS": 0.60,            # sideways: file → file
-    "LINKS_TO": 0.70,           # generic non-code wikilink
+    "LINKS_TO": 0.50,           # generic non-code wikilink
+    "BELONGS_TO": 0.40,         # up: file → module (outer layer, low weight)
 }
 
 # Only follow downward edges when the seed has a strong enough score
 DOWN_SEED_THRESHOLD = 0.60
 
-# Only follow CALLS/IMPORTS when neighbor name overlaps the query
-SIDEWAYS_REQUIRE_QUERY_OVERLAP = True
+# Only gate IMPORTS by query overlap; CALLS are followed unconditionally
+# (the whole point of graph traversal is finding things the user didn't name)
+SIDEWAYS_REQUIRE_QUERY_OVERLAP_IMPORTS = True
+
+# Maximum depth for CALLS-chain expansion (depth-1 always; depth-2 for CALLS only)
+MAX_CALLS_DEPTH = 2
 
 
 # ---------------------------------------------------------------------------
@@ -115,39 +127,46 @@ def _should_skip_edge(
         if seed_score < DOWN_SEED_THRESHOLD:
             return True
 
-    # Sideways edges: only follow when neighbor name overlaps query
-    if edge_label in ("CALLS", "IMPORTS") and SIDEWAYS_REQUIRE_QUERY_OVERLAP:
+    # CALLS edges: follow unconditionally (symbol-centric graph primary axis)
+    if edge_label == "CALLS":
+        return False
+
+    # IMPORTS edges: only follow when neighbor name overlaps query
+    if edge_label == "IMPORTS" and SIDEWAYS_REQUIRE_QUERY_OVERLAP_IMPORTS:
         if not _overlaps_query(neighbor_parsed, query_tokens):
             return True
 
     return False
 
 
-def expand_graph_neighbors(
-    graph_store: Optional[SimplePropertyGraphStore],
+def _expand_one_hop(
+    graph_store: SimplePropertyGraphStore,
     parsed_notes: dict[str, ParsedNote],
-    seed_notes: list[RetrievedNote],
+    source_notes: list[RetrievedNote],
+    source_scores: dict[str, float],
     query_tokens: set[str],
-    workspace: str | None = None,
+    exclude_ids: set[str],
+    workspace: str | None,
+    depth: int,
+    edge_filter: set[str] | None = None,
 ) -> list[RetrievedNote]:
-    """Expand seed notes to depth-1 neighbors using tier-aware edge heuristics."""
-    if not graph_store or not seed_notes:
-        return []
+    """Expand a set of notes by one hop, returning new neighbors.
 
-    seed_ids = {n.note_id for n in seed_notes}
-    seed_scores = {n.note_id: n.score for n in seed_notes}
-
+    Args:
+        edge_filter: if set, only follow edges with these labels.
+                     None = follow all (subject to _should_skip_edge).
+    """
     expanded: list[RetrievedNote] = []
     expanded_ids: set[str] = set()
 
-    for seed in seed_notes:
-        seed_id = seed.note_id
-        seed_score = seed_scores.get(seed_id, 0.5)
+    for source in source_notes:
+        source_id = source.note_id
+        source_score = source_scores.get(source_id, source.score)
 
         try:
-            triplets = graph_store.get_triplets(entity_names=[seed_id])
+            triplets = graph_store.get_triplets(entity_names=[source_id])
         except Exception as exc:
-            log.warning("get_triplets failed for %s: %s", seed_id, exc)
+            log.warning("get_triplets failed for %s: %s", source_id, exc)
             continue
 
         for source_node, relation, target_node in triplets:
@@ -155,10 +174,13 @@ def expand_graph_neighbors(
             target_name = getattr(target_node, "name", "")
             edge_label = getattr(relation, "label", "LINKS_TO")
 
-            is_outgoing = source_name == seed_id
+            if edge_filter and edge_label not in edge_filter:
+                continue
+
+            is_outgoing = source_name == source_id
             neighbor_id = target_name if is_outgoing else source_name
 
-            if not neighbor_id or neighbor_id in seed_ids or neighbor_id in expanded_ids:
+            if not neighbor_id or neighbor_id in exclude_ids or neighbor_id in expanded_ids:
                 continue
 
             neighbor_parsed = parsed_notes.get(neighbor_id)
@@ -171,14 +193,14 @@ def expand_graph_neighbors(
             if _should_skip_edge(
                 edge_label=edge_label,
                 is_outgoing=is_outgoing,
-                seed_score=seed_score,
+                seed_score=source_score,
                 neighbor_parsed=neighbor_parsed,
                 query_tokens=query_tokens,
             ):
                 continue
 
-            multiplier = _EDGE_MULTIPLIER.get(edge_label, 0.70)
-            neighbor_score = seed_score * multiplier
+            multiplier = _EDGE_MULTIPLIER.get(edge_label, 0.50)
+            neighbor_score = source_score * multiplier
             boosted = _apply_tag_boost(neighbor_score, neighbor_parsed.tags, query_tokens)
 
             expanded.append(
@@ -191,8 +213,8 @@ def expand_graph_neighbors(
                     tool_id=neighbor_parsed.tool_id,
                     tags=neighbor_parsed.tags,
                     retrieval_source="graph",
-                    linked_from=[seed_id],
-                    depth=1,
+                    linked_from=[source_id],
+                    depth=depth,
                     tier=neighbor_parsed.tier,
                     workspace=neighbor_parsed.workspace,
                     title=neighbor_parsed.title,
@@ -202,6 +224,67 @@ def expand_graph_neighbors(
 
     expanded.sort(key=lambda n: n.score, reverse=True)
     return expanded
+
+
+def expand_graph_neighbors(
+    graph_store: Optional[SimplePropertyGraphStore],
+    parsed_notes: dict[str, ParsedNote],
+    seed_notes: list[RetrievedNote],
+    query_tokens: set[str],
+    workspace: str | None = None,
+    max_calls_depth: int = MAX_CALLS_DEPTH,
+) -> list[RetrievedNote]:
+    """Expand seed notes using tier-aware edge heuristics.
+
+    Depth-1: all edge types (subject to skip rules).
+    Depth-2+: CALLS edges only — follow symbol call chains up to max_calls_depth.
+    """
+    if not graph_store or not seed_notes:
+        return []
+
+    seed_ids = {n.note_id for n in seed_notes}
+    seed_scores = {n.note_id: n.score for n in seed_notes}
+    all_seen = set(seed_ids)
+
+    # ── Depth 1: full expansion (all edge types) ─────────────────────────
+    depth1 = _expand_one_hop(
+        graph_store, parsed_notes, seed_notes, seed_scores,
+        query_tokens, exclude_ids=all_seen, workspace=workspace, depth=1,
+    )
+    all_seen.update(n.note_id for n in depth1)
+
+    all_expanded = list(depth1)
+
+    # ── Depth 2+: CALLS-only expansion ───────────────────────────────────
+    # Follow symbol→symbol call chains beyond depth-1.
+    current_frontier = [n for n in depth1 if n.tier == "1"]
+    frontier_scores = {n.note_id: n.score for n in current_frontier}
+
+    for d in range(2, max_calls_depth + 1):
+        if not current_frontier:
+            break
+
+        deeper = _expand_one_hop(
+            graph_store, parsed_notes, current_frontier, frontier_scores,
+            query_tokens, exclude_ids=all_seen, workspace=workspace,
+            depth=d, edge_filter={"CALLS"},
+        )
+        if not deeper:
+            break
+
+        all_seen.update(n.note_id for n in deeper)
+        all_expanded.extend(deeper)
+        current_frontier = [n for n in deeper if n.tier == "1"]
+        frontier_scores = {n.note_id: n.score for n in current_frontier}
+
+    all_expanded.sort(key=lambda n: n.score, reverse=True)
+
+    log.info(
+        "Graph expansion: %d depth-1 + %d deeper from %d seeds",
+        len(depth1), len(all_expanded) - len(depth1), len(seed_notes),
+    )
+
+    return all_expanded
 
 
 # ---------------------------------------------------------------------------

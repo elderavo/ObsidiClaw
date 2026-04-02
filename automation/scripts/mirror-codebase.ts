@@ -95,6 +95,7 @@ interface InRepoCall {
 interface CallIn {
   callerFile: string;
   calledName: string;
+  callerName?: string;     // which exported function/class in callerFile made the call
 }
 
 interface FileData {
@@ -464,12 +465,17 @@ function buildCallGraph(files: FileData[]): void {
           });
         }
 
-        // Call-in on the callee side (deduplicate by caller+name)
+        // Call-in on the callee side (deduplicate by caller+name+callerName)
+        // Attribute call to the specific exported function in the caller file
+        const callerFn = file.functions.find(
+          (f) => f.isExported && site.position >= f.bodyStart && site.position <= f.bodyEnd
+        );
+        const callerName = callerFn?.name;
         const alreadyIn = src.callIns.some(
-          (c) => c.callerFile === file.relativePath && c.calledName === site.name
+          (c) => c.callerFile === file.relativePath && c.calledName === site.name && c.callerName === callerName
         );
         if (!alreadyIn) {
-          src.callIns.push({ callerFile: file.relativePath, calledName: site.name });
+          src.callIns.push({ callerFile: file.relativePath, calledName: site.name, callerName });
         }
       }
     }
@@ -492,6 +498,15 @@ function toWikiLink(relPath: string, prefix = MIRROR_PREFIX): string {
   const dir = path.posix.dirname(relPath);
   const stem = mirrorStem(relPath);
   return dir === "." ? `${prefix}/${stem}` : `${prefix}/${dir}/${stem}`;
+}
+
+/**
+ * Convert a .ts relative path + symbol name to a tier-1 symbol wikilink target.
+ *   ("core/os/fs.ts", "fileExists") → "code/core/os/fs/fileExists"
+ */
+function toSymbolWikiLink(relPath: string, symbolName: string, prefix = MIRROR_PREFIX): string {
+  const fileLink = toWikiLink(relPath, prefix);
+  return `${fileLink}/${sanitizeSymbolName(symbolName)}`;
 }
 
 /**
@@ -722,7 +737,8 @@ function generateSymbolNote(file: FileData, exp: ExportInfo, today: string, pref
     lines.push("```", "");
   }
 
-  // Per-function calls (only for function/class)
+  // Per-function calls (only for function/class) — emit symbol-level wikilinks
+  // so the graph indexer creates proper tier-1→tier-1 CALLS edges.
   if (exp.kind === "function" || exp.kind === "class") {
     const fn = file.functions.find((f) => f.name === exp.name);
     if (fn) {
@@ -731,25 +747,39 @@ function generateSymbolNote(file: FileData, exp: ExportInfo, today: string, pref
       );
       if (ownCalls.length) {
         lines.push("## Calls Into", "");
-        const bySource = new Map<string, string[]>();
+        // Deduplicate by callee symbol name (same symbol may be matched from multiple source files)
+        const seen = new Set<string>();
         for (const c of ownCalls) {
-          if (!bySource.has(c.sourceFile)) bySource.set(c.sourceFile, []);
-          bySource.get(c.sourceFile)!.push(c.calleeName);
-        }
-        for (const [srcFile, names] of bySource) {
-          lines.push(`- [[${toWikiLink(srcFile, prefix)}]] — \`${names.join("`, `")}\``);
+          const symLink = toSymbolWikiLink(c.sourceFile, c.calleeName, prefix);
+          if (seen.has(symLink)) continue;
+          seen.add(symLink);
+          lines.push(`- [[${symLink}|${c.calleeName}]]`);
         }
         lines.push("");
       }
     }
   }
 
-  // Call-ins for this specific symbol
+  // Call-ins for this specific symbol — emit symbol-level wikilinks
+  // so the graph indexer creates proper tier-1→tier-1 CALLS edges (reverse direction).
   const callers = file.callIns.filter((c) => c.calledName === exp.name);
   if (callers.length) {
     lines.push("## Called By", "");
+    const seen = new Set<string>();
     for (const c of callers) {
-      lines.push(`- [[${toWikiLink(c.callerFile, prefix)}]]`);
+      if (c.callerName) {
+        // Link to the specific caller symbol (tier-1 → tier-1)
+        const symLink = toSymbolWikiLink(c.callerFile, c.callerName, prefix);
+        if (seen.has(symLink)) continue;
+        seen.add(symLink);
+        lines.push(`- [[${symLink}|${c.callerName}]]`);
+      } else {
+        // Fallback: link to the caller file (tier-2) if we can't attribute to a function
+        const fileLink = toWikiLink(c.callerFile, prefix);
+        if (seen.has(fileLink)) continue;
+        seen.add(fileLink);
+        lines.push(`- [[${fileLink}]]`);
+      }
     }
     lines.push("");
   }

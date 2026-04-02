@@ -81,6 +81,75 @@ class BuildGraphStoreEdgeLabelTests(unittest.TestCase):
         self.assertEqual(missing, set())
 
 
+    def test_symbol_level_calls_produce_calls_edges(self):
+        """When tier-1 notes link to other tier-1 notes (symbol-level wikilinks),
+        the indexer should create CALLS edges, not LINKS_TO.
+
+        This validates the symbol-centric graph model where mirror-codebase.ts
+        emits wikilinks like [[code/ws/file/calleeName]] instead of [[code/ws/file]].
+        """
+        # functionA calls functionB (both tier-1 symbols)
+        fn_a = _note(
+            "code/ws/file1/functionA.md",
+            note_type="codeSymbol",
+            tier="1",
+            parent_file="code/ws/file1",
+            links_out=["code/ws/file2/functionB"],  # symbol-level link!
+        )
+        fn_b = _note(
+            "code/ws/file2/functionB.md",
+            note_type="codeSymbol",
+            tier="1",
+            parent_file="code/ws/file2",
+        )
+        file1 = _note("code/ws/file1.md", note_type="codeUnit", tier="2")
+        file2 = _note("code/ws/file2.md", note_type="codeUnit", tier="2")
+
+        notes = [fn_a, fn_b, file1, file2]
+        notes_by_id = {n.note_id: n for n in notes}
+        store = _build_graph_store(notes, notes_by_id)
+
+        triplets = store.graph.get_triplets()
+        edges = {(s.name, r.label, t.name) for (s, r, t) in triplets}
+
+        # The critical assertion: symbol→symbol link = CALLS, not LINKS_TO
+        self.assertIn(
+            ("code/ws/file1/functionA.md", "CALLS", "code/ws/file2/functionB.md"),
+            edges,
+        )
+        # Should NOT have a LINKS_TO for this edge
+        self.assertNotIn(
+            ("code/ws/file1/functionA.md", "LINKS_TO", "code/ws/file2/functionB.md"),
+            edges,
+        )
+
+    def test_symbol_to_file_cross_tier_still_links_to(self):
+        """When a tier-1 note links to a tier-2 note (old-style file link),
+        it should still produce a LINKS_TO edge (not CALLS)."""
+        fn_a = _note(
+            "code/ws/file1/functionA.md",
+            note_type="codeSymbol",
+            tier="1",
+            parent_file="code/ws/file1",
+            links_out=["code/ws/file2"],  # file-level link (cross-tier)
+        )
+        file1 = _note("code/ws/file1.md", note_type="codeUnit", tier="2")
+        file2 = _note("code/ws/file2.md", note_type="codeUnit", tier="2")
+
+        notes = [fn_a, file1, file2]
+        notes_by_id = {n.note_id: n for n in notes}
+        store = _build_graph_store(notes, notes_by_id)
+
+        triplets = store.graph.get_triplets()
+        edges = {(s.name, r.label, t.name) for (s, r, t) in triplets}
+
+        # Cross-tier = LINKS_TO
+        self.assertIn(
+            ("code/ws/file1/functionA.md", "LINKS_TO", "code/ws/file2.md"),
+            edges,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
 
